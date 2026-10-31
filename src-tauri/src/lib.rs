@@ -13,6 +13,10 @@ mod focus;
 #[cfg(desktop)]
 mod forwarder;
 #[cfg(desktop)]
+mod remote;
+#[cfg(desktop)]
+mod runner;
+#[cfg(desktop)]
 mod tray;
 
 #[cfg(desktop)]
@@ -21,6 +25,7 @@ mod desktop {
     use crate::collector::{self, CollectorStatus};
     use crate::config::{self, Config, SharedConfig};
     use crate::forwarder::{ForwardStatus, Forwarder};
+    use crate::remote::{self, RemoteStatus, Status as RemoteInfo};
     use crate::{codex, focus, tray};
     use serde::Serialize;
     use std::path::PathBuf;
@@ -35,6 +40,7 @@ mod desktop {
         config_path: PathBuf,
         forwarder: Forwarder,
         collector: CollectorStatus,
+        remote: RemoteStatus,
     }
 
     #[derive(Serialize)]
@@ -64,6 +70,11 @@ mod desktop {
             forward: state.forwarder.status(),
             port: collector::PORT,
         }
+    }
+
+    #[tauri::command]
+    fn remote_status(state: State<AppState>) -> RemoteInfo {
+        state.remote.lock().unwrap().clone()
     }
 
     #[tauri::command]
@@ -149,6 +160,7 @@ mod desktop {
                 get_config,
                 set_config,
                 get_status,
+                remote_status,
                 claude_hooks_status,
                 install_claude_hooks,
                 uninstall_claude_hooks,
@@ -166,7 +178,8 @@ mod desktop {
                 }
                 collector::spawn(forwarder.clone(), collector_status.clone());
                 codex::spawn(forwarder.clone());
-                app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status });
+                let remote_status = remote::spawn(shared.clone());
+                app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
                 build_tray(app.handle())?;
                 if silent {
                     if let Some(w) = app.get_webview_window("main") {

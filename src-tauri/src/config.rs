@@ -11,11 +11,25 @@ pub struct Config {
     pub token: String,
     pub machine: String,
     pub notify_desktop: bool,
+    /// 远程控制密钥（和服务端 AGENTHUB_CONTROL_TOKEN 一致）
+    pub control_token: String,
+    /// 允许手机远程执行的项目目录（会话 cwd 必须在其中某一项之下）
+    pub allowed_roots: Vec<String>,
+    /// 总开关：关闭时不连服务端的执行器通道
+    pub remote_enabled: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { server_url: String::new(), token: String::new(), machine: hostname(), notify_desktop: true }
+        Config {
+            server_url: String::new(),
+            token: String::new(),
+            machine: hostname(),
+            notify_desktop: true,
+            control_token: String::new(),
+            allowed_roots: Vec::new(),
+            remote_enabled: false,
+        }
     }
 }
 
@@ -60,7 +74,15 @@ mod tests {
     fn roundtrip_and_defaults() {
         let dir = std::env::temp_dir().join(format!("agenthub-cfg-{}", std::process::id()));
         let p = config_path(dir.clone());
-        let c = Config { server_url: "http://x".into(), token: "t".into(), machine: "m".into(), notify_desktop: false };
+        let c = Config {
+            server_url: "http://x".into(),
+            token: "t".into(),
+            machine: "m".into(),
+            notify_desktop: false,
+            control_token: "c".into(),
+            allowed_roots: vec!["D:/Tmp".into()],
+            remote_enabled: true,
+        };
         save(&p, &c).unwrap();
         assert_eq!(load(&p), c);
         // 缺字段用默认值，machine 为空时回落主机名
@@ -68,6 +90,8 @@ mod tests {
         let d = load(&p);
         assert_eq!(d.server_url, "http://y");
         assert!(d.notify_desktop);
+        assert!(!d.remote_enabled);
+        assert!(d.allowed_roots.is_empty() && d.control_token.is_empty());
         assert!(!d.machine.is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
