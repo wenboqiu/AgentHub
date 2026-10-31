@@ -198,7 +198,12 @@ class AgentHubService : Service() {
     } catch (e: Exception) {
       return
     }
-    if (msg.optString("type") != "session") return
+    val type = msg.optString("type")
+    if (type == "approval") {
+      handleApproval(msg)
+      return
+    }
+    if (type != "session") return
     val s = msg.optJSONObject("session") ?: return
     val id = s.optString("id")
     if (id.isEmpty()) return
@@ -221,6 +226,32 @@ class AgentHubService : Service() {
     val n = NotificationCompat.Builder(this, CH_ALERTS)
       .setSmallIcon(R.drawable.ic_stat)
       .setContentTitle("$project · $agent $state")
+      .setContentText(body)
+      .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+      .setAutoCancel(true)
+      .setContentIntent(openAppIntent())
+      .build()
+    nm.notify(id.hashCode(), n)
+  }
+
+  // 授权请求：新建 pending 时弹通知（点击打开 App 去批）；之后不再 pending（已处理 / 过期）就取消
+  private fun handleApproval(msg: JSONObject) {
+    val a = msg.optJSONObject("approval") ?: return
+    val id = a.optString("id")
+    if (id.isEmpty()) return
+    val nm = getSystemService(NotificationManager::class.java)
+    if (a.optString("status") != "pending") {
+      nm.cancel(id.hashCode())
+      return
+    }
+    if (!msg.optBoolean("notify", false)) return
+    val project = a.optString("project").ifEmpty { "AgentHub" }
+    val body = (a.optString("tool") + " " + a.optString("detail")).take(80)
+    val n = NotificationCompat.Builder(this, CH_ALERTS)
+      .setSmallIcon(R.drawable.ic_stat)
+      .setContentTitle("$project · 请求授权")
       .setContentText(body)
       .setStyle(NotificationCompat.BigTextStyle().bigText(body))
       .setPriority(NotificationCompat.PRIORITY_HIGH)
