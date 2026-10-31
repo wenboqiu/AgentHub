@@ -1,0 +1,7 @@
+Use case: logo-brand
+Asset type: production app icon for AgentHub, a Windows and Android app that monitors multiple coding-agent sessions in one hub and notifies when they need attention.
+Primary request: Create one polished, distinctive square application icon with a single bold central hub symbol connecting three satellite nodes, subtly evoking an uppercase A through its overall arrangement. The hub concept must read immediately at small sizes. Preserve the project's existing cobalt-blue visual identity (#2d5ac8).
+Style/medium: refined contemporary app icon, softly sculpted solid forms, very restrained depth and soft highlights, crisp clean silhouette, professional developer utility. One unified white hub-and-connections glyph, three substantial rounded nodes; no thin circuit traces. A tiny warm amber status accent integrated into one node.
+Composition/framing: straight-on orthographic, one centered icon only. Cobalt blue rounded-square tile fills roughly 90 percent of a square 1024x1024 canvas; transparent exterior corners. Main white glyph occupies 62 percent of canvas with generous negative space. Bold geometry that stays legible at 32px.
+Scene/backdrop: blue rounded-square tile, subtle tonal depth; genuinely transparent outside tile.
+Constraints: no words, no letters as typography, no captions, no watermark, no border, no mockup, no multiple options, no surrounding objects, no robots or faces, no existing company logos, no starbursts, no busy detail. Deliver a finished icon image.
