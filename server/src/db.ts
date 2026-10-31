@@ -41,8 +41,45 @@ export function createPool(url: string) {
 }
 
 async function migrateAll(pool: { query: pg.Pool['query'] }) {
+  await pool.query(`CREATE TABLE IF NOT EXISTS users (
+    id bigserial primary key,
+    email text unique not null,
+    password_hash text not null,
+    created_at timestamptz not null default now()
+  )`)
+  await pool.query(`CREATE TABLE IF NOT EXISTS auth_sessions (
+    id bigserial primary key,
+    token_hash text unique not null,
+    user_id bigint not null references users(id) on delete cascade,
+    device text not null default '',
+    created_at timestamptz not null default now(),
+    last_used_at timestamptz not null default now()
+  )`)
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id)')
+  // 旧版（0.2 及以前）的状态表没有 user_id：里面只有临时数据，直接丢掉重建
+  const old = await pool.query(
+    `SELECT 1 FROM information_schema.tables t WHERE t.table_schema = current_schema() AND t.table_name = 'sessions'
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema = t.table_schema AND c.table_name = 'sessions' AND c.column_name = 'user_id')`,
+  )
+  if (old.rowCount) {
+    await pool.query('BEGIN')
+    try {
+      await pool.query('DROP TABLE IF EXISTS approvals, messages, runs, sessions')
+      await createStateTables(pool)
+      await pool.query('COMMIT')
+    } catch (e) {
+      await pool.query('ROLLBACK').catch(() => {})
+      throw e
+    }
+    return
+  }
+  await createStateTables(pool)
+}
+
+async function createStateTables(pool: { query: pg.Pool['query'] }) {
   await pool.query(`CREATE TABLE IF NOT EXISTS sessions (
-    id text primary key,
+    user_id bigint not null references users(id) on delete cascade,
+    id text not null,
     agent text not null,
     machine text not null,
     cwd text not null default '',
@@ -54,11 +91,13 @@ async function migrateAll(pool: { query: pg.Pool['query'] }) {
     acked boolean not null default true,
     pid integer,
     event_at timestamptz not null,
-    updated_at timestamptz not null default now()
+    updated_at timestamptz not null default now(),
+    primary key (user_id, id)
   )`)
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC)')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(user_id, updated_at DESC)')
   await pool.query(`CREATE TABLE IF NOT EXISTS runs (
     id text primary key,
+    user_id bigint not null references users(id) on delete cascade,
     session_id text not null,
     machine text not null,
     status text not null,
@@ -66,18 +105,20 @@ async function migrateAll(pool: { query: pg.Pool['query'] }) {
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now()
   )`)
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, created_at DESC)')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(user_id, session_id, created_at DESC)')
   await pool.query(`CREATE TABLE IF NOT EXISTS messages (
     id bigserial primary key,
+    user_id bigint not null references users(id) on delete cascade,
     session_id text not null,
     run_id text,
     role text not null,
     text text not null,
     created_at timestamptz not null default now()
   )`)
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(user_id, session_id, id)')
   await pool.query(`CREATE TABLE IF NOT EXISTS approvals (
     id text primary key,
+    user_id bigint not null references users(id) on delete cascade,
     run_id text not null,
     session_id text not null,
     tool text not null,
@@ -86,7 +127,7 @@ async function migrateAll(pool: { query: pg.Pool['query'] }) {
     created_at timestamptz not null default now(),
     decided_at timestamptz
   )`)
-  await pool.query('CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(session_id, status)')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(user_id, session_id, status)')
 }
 
 // 多个进程同时启动（或测试并行）时，CREATE TABLE IF NOT EXISTS 会互相撞，用 advisory lock 串行
@@ -144,10 +185,10 @@ export function projectOf(cwd: string) {
 export type EventResult = { session: Session; notify: boolean } | null
 
 // 一个事件的状态流转。返回 null 表示被丢弃（乱序旧事件）
-export async function applyEvent(pool: pg.Pool, ev: EventIn): Promise<EventResult> {
+export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Promise<EventResult> {
   const id = `${ev.agent}:${ev.sessionId}`
   const at = new Date(ev.at)
-  const cur = (await pool.query<Row>('SELECT * FROM sessions WHERE id = $1', [id])).rows[0]
+  const cur = (await pool.query<Row>('SELECT * FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])).rows[0]
   if (cur && at.getTime() < cur.event_at.getTime()) return null
 
   const quiet = ev.quiet === true
@@ -169,38 +210,38 @@ export async function applyEvent(pool: pg.Pool, ev: EventIn): Promise<EventResul
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
   const row = (
     await pool.query<Row>(
-      `INSERT INTO sessions (id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
-       ON CONFLICT (id) DO UPDATE SET machine=$3, cwd=$4, project=$5, title=$6, state=$7, summary=$8,
+      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
+       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+       ON CONFLICT (user_id, id) DO UPDATE SET machine=$3, cwd=$4, project=$5, title=$6, state=$7, summary=$8,
          state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now()
        RETURNING *`,
-      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at],
+      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId],
     )
   ).rows[0]
   return { session: toSession(row), notify }
 }
 
-export async function listSessions(pool: pg.Pool, all: boolean): Promise<Session[]> {
-  const where = all ? '' : "WHERE state <> 'ended' AND updated_at > now() - interval '24 hours'"
-  const r = await pool.query<Row>(`SELECT * FROM sessions ${where} ORDER BY updated_at DESC`)
+export async function listSessions(pool: pg.Pool, userId: number, all: boolean): Promise<Session[]> {
+  const where = all ? '' : "AND state <> 'ended' AND updated_at > now() - interval '24 hours'"
+  const r = await pool.query<Row>(`SELECT * FROM sessions WHERE user_id = $1 ${where} ORDER BY updated_at DESC`, [userId])
   return r.rows.map(toSession)
 }
 
-export async function ackSession(pool: pg.Pool, id: string): Promise<Session | null> {
-  const r = await pool.query<Row>('UPDATE sessions SET acked = true WHERE id = $1 RETURNING *', [id])
+export async function ackSession(pool: pg.Pool, userId: number, id: string): Promise<Session | null> {
+  const r = await pool.query<Row>('UPDATE sessions SET acked = true WHERE user_id = $1 AND id = $2 RETURNING *', [userId, id])
   return r.rows[0] ? toSession(r.rows[0]) : null
 }
 
-export async function ackAll(pool: pg.Pool): Promise<Session[]> {
-  const r = await pool.query<Row>('UPDATE sessions SET acked = true WHERE acked = false RETURNING *')
+export async function ackAll(pool: pg.Pool, userId: number): Promise<Session[]> {
+  const r = await pool.query<Row>('UPDATE sessions SET acked = true WHERE user_id = $1 AND acked = false RETURNING *', [userId])
   return r.rows.map(toSession)
 }
 
-export async function removeSession(pool: pg.Pool, id: string): Promise<boolean> {
-  const r = await pool.query('DELETE FROM sessions WHERE id = $1', [id])
-  await pool.query('DELETE FROM messages WHERE session_id = $1', [id])
-  await pool.query('DELETE FROM approvals WHERE session_id = $1', [id])
-  await pool.query('DELETE FROM runs WHERE session_id = $1', [id])
+export async function removeSession(pool: pg.Pool, userId: number, id: string): Promise<boolean> {
+  const r = await pool.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])
+  await pool.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, id])
+  await pool.query('DELETE FROM approvals WHERE user_id = $1 AND session_id = $2', [userId, id])
+  await pool.query('DELETE FROM runs WHERE user_id = $1 AND session_id = $2', [userId, id])
   return (r.rowCount ?? 0) > 0
 }
 
@@ -208,11 +249,12 @@ export async function purgeOld(pool: pg.Pool): Promise<number> {
   const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '7 days'")
   await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '7 days'")
   await pool.query("DELETE FROM approvals WHERE created_at < now() - interval '7 days'")
+  await pool.query("DELETE FROM auth_sessions WHERE last_used_at < now() - interval '180 days'")
   return r.rowCount ?? 0
 }
 
-export async function getSession(pool: pg.Pool, id: string): Promise<Session | null> {
-  const r = await pool.query<Row>('SELECT * FROM sessions WHERE id = $1', [id])
+export async function getSession(pool: pg.Pool, userId: number, id: string): Promise<Session | null> {
+  const r = await pool.query<Row>('SELECT * FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])
   return r.rows[0] ? toSession(r.rows[0]) : null
 }
 
@@ -284,66 +326,67 @@ export function cleanText(v: string, max: number) {
   return v.replaceAll('\0', '').slice(0, max)
 }
 
-export async function createRun(pool: pg.Pool, id: string, sessionId: string, machine: string): Promise<Run> {
-  const r = await pool.query<RunRow>("INSERT INTO runs (id, session_id, machine, status) VALUES ($1,$2,$3,'queued') RETURNING *", [id, sessionId, machine])
+export async function createRun(pool: pg.Pool, userId: number, id: string, sessionId: string, machine: string): Promise<Run> {
+  const r = await pool.query<RunRow>("INSERT INTO runs (id, user_id, session_id, machine, status) VALUES ($1,$4,$2,$3,'queued') RETURNING *", [id, sessionId, machine, userId])
   return toRun(r.rows[0])
 }
 
-export async function getRun(pool: pg.Pool, id: string): Promise<Run | null> {
-  const r = await pool.query<RunRow>('SELECT * FROM runs WHERE id = $1', [id])
+export async function getRun(pool: pg.Pool, userId: number, id: string): Promise<Run | null> {
+  const r = await pool.query<RunRow>('SELECT * FROM runs WHERE user_id = $1 AND id = $2', [userId, id])
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 
-export async function activeRun(pool: pg.Pool, sessionId: string): Promise<Run | null> {
-  const r = await pool.query<RunRow>("SELECT * FROM runs WHERE session_id = $1 AND status IN ('queued','running') LIMIT 1", [sessionId])
+export async function activeRun(pool: pg.Pool, userId: number, sessionId: string): Promise<Run | null> {
+  const r = await pool.query<RunRow>("SELECT * FROM runs WHERE user_id = $1 AND session_id = $2 AND status IN ('queued','running') LIMIT 1", [userId, sessionId])
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 
-export async function latestRun(pool: pg.Pool, sessionId: string): Promise<Run | null> {
-  const r = await pool.query<RunRow>('SELECT * FROM runs WHERE session_id = $1 ORDER BY created_at DESC LIMIT 1', [sessionId])
+export async function latestRun(pool: pg.Pool, userId: number, sessionId: string): Promise<Run | null> {
+  const r = await pool.query<RunRow>('SELECT * FROM runs WHERE user_id = $1 AND session_id = $2 ORDER BY created_at DESC LIMIT 1', [userId, sessionId])
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 
-export async function setRunStatus(pool: pg.Pool, id: string, status: RunStatus, error = ''): Promise<Run | null> {
-  const r = await pool.query<RunRow>('UPDATE runs SET status = $2, error = $3, updated_at = now() WHERE id = $1 RETURNING *', [id, status, cleanText(error, 1000)])
+export async function setRunStatus(pool: pg.Pool, userId: number, id: string, status: RunStatus, error = ''): Promise<Run | null> {
+  const r = await pool.query<RunRow>('UPDATE runs SET status = $2, error = $3, updated_at = now() WHERE user_id = $4 AND id = $1 RETURNING *', [id, status, cleanText(error, 1000), userId])
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 
 // 执行器断线：它名下 queued/running 的 run 全部标 failed
-export async function failActiveRuns(pool: pg.Pool, machine: string, error: string): Promise<Run[]> {
+export async function failActiveRuns(pool: pg.Pool, userId: number, machine: string, error: string): Promise<Run[]> {
   const r = await pool.query<RunRow>(
-    "UPDATE runs SET status = 'failed', error = $2, updated_at = now() WHERE machine = $1 AND status IN ('queued','running') RETURNING *",
-    [machine, error],
+    "UPDATE runs SET status = 'failed', error = $2, updated_at = now() WHERE user_id = $3 AND machine = $1 AND status IN ('queued','running') RETURNING *",
+    [machine, error, userId],
   )
   return r.rows.map(toRun)
 }
 
 // 排序按 created_at、id；每个会话只留最近 KEEP_MESSAGES 条
-async function trimMessages(pool: pg.Pool, sessionId: string) {
+async function trimMessages(pool: pg.Pool, userId: number, sessionId: string) {
   await pool.query(
-    `DELETE FROM messages WHERE session_id = $1 AND id NOT IN (
-       SELECT id FROM messages WHERE session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2)`,
-    [sessionId, KEEP_MESSAGES],
+    `DELETE FROM messages WHERE user_id = $3 AND session_id = $1 AND id NOT IN (
+       SELECT id FROM messages WHERE user_id = $3 AND session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2)`,
+    [sessionId, KEEP_MESSAGES, userId],
   )
 }
 
-export async function insertMessage(pool: pg.Pool, sessionId: string, runId: string | null, role: MessageRole, text: string): Promise<Message> {
+export async function insertMessage(pool: pg.Pool, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string): Promise<Message> {
   // 数据库主机校时时可能回拨；新消息不能排到已有消息之前（同时间用 id 排序）。
-  const r = await pool.query<MessageRow>(`INSERT INTO messages (session_id, run_id, role, text, created_at)
-    VALUES ($1,$2,$3,$4,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE session_id = $1))) RETURNING *`, [
+  const r = await pool.query<MessageRow>(`INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
+    VALUES ($5,$1,$2,$3,$4,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE user_id = $5 AND session_id = $1))) RETURNING *`, [
     sessionId,
     runId,
     role,
     cleanText(text, 4000),
+    userId,
   ])
-  await trimMessages(pool, sessionId)
+  await trimMessages(pool, userId, sessionId)
   return toMessage(r.rows[0])
 }
 
 // 历史记录：run_id 为 null，跳过和已有消息（同角色同文本）完全重复的；
 // created_at 排在现有最早消息之前，这样详情页里历史在新对话上面
-export async function insertHistory(pool: pg.Pool, sessionId: string, items: { role: string; text: string }[]): Promise<Message[]> {
-  const existing = await pool.query<{ role: string; text: string }>('SELECT role, text FROM messages WHERE session_id = $1', [sessionId])
+export async function insertHistory(pool: pg.Pool, userId: number, sessionId: string, items: { role: string; text: string }[]): Promise<Message[]> {
+  const existing = await pool.query<{ role: string; text: string }>('SELECT role, text FROM messages WHERE user_id = $1 AND session_id = $2', [userId, sessionId])
   const seen = new Set(existing.rows.map(r => `${r.role}\u0001${r.text}`))
   const fresh: { role: string; text: string }[] = []
   for (const it of items) {
@@ -357,61 +400,61 @@ export async function insertHistory(pool: pg.Pool, sessionId: string, items: { r
   const n = fresh.length
   for (let i = 0; i < n; i++) {
     const r = await pool.query<MessageRow>(
-      `INSERT INTO messages (session_id, run_id, role, text, created_at)
-       VALUES ($1, null, $2, $3, COALESCE((SELECT min(created_at) FROM messages WHERE session_id = $1), now()) - ($4 * interval '1 millisecond'))
+      `INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
+       VALUES ($5, $1, null, $2, $3, COALESCE((SELECT min(created_at) FROM messages WHERE user_id = $5 AND session_id = $1), now()) - ($4 * interval '1 millisecond'))
        RETURNING *`,
-      [sessionId, fresh[i].role, fresh[i].text, n - i],
+      [sessionId, fresh[i].role, fresh[i].text, n - i, userId],
     )
     out.push(toMessage(r.rows[0]))
   }
-  await trimMessages(pool, sessionId)
+  await trimMessages(pool, userId, sessionId)
   return out
 }
 
-export async function listMessages(pool: pg.Pool, sessionId: string, limit: number): Promise<Message[]> {
+export async function listMessages(pool: pg.Pool, userId: number, sessionId: string, limit: number): Promise<Message[]> {
   const r = await pool.query<MessageRow>(
-    'SELECT * FROM (SELECT * FROM messages WHERE session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) t ORDER BY created_at ASC, id ASC',
-    [sessionId, limit],
+    'SELECT * FROM (SELECT * FROM messages WHERE user_id = $3 AND session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) t ORDER BY created_at ASC, id ASC',
+    [sessionId, limit, userId],
   )
   return r.rows.map(toMessage)
 }
 
-export async function createApproval(pool: pg.Pool, id: string, runId: string, sessionId: string, tool: string, detail: string): Promise<Approval> {
+export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string): Promise<Approval> {
   const r = await pool.query<ApprovalRow>(
-    "INSERT INTO approvals (id, run_id, session_id, tool, detail, status) VALUES ($1,$2,$3,$4,$5,'pending') RETURNING *",
-    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 1000)],
+    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status) VALUES ($1,$6,$2,$3,$4,$5,'pending') RETURNING *",
+    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 1000), userId],
   )
   return toApproval(r.rows[0])
 }
 
-export async function getApproval(pool: pg.Pool, id: string): Promise<Approval | null> {
-  const r = await pool.query<ApprovalRow>('SELECT * FROM approvals WHERE id = $1', [id])
+export async function getApproval(pool: pg.Pool, userId: number, id: string): Promise<Approval | null> {
+  const r = await pool.query<ApprovalRow>('SELECT * FROM approvals WHERE user_id = $1 AND id = $2', [userId, id])
   return r.rows[0] ? toApproval(r.rows[0]) : null
 }
 
 // 只有 pending 才能被决定；返回 null 表示已经不是 pending
-export async function decideApproval(pool: pg.Pool, id: string, status: 'allowed' | 'denied'): Promise<Approval | null> {
-  const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = $2, decided_at = now() WHERE id = $1 AND status = 'pending' RETURNING *", [id, status])
+export async function decideApproval(pool: pg.Pool, userId: number, id: string, status: 'allowed' | 'denied'): Promise<Approval | null> {
+  const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = $2, decided_at = now() WHERE user_id = $3 AND id = $1 AND status = 'pending' RETURNING *", [id, status, userId])
   return r.rows[0] ? toApproval(r.rows[0]) : null
 }
 
-export async function expireApprovalsOfRuns(pool: pg.Pool, runIds: string[]): Promise<Approval[]> {
+export async function expireApprovalsOfRuns(pool: pg.Pool, userId: number, runIds: string[]): Promise<Approval[]> {
   if (!runIds.length) return []
-  const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = 'expired', decided_at = now() WHERE run_id = ANY($1) AND status = 'pending' RETURNING *", [runIds])
+  const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = 'expired', decided_at = now() WHERE user_id = $2 AND run_id = ANY($1) AND status = 'pending' RETURNING *", [runIds, userId])
   return r.rows.map(toApproval)
 }
 
-export async function expireApproval(pool: pg.Pool, id: string, runId: string): Promise<Approval | null> {
+export async function expireApproval(pool: pg.Pool, userId: number, id: string, runId: string): Promise<Approval | null> {
   const r = await pool.query<ApprovalRow>(
-    "UPDATE approvals SET status = 'expired', decided_at = now() WHERE id = $1 AND run_id = $2 AND status = 'pending' RETURNING *",
-    [id, runId],
+    "UPDATE approvals SET status = 'expired', decided_at = now() WHERE user_id = $3 AND id = $1 AND run_id = $2 AND status = 'pending' RETURNING *",
+    [id, runId, userId],
   )
   return r.rows[0] ? toApproval(r.rows[0]) : null
 }
 
-export async function pendingApprovals(pool: pg.Pool, sessionId?: string): Promise<Approval[]> {
+export async function pendingApprovals(pool: pg.Pool, userId: number, sessionId?: string): Promise<Approval[]> {
   const r = sessionId
-    ? await pool.query<ApprovalRow>("SELECT * FROM approvals WHERE status = 'pending' AND session_id = $1 ORDER BY created_at", [sessionId])
-    : await pool.query<ApprovalRow>("SELECT * FROM approvals WHERE status = 'pending' ORDER BY created_at")
+    ? await pool.query<ApprovalRow>("SELECT * FROM approvals WHERE user_id = $1 AND status = 'pending' AND session_id = $2 ORDER BY created_at", [userId, sessionId])
+    : await pool.query<ApprovalRow>("SELECT * FROM approvals WHERE user_id = $1 AND status = 'pending' ORDER BY created_at", [userId])
   return r.rows.map(toApproval)
 }

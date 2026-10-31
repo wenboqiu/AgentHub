@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>AgentHub · 管理</title>
+<style>
+  :root {
+    --bg: #f5f5f7; --card: #fff; --text: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea;
+    --accent: #2f6fd6; --accent-soft: #e6eefb; --danger: #c4352b; --danger-soft: #fbe9e7;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #000; --card: #1c1c1e; --text: #f5f5f7; --muted: #98989d; --line: #38383a;
+      --accent: #6ea2f0; --accent-soft: #17263d; --danger: #ff6b5e; --danger-soft: #3a1a17; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  button, input { font: inherit; color: inherit; }
+  button { border: 0; border-radius: 8px; padding: 6px 12px; background: var(--line); cursor: pointer; white-space: nowrap; }
+  button.primary { background: var(--accent); color: #fff; }
+  button.danger { background: var(--danger-soft); color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  input { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; background: var(--card); min-width: 0; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 20px 16px 60px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  header h1 { font-size: 20px; margin: 0; flex: 1; }
+  .card { background: var(--card); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .table { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .err { color: var(--danger); margin: 8px 0; }
+  .login { max-width: 380px; margin: 15vh auto 0; }
+  .login form { display: flex; flex-direction: column; gap: 10px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  .sub { background: var(--accent-soft); }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 8px 16px; border-radius: 999px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  .toast.show { opacity: .92; }
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<div class="toast" id="toast"></div>
+<script>
+'use strict'
+// 令牌只放 sessionStorage：关掉标签页就要重新输入
+const KEY = 'agenthub.adminToken'
+let token = ''
+try { token = sessionStorage.getItem(KEY) || '' } catch {}
+const app = document.getElementById('app')
+// 展开了设备列表的用户
+const open = new Set()
+
+// 用 textContent 拼 DOM，邮箱 / 设备名是用户输入，不能当 HTML
+function h(tag, props, ...children) {
+  const el = document.createElement(tag)
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v == null || v === false) continue
+    if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
+    else if (k === 'class') el.className = v
+    else if (k === 'style') el.setAttribute('style', v)
+    else if (k in el) el[k] = v
+    else el.setAttribute(k, v)
+  }
+  for (const c of children.flat()) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c))
+  return el
+}
+
+const pad = n => String(n).padStart(2, '0')
+const time = t => {
+  if (!t) return '—'
+  const d = new Date(t)
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast')
+  el.textContent = msg
+  el.classList.add('show')
+  clearTimeout(toast.t)
+  toast.t = setTimeout(() => el.classList.remove('show'), 2200)
+}
+
+async function api(method, path, body) {
+  const res = await fetch('/admin' + path, {
+    method,
+    headers: { Authorization: 'Bearer ' + token, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const json = await res.json().catch(() => ({}))
+  if (res.status === 401) { logout(); throw new Error(json.error || '令牌不对') }
+  if (!res.ok) throw new Error(json.error || '请求失败：' + res.status)
+  return json
+}
+
+function logout() {
+  token = ''
+  try { sessionStorage.removeItem(KEY) } catch {}
+  renderLogin()
+}
+
+function randomPassword() {
+  const abc = 'ABCDEFGHJKMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+  return Array.from(crypto.getRandomValues(new Uint32Array(12)), n => abc[n % abc.length]).join('')
+}
+
+function renderLogin(error) {
+  const input = h('input', { type: 'password', placeholder: 'ADMIN_TOKEN', autocomplete: 'current-password', required: true, autofocus: true })
+  const err = h('div', { class: 'err' }, error || '')
+  app.replaceChildren(h('div', { class: 'login card' },
+    h('h2', {}, 'AgentHub · 管理后台'),
+    h('form', {
+      onsubmit: async e => {
+        e.preventDefault()
+        token = input.value.trim()
+        try {
+          await api('GET', '/users')
+          try { sessionStorage.setItem(KEY, token) } catch {}
+          renderList()
+        } catch (x) { renderLogin(x.message) }
+      },
+    }, input, err, h('button', { class: 'primary', type: 'submit' }, '进入')),
+  ))
+  input.focus()
+}
+
+function createForm(reload) {
+  const email = h('input', { type: 'email', placeholder: '邮箱', required: true, style: 'width:220px', autocomplete: 'off' })
+  const pwd = h('input', { type: 'text', placeholder: '密码（至少 8 位）', required: true, style: 'width:180px', autocomplete: 'off', spellcheck: false })
+  const rnd = h('button', { type: 'button', onclick: () => { pwd.value = randomPassword(); pwd.select() } }, '随机')
+  const err = h('div', { class: 'err' })
+  return h('form', {
+    class: 'card',
+    onsubmit: async e => {
+      e.preventDefault()
+      err.textContent = ''
+      if (pwd.value.length < 8) return (err.textContent = '密码至少 8 位')
+      try {
+        const u = await api('POST', '/users', { email: email.value, password: pwd.value })
+        toast('已创建 ' + u.email)
+        reload()
+      } catch (x) { err.textContent = x.message }
+    },
+  },
+    h('h2', {}, '新建账号'),
+    h('div', { class: 'actions' }, email, pwd, rnd, h('button', { class: 'primary', type: 'submit' }, '创建')),
+    h('div', { class: 'muted', style: 'margin-top:8px' }, '没有注册入口，账号只能在这里创建。创建后把邮箱和密码告诉用户，在 App 里直接登录。'),
+    err)
+}
+
+async function renderList() {
+  if (!token) return renderLogin()
+  const createBox = h('div')
+  const tbody = h('tbody')
+  app.replaceChildren(
+    h('header', {}, h('h1', {}, 'AgentHub · 管理后台'),
+      h('button', { class: 'primary', onclick: () => createBox.firstChild ? createBox.replaceChildren() : createBox.replaceChildren(createForm(load)) }, '新建账号'),
+      h('button', { onclick: logout }, '退出')),
+    createBox,
+    h('div', { class: 'card' }, h('div', { class: 'table' }, h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, 'ID'), h('th', {}, '邮箱'), h('th', {}, '创建时间'), h('th', {}, '设备'), h('th', {}, '最近使用'), h('th', {}))),
+      tbody))),
+  )
+
+  async function act(fn, done) {
+    try { await fn(); if (done) toast(done); await load() } catch (e) { toast(e.message) }
+  }
+
+  async function devicesRow(u) {
+    const td = h('td', { colSpan: 6, class: 'sub' }, '加载中…')
+    try {
+      const list = await api('GET', `/users/${u.id}/devices`)
+      td.replaceChildren(list.length ? h('table', {},
+        h('thead', {}, h('tr', {}, h('th', {}, '设备'), h('th', {}, '登录时间'), h('th', {}, '最近使用'), h('th', {}))),
+        h('tbody', {}, list.map(d => h('tr', {},
+          h('td', {}, d.device || '未知'), h('td', {}, time(d.createdAt)), h('td', {}, time(d.lastUsedAt)),
+          h('td', {}, h('button', { class: 'danger', onclick: () => act(() => api('DELETE', `/devices/${d.id}`), '已踢掉') }, '踢掉'))))))
+        : h('div', { class: 'empty' }, '没有登录中的设备'))
+    } catch (e) { td.replaceChildren(h('div', { class: 'err' }, e.message)) }
+    return h('tr', {}, td)
+  }
+
+  async function load() {
+    try {
+      const users = await api('GET', '/users')
+      const rows = []
+      for (const u of users) {
+        rows.push(h('tr', {},
+          h('td', { class: 'muted' }, u.id), h('td', {}, u.email), h('td', {}, time(u.createdAt)), h('td', {}, u.devices), h('td', {}, time(u.lastUsedAt)),
+          h('td', {}, h('div', { class: 'actions' },
+            h('button', { onclick: () => { open.has(u.id) ? open.delete(u.id) : open.add(u.id); load() } }, open.has(u.id) ? '收起设备' : '查看设备'),
+            h('button', { onclick: () => {
+              const v = prompt(`给 ${u.email} 设置新密码（至少 8 位），并让它的所有设备退出登录：`, randomPassword())
+              if (v == null) return
+              if (v.length < 8) return toast('密码至少 8 位')
+              act(() => api('POST', `/users/${u.id}/password`, { password: v }), '密码已重置：' + v)
+            } }, '重置密码'),
+            h('button', { class: 'danger', onclick: () => confirm(`删除账号 ${u.email}？它的会话、消息和设备都会被删除，不能恢复。`) && act(() => api('DELETE', `/users/${u.id}`), '账号已删除') }, '删除'))),
+        ))
+        if (open.has(u.id)) rows.push(await devicesRow(u))
+      }
+      tbody.replaceChildren(...(rows.length ? rows : [h('tr', {}, h('td', { colSpan: 6, class: 'empty' }, '还没有账号，点右上角「新建账号」'))]))
+    } catch (e) { tbody.replaceChildren(h('tr', {}, h('td', { colSpan: 6, class: 'err' }, e.message))) }
+  }
+  load()
+}
+
+renderList()
+</script>
+</body>
+</html>

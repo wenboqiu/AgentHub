@@ -1,5 +1,5 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto'
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
+import { randomUUID } from 'node:crypto'
+import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type pg from 'pg'
 import {
   AGENTS,
@@ -33,6 +33,7 @@ import {
   type Run,
   type Session,
 } from './db.ts'
+import { authenticate, type Kick } from './auth.ts'
 
 type Sock = {
   send(data: string): void
@@ -43,8 +44,6 @@ type Sock = {
 }
 
 export type RouteOptions = {
-  token: string
-  controlToken?: string
   // 等执行器返回历史记录的最长时间（毫秒），测试里调短
   historyTimeoutMs?: number
 }
@@ -56,11 +55,10 @@ function bearer(req: FastifyRequest) {
   return h.startsWith('Bearer ') ? h.slice(7) : ''
 }
 
-function safeEqual(a: string, b: string) {
-  const x = Buffer.from(a)
-  const y = Buffer.from(b)
-  return x.length === y.length && timingSafeEqual(x, y)
-}
+// 一个 WS 连接：属于哪个账号、哪个设备会话（踢设备时按它们关闭）
+type Conn = { sock: Sock; userId: number; authSessionId: number }
+type Exec = Conn & { machine: string }
+const INVALID_LOGIN = 4401
 
 function parseEvent(raw: unknown): EventIn | null {
   if (!raw || typeof raw !== 'object') return null
@@ -86,35 +84,54 @@ function parseEvent(raw: unknown): EventIn | null {
 
 const TERMINAL = ['done', 'failed', 'stopped']
 
-export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions) {
-  const token = opts.token
-  const controlToken = opts.controlToken ?? ''
-  const historyTimeoutMs = opts.historyTimeoutMs ?? 10_000
-  const clients = new Set<Sock>()
-  // machine -> 在线执行器连接
-  const executors = new Map<string, Sock>()
-  // 等待执行器返回的历史请求
-  const historyWaits = new Map<string, { machine: string; resolve: (r: HistoryResult) => void }>()
+const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
-  const broadcast = (msg: unknown) => {
+// 返回 kick：删除设备会话 / 账号后，用它立刻关闭对应的 WS（viewer 和执行器）
+export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions = {}): Kick {
+  const historyTimeoutMs = opts.historyTimeoutMs ?? 10_000
+  const clients = new Set<Conn>()
+  // (userId, machine) -> 在线执行器连接
+  const executors = new Map<string, Exec>()
+  // 等待执行器返回的历史请求
+  const historyWaits = new Map<string, { userId: number; machine: string; resolve: (r: HistoryResult) => void }>()
+
+  // 所有推送都只发给同一账号的 viewer
+  const broadcast = (userId: number, msg: unknown) => {
     const text = JSON.stringify(msg)
-    for (const c of clients) if (c.readyState === 1) c.send(text)
+    for (const c of clients) if (c.userId === userId && c.sock.readyState === 1) c.sock.send(text)
   }
-  const pushSession = (session: Session, notify: boolean) => broadcast({ type: 'session', session, notify })
-  const agentList = () => [...executors.keys()].sort()
-  const pushAgents = () => broadcast({ type: 'agents', agents: agentList() })
-  const sendExecutor = (machine: string, msg: unknown) => {
-    const s = executors.get(machine)
-    if (!s || s.readyState !== 1) return false
-    s.send(JSON.stringify(msg))
+  const pushSession = (userId: number, session: Session, notify: boolean) => broadcast(userId, { type: 'session', session, notify })
+  const agentList = (userId: number) =>
+    [...executors.values()]
+      .filter(e => e.userId === userId)
+      .map(e => e.machine)
+      .sort()
+  const pushAgents = (userId: number) => broadcast(userId, { type: 'agents', agents: agentList(userId) })
+  const sendExecutor = (userId: number, machine: string, msg: unknown) => {
+    const e = executors.get(execKey(userId, machine))
+    if (!e || e.sock.readyState !== 1) return false
+    e.sock.send(JSON.stringify(msg))
     return true
   }
 
   // approval 广播里带上 project，Android 通知用
-  const withProject = async (a: Approval) => ({ ...a, project: (await getSession(pool, a.sessionId))?.project ?? '' })
-  const pushApproval = async (a: Approval, notify: boolean) => broadcast({ type: 'approval', approval: await withProject(a), notify })
-  const pushMessage = (message: Message) => broadcast({ type: 'message', message })
-  const pushRun = (run: Run) => broadcast({ type: 'run', run })
+  const withProject = async (userId: number, a: Approval) => ({ ...a, project: (await getSession(pool, userId, a.sessionId))?.project ?? '' })
+  const pushApproval = async (userId: number, a: Approval, notify: boolean) => broadcast(userId, { type: 'approval', approval: await withProject(userId, a), notify })
+  const pushMessage = (userId: number, message: Message) => broadcast(userId, { type: 'message', message })
+  const pushRun = (userId: number, run: Run) => broadcast(userId, { type: 'run', run })
+
+  const closeWhere = (pred: (c: Conn) => boolean) => {
+    for (const c of [...clients, ...executors.values()]) {
+      if (!pred(c)) continue
+      try {
+        c.sock.close(INVALID_LOGIN, '登录已失效')
+      } catch {}
+    }
+  }
+  const kick: Kick = {
+    authSessions: ids => closeWhere(c => ids.includes(c.authSessionId)),
+    user: userId => closeWhere(c => c.userId === userId),
+  }
 
   // 事件按到达顺序串行处理，避免同一会话并发读写
   let chain: Promise<unknown> = Promise.resolve()
@@ -125,44 +142,37 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
 
   // 执行器掉线（或被新连接顶掉）：它名下的 run 标 failed，pending 授权标 expired
-  async function dropExecutor(machine: string) {
-    const runs = await failActiveRuns(pool, machine, '电脑端断开')
-    for (const r of runs) pushRun(r)
+  async function dropExecutor(userId: number, machine: string) {
+    const runs = await failActiveRuns(pool, userId, machine, '电脑端断开')
+    for (const r of runs) pushRun(userId, r)
     const expired = await expireApprovalsOfRuns(
       pool,
+      userId,
       runs.map(r => r.id),
     )
-    for (const a of expired) await pushApproval(a, false)
+    for (const a of expired) await pushApproval(userId, a, false)
     for (const [id, w] of historyWaits) {
-      if (w.machine === machine) {
+      if (w.userId === userId && w.machine === machine) {
         historyWaits.delete(id)
         w.resolve({ messages: [], error: '电脑端断开' })
       }
     }
   }
 
-  function control(req: FastifyRequest, reply: FastifyReply): boolean {
-    if (!controlToken) {
-      reply.code(403).send({ error: '服务端没有开启远程控制' })
-      return false
-    }
-    const given = req.headers['x-control-token']
-    if (typeof given !== 'string' || !safeEqual(given, controlToken)) {
-      reply.code(403).send({ error: '控制密钥不对' })
-      return false
-    }
-    return true
-  }
-
+  // 鉴权：/health、/auth/login、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）免登录；其它都要设备会话 token
+  app.decorateRequest('userId', 0)
+  app.decorateRequest('authSessionId', 0)
   app.addHook('onRequest', async (req, reply) => {
-    if (req.method === 'OPTIONS') return
-    if (req.url === '/health' || req.url.startsWith('/health?')) return
-    if (req.url.startsWith('/ws')) {
-      const t = new URL(req.url, 'http://x').searchParams.get('token')
-      if (t !== token) return reply.code(401).send({ error: 'unauthorized' })
-      return
-    }
-    if (bearer(req) !== token) return reply.code(401).send({ error: 'unauthorized' })
+    // 没有对应路由的请求（比如 /auth/register）交给 404 处理，不要先返回 401
+    if (req.method === 'OPTIONS' || req.is404) return
+    const path = req.url.split('?')[0]
+    if (path === '/health' || path === '/auth/login' || path === '/admin' || path.startsWith('/admin/')) return
+    const isWs = path === '/ws'
+    const token = isWs ? new URL(req.url, 'http://x').searchParams.get('token') : bearer(req)
+    const r = await authenticate(pool, token)
+    if ('error' in r) return reply.code(401).send({ error: r.error })
+    req.userId = r.userId
+    req.authSessionId = r.authSessionId
   })
 
   app.get('/health', async () => ({ ok: true }))
@@ -174,73 +184,75 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (events.some(e => !e)) return reply.code(400).send({ error: '事件格式不对' })
     let accepted = 0
     for (const ev of events as EventIn[]) {
-      const res = await serial(() => applyEvent(pool, ev))
+      const res = await serial(() => applyEvent(pool, req.userId, ev))
       if (!res) continue
       accepted++
-      pushSession(res.session, res.notify)
+      pushSession(req.userId, res.session, res.notify)
     }
     return { accepted }
   })
 
   app.get('/sessions', async req => {
     const q = req.query as { all?: string }
-    return { sessions: await listSessions(pool, q.all === '1') }
+    return { sessions: await listSessions(pool, req.userId, q.all === '1') }
   })
 
-  app.post('/sessions/ack-all', async () => {
-    const list = await ackAll(pool)
-    for (const s of list) pushSession(s, false)
+  app.post('/sessions/ack-all', async req => {
+    const list = await ackAll(pool, req.userId)
+    for (const s of list) pushSession(req.userId, s, false)
     return { acked: list.length }
   })
 
   app.post('/sessions/:id/ack', async (req, reply) => {
-    const s = await ackSession(pool, (req.params as { id: string }).id)
+    const s = await ackSession(pool, req.userId, (req.params as { id: string }).id)
     if (!s) return reply.code(404).send({ error: '会话不存在' })
-    pushSession(s, false)
+    pushSession(req.userId, s, false)
     return { ok: true }
   })
 
   app.delete('/sessions/:id', async (req, reply) => {
     const id = (req.params as { id: string }).id
-    if (!(await removeSession(pool, id))) return reply.code(404).send({ error: '会话不存在' })
-    broadcast({ type: 'removed', id })
+    if (!(await removeSession(pool, req.userId, id))) return reply.code(404).send({ error: '会话不存在' })
+    broadcast(req.userId, { type: 'removed', id })
     return { ok: true }
   })
 
   // ---------- 远程控制 ----------
 
-  app.get('/control/status', async () => ({ enabled: controlToken !== '', agents: agentList() }))
+  app.get('/control/status', async req => ({ agents: agentList(req.userId) }))
 
-  app.get('/sessions/:id/messages', async req => {
+  app.get('/sessions/:id/messages', async (req, reply) => {
     const id = (req.params as { id: string }).id
     const q = req.query as { limit?: string }
     const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '100', 10) || 100, 1), 200)
-    const [messages, approvals, run] = await Promise.all([listMessages(pool, id, limit), pendingApprovals(pool, id), latestRun(pool, id)])
+    // 会话不属于当前账号一律 404（不泄露别人的数据是否存在）
+    if (!(await getSession(pool, req.userId, id))) return reply.code(404).send({ error: '会话不存在' })
+    const [messages, approvals, run] = await Promise.all([listMessages(pool, req.userId, id, limit), pendingApprovals(pool, req.userId, id), latestRun(pool, req.userId, id)])
     return { messages, approvals, run }
   })
 
   app.post('/sessions/:id/messages', async (req, reply) => {
-    if (!control(req, reply)) return reply
+    const userId = req.userId
     const id = (req.params as { id: string }).id
     const text = (req.body as { text?: unknown } | null)?.text
     if (typeof text !== 'string' || text.trim().length < 1 || text.length > 8000) return reply.code(400).send({ error: 'text 必须是 1–8000 字符' })
     const clean = text.replaceAll('\0', '')
     // 检查与建 run 放在同一个串行段里，避免同一会话同时建出两个 run
     const res = await serial(async () => {
-      const session = await getSession(pool, id)
+      const session = await getSession(pool, userId, id)
       if (!session) return { code: 404, error: '会话不存在' } as const
-      if (!executors.has(session.machine)) return { code: 409, error: '电脑端不在线' } as const
-      if (await activeRun(pool, id)) return { code: 409, error: '这个会话正在运行' } as const
+      if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
+      if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running') return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
-      const run = await createRun(pool, randomUUID(), id, session.machine)
-      const message = await insertMessage(pool, id, run.id, 'user', clean)
+      const run = await createRun(pool, userId, randomUUID(), id, session.machine)
+      const message = await insertMessage(pool, userId, id, run.id, 'user', clean)
       return { code: 200, run, message, session } as const
     })
     if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
     const { run, message, session } = res as Extract<typeof res, { code: 200 }>
-    pushRun(run)
-    pushMessage(message)
-    const sent = sendExecutor(session.machine, {
+    pushRun(userId, run)
+    pushMessage(userId, message)
+    const sent = sendExecutor(userId, session.machine, {
       type: 'run.start',
       runId: run.id,
       sessionId: id,
@@ -250,47 +262,46 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       text: clean,
     })
     if (!sent) {
-      const failed = await setRunStatus(pool, run.id, 'failed', '电脑端不在线')
-      if (failed) pushRun(failed)
+      const failed = await setRunStatus(pool, userId, run.id, 'failed', '电脑端不在线')
+      if (failed) pushRun(userId, failed)
       return reply.code(409).send({ error: '电脑端不在线' })
     }
     return { runId: run.id }
   })
 
   app.post('/runs/:id/stop', async (req, reply) => {
-    if (!control(req, reply)) return reply
-    const run = await getRun(pool, (req.params as { id: string }).id)
+    const run = await getRun(pool, req.userId, (req.params as { id: string }).id)
     if (!run) return reply.code(404).send({ error: 'run 不存在' })
     if (TERMINAL.includes(run.status)) return reply.code(409).send({ error: '这个运行已经结束' })
-    if (!sendExecutor(run.machine, { type: 'run.stop', runId: run.id })) return reply.code(409).send({ error: '电脑端不在线' })
+    if (!sendExecutor(req.userId, run.machine, { type: 'run.stop', runId: run.id })) return reply.code(409).send({ error: '电脑端不在线' })
     return { ok: true }
   })
 
   app.post('/approvals/:id', async (req, reply) => {
-    if (!control(req, reply)) return reply
+    const userId = req.userId
     const id = (req.params as { id: string }).id
     const decision = (req.body as { decision?: unknown } | null)?.decision
     if (decision !== 'allow' && decision !== 'deny') return reply.code(400).send({ error: "decision 必须是 'allow' 或 'deny'" })
-    const cur = await getApproval(pool, id)
+    const cur = await getApproval(pool, userId, id)
     if (!cur) return reply.code(404).send({ error: '授权请求不存在' })
     if (cur.status !== 'pending') return reply.code(409).send({ error: '这个授权请求已经处理过了' })
-    const run = await getRun(pool, cur.runId)
-    if (!run || !executors.has(run.machine)) return reply.code(409).send({ error: '电脑端不在线' })
-    const done = await decideApproval(pool, id, decision === 'allow' ? 'allowed' : 'denied')
+    const run = await getRun(pool, userId, cur.runId)
+    if (!run || !executors.has(execKey(userId, run.machine))) return reply.code(409).send({ error: '电脑端不在线' })
+    const done = await decideApproval(pool, userId, id, decision === 'allow' ? 'allowed' : 'denied')
     if (!done) return reply.code(409).send({ error: '这个授权请求已经处理过了' })
-    const message = await insertMessage(pool, done.sessionId, done.runId, 'approval', `${decision === 'allow' ? '已允许' : '已拒绝'}：${done.tool} ${done.detail}`)
-    await pushApproval(done, false)
-    pushMessage(message)
-    sendExecutor(run.machine, { type: 'approval.decide', approvalId: id, decision })
+    const message = await insertMessage(pool, userId, done.sessionId, done.runId, 'approval', `${decision === 'allow' ? '已允许' : '已拒绝'}：${done.tool} ${done.detail}`)
+    await pushApproval(userId, done, false)
+    pushMessage(userId, message)
+    sendExecutor(userId, run.machine, { type: 'approval.decide', approvalId: id, decision })
     return { ok: true }
   })
 
   app.post('/sessions/:id/history', async (req, reply) => {
-    if (!control(req, reply)) return reply
+    const userId = req.userId
     const id = (req.params as { id: string }).id
-    const session = await getSession(pool, id)
+    const session = await getSession(pool, userId, id)
     if (!session) return reply.code(404).send({ error: '会话不存在' })
-    if (!executors.has(session.machine)) return reply.code(409).send({ error: '电脑端不在线' })
+    if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     const requestId = randomUUID()
     const waiting = new Promise<HistoryResult | null>(resolve => {
       const timer = setTimeout(() => {
@@ -298,6 +309,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         resolve(null)
       }, historyTimeoutMs)
       historyWaits.set(requestId, {
+        userId,
         machine: session.machine,
         resolve: r => {
           clearTimeout(timer)
@@ -305,7 +317,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         },
       })
     })
-    sendExecutor(session.machine, {
+    sendExecutor(userId, session.machine, {
       type: 'history.request',
       requestId,
       agent: session.agent,
@@ -318,13 +330,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const items = result.messages
       .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
       .map(m => ({ role: m.role, text: m.text }))
-    const messages = await serial(() => insertHistory(pool, id, items))
+    const messages = await serial(() => insertHistory(pool, userId, id, items))
     return { messages }
   })
 
   // ---------- WebSocket：viewer 和执行器（role=agent） ----------
 
-  async function onExecutorMessage(machine: string, raw: unknown) {
+  async function onExecutorMessage(userId: number, machine: string, raw: unknown) {
     if (!raw || typeof raw !== 'object') return
     const m = raw as Record<string, unknown>
     const str = (v: unknown) => (typeof v === 'string' ? v : '')
@@ -332,45 +344,45 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       case 'run.status': {
         const status = str(m.status)
         if (!['running', 'done', 'failed', 'stopped'].includes(status)) return
-        const run = await getRun(pool, str(m.runId))
+        const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine || TERMINAL.includes(run.status)) return
-        const updated = await setRunStatus(pool, run.id, status as Run['status'], str(m.error))
+        const updated = await setRunStatus(pool, userId, run.id, status as Run['status'], str(m.error))
         if (!updated) return
-        pushRun(updated)
+        pushRun(userId, updated)
         if (TERMINAL.includes(status)) {
-          for (const a of await expireApprovalsOfRuns(pool, [run.id])) await pushApproval(a, false)
+          for (const a of await expireApprovalsOfRuns(pool, userId, [run.id])) await pushApproval(userId, a, false)
         }
         return
       }
       case 'run.message': {
         const role = str(m.role)
         if (!MESSAGE_ROLES.includes(role as never) || role === 'user' || role === 'approval') return
-        const run = await getRun(pool, str(m.runId))
+        const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine) return
-        pushMessage(await insertMessage(pool, run.sessionId, run.id, role as Message['role'], str(m.text)))
+        pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text)))
         return
       }
       case 'run.approval': {
-        const run = await getRun(pool, str(m.runId))
+        const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine || TERMINAL.includes(run.status)) return
         const tool = cleanText(str(m.tool), 100) || 'tool'
-        const approval = await createApproval(pool, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
-        const message = await insertMessage(pool, run.sessionId, run.id, 'approval', `请求授权：${approval.tool} ${approval.detail}`)
-        await pushApproval(approval, true)
-        pushMessage(message)
-        sendExecutor(machine, { type: 'approval.created', localId: m.localId, approvalId: approval.id })
+        const approval = await createApproval(pool, userId, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
+        const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', `请求授权：${approval.tool} ${approval.detail}`)
+        await pushApproval(userId, approval, true)
+        pushMessage(userId, message)
+        sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId: approval.id })
         return
       }
       case 'run.approvalExpired': {
-        const run = await getRun(pool, str(m.runId))
+        const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine) return
-        const expired = await expireApproval(pool, str(m.approvalId), run.id)
-        if (expired) await pushApproval(expired, false)
+        const expired = await expireApproval(pool, userId, str(m.approvalId), run.id)
+        if (expired) await pushApproval(userId, expired, false)
         return
       }
       case 'history.result': {
         const w = historyWaits.get(str(m.requestId))
-        if (!w || w.machine !== machine) return
+        if (!w || w.userId !== userId || w.machine !== machine) return
         historyWaits.delete(str(m.requestId))
         const list = Array.isArray(m.messages) ? (m.messages as { role: string; text: string }[]) : []
         w.resolve({ messages: list, error: typeof m.error === 'string' && m.error ? m.error : undefined })
@@ -380,17 +392,16 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
 
   app.get('/ws', { websocket: true }, async (socket: Sock, req: FastifyRequest) => {
+    const { userId, authSessionId } = req
     const q = new URL(req.url, 'http://x').searchParams
     if (q.get('role') === 'agent') {
       const machine = (q.get('machine') ?? '').trim()
-      if (!controlToken || !safeEqual(q.get('control') ?? '', controlToken)) {
-        socket.close(4403, '控制密钥不对或服务端没有开启远程控制')
-        return
-      }
       if (!machine) {
         socket.close(4400, '缺少 machine')
         return
       }
+      const key = execKey(userId, machine)
+      const me: Exec = { sock: socket, userId, authSessionId, machine }
       let registered = false
       const queue: unknown[] = []
       const handle = (data: unknown) => {
@@ -400,43 +411,44 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         } catch {
           return
         }
-        void serial(() => onExecutorMessage(machine, parsed)).catch(e => app.log.error(e, '处理执行器消息失败'))
+        void serial(() => onExecutorMessage(userId, machine, parsed)).catch(e => app.log.error(e, '处理执行器消息失败'))
       }
       // 注册完成之前到的消息先攒着，注册后按顺序处理
       socket.on('message', (data: unknown) => (registered ? handle(data) : queue.push(data)))
       socket.on('close', () => {
-        if (!registered || executors.get(machine) !== socket) return
-        executors.delete(machine)
-        pushAgents()
-        void serial(() => dropExecutor(machine)).catch(e => app.log.error(e, '处理执行器断线失败'))
+        if (!registered || executors.get(key)?.sock !== socket) return
+        executors.delete(key)
+        pushAgents(userId)
+        void serial(() => dropExecutor(userId, machine)).catch(e => app.log.error(e, '处理执行器断线失败'))
       })
       socket.on('error', () => {})
-      // 同一 machine 的新连接顶掉旧的；旧连接名下的 run 也一并作废
-      const old = executors.get(machine)
+      // 同一账号同一 machine 的新连接顶掉旧的；旧连接名下的 run 也一并作废
+      const old = executors.get(key)
       if (old) {
-        executors.delete(machine)
+        executors.delete(key)
         try {
-          old.close(4000, '被新连接顶掉')
+          old.sock.close(4000, '被新连接顶掉')
         } catch {}
       }
-      await serial(() => dropExecutor(machine))
+      await serial(() => dropExecutor(userId, machine))
       if (socket.readyState !== 1) return
-      executors.set(machine, socket)
+      executors.set(key, me)
       registered = true
-      pushAgents()
+      pushAgents(userId)
       for (const d of queue.splice(0)) handle(d)
       return
     }
 
-    clients.add(socket)
-    socket.on('close', () => clients.delete(socket))
-    socket.on('error', () => clients.delete(socket))
+    const me: Conn = { sock: socket, userId, authSessionId }
+    clients.add(me)
+    socket.on('close', () => clients.delete(me))
+    socket.on('error', () => clients.delete(me))
     socket.send(
       JSON.stringify({
         type: 'snapshot',
-        sessions: await listSessions(pool, false),
-        agents: agentList(),
-        approvals: await Promise.all((await pendingApprovals(pool)).map(withProject)),
+        sessions: await listSessions(pool, userId, false),
+        agents: agentList(userId),
+        approvals: await Promise.all((await pendingApprovals(pool, userId)).map(a => withProject(userId, a))),
       }),
     )
   })
@@ -444,7 +456,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const ping = setInterval(() => {
     for (const c of [...clients, ...executors.values()]) {
       try {
-        c.ping()
+        c.sock.ping()
       } catch {
         clients.delete(c)
       }
@@ -453,7 +465,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   ping.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
-    for (const c of clients) c.close()
-    for (const c of executors.values()) c.close()
+    for (const c of clients) c.sock.close()
+    for (const c of executors.values()) c.sock.close()
   })
+  return kick
 }

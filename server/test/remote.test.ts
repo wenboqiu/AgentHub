@@ -3,10 +3,9 @@ import assert from 'node:assert/strict'
 import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../src/index.ts'
 import { createPool, insertMessage, listMessages } from '../src/db.ts'
+import { DATABASE_URL, makeUser } from './helpers.ts'
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:dev@localhost:55433/agenthub'
-const TOKEN = 'test-token'
-const CTL = 'ctl-secret'
+let TOKEN = ''
 const stamp = Date.now()
 let n = 0
 const uniq = (p: string) => `${p}${stamp}-${n++}`
@@ -24,58 +23,18 @@ async function waitFor<T>(fn: () => T | undefined | null | false, ms = 4000): Pr
   }
 }
 
-describe('远程控制：没开启控制密钥', () => {
-  let app: FastifyInstance
-  let base = ''
-  before(async () => {
-    app = await buildApp(DATABASE_URL, 'silent', { token: TOKEN })
-    base = await app.listen({ port: 0, host: '127.0.0.1' })
-  })
-  after(async () => {
-    await app.close()
-  })
-  const call = (method: string, path: string, body?: unknown) =>
-    fetch(base + path, {
-      method,
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}`, 'X-Control-Token': CTL },
-      body: body ? JSON.stringify(body) : undefined,
-    })
-
-  it('控制接口全部 403，status 里 enabled=false', async () => {
-    const sid = encodeURIComponent('claude:nope')
-    for (const [m, p, b] of [
-      ['POST', `/sessions/${sid}/messages`, { text: 'hi' }],
-      ['POST', '/runs/x/stop', {}],
-      ['POST', '/approvals/x', { decision: 'allow' }],
-      ['POST', `/sessions/${sid}/history`, {}],
-    ] as const) {
-      const r = await call(m, p, b)
-      assert.equal(r.status, 403, p)
-      assert.match((await r.json()).error, /没有开启远程控制/)
-    }
-    const st = await (await call('GET', '/control/status')).json()
-    assert.deepEqual(st, { enabled: false, agents: [] })
-  })
-
-  it('执行器 WS 被拒（4403）', async () => {
-    const ws = new WebSocket(base.replace('http', 'ws') + `/ws?token=${TOKEN}&role=agent&machine=m&control=${CTL}`)
-    const code = await new Promise<number>(r => (ws.onclose = e => r(e.code)))
-    assert.equal(code, 4403)
-  })
-})
-
 describe('远程控制', () => {
+  const pool = createPool(DATABASE_URL)
   let app: FastifyInstance
   let base = ''
   const peers: Peer[] = []
 
-  async function call(method: string, path: string, body?: unknown, ctl: string | null = CTL, token = TOKEN) {
+  async function call(method: string, path: string, body?: unknown, token = TOKEN) {
     const res = await fetch(base + path, {
       method,
       headers: {
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         Authorization: `Bearer ${token}`,
-        ...(ctl ? { 'X-Control-Token': ctl } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     })
@@ -101,10 +60,10 @@ describe('远程控制', () => {
     return v
   }
   const executor = async (machine: string) => {
-    const e = await connect(`role=agent&machine=${machine}&control=${CTL}`)
+    const e = await connect(`role=agent&machine=${machine}`)
     // 等服务端登记完成
     for (let i = 0; i < 100; i++) {
-      if ((await call('GET', '/control/status', undefined, null)).body.agents.includes(machine)) return e
+      if ((await call('GET', '/control/status')).body.agents.includes(machine)) return e
       await sleep(20)
     }
     throw new Error('执行器没有登记')
@@ -116,35 +75,33 @@ describe('远程控制', () => {
     const sessionId = uniq('s')
     const r = await call('POST', '/events', {
       events: [{ agent, sessionId, machine, cwd: 'D:\\Work2\\Demo', state, at: new Date().toISOString() }],
-    }, null)
+    })
     assert.equal(r.status, 200)
     return { id: `${agent}:${sessionId}`, key: sessionId }
   }
 
   before(async () => {
-    app = await buildApp(DATABASE_URL, 'silent', { token: TOKEN, controlToken: CTL, historyTimeoutMs: 600 })
+    app = await buildApp(DATABASE_URL, 'silent', { historyTimeoutMs: 600 })
     base = await app.listen({ port: 0, host: '127.0.0.1' })
+    TOKEN = (await makeUser(pool)).token
   })
   after(async () => {
     for (const p of peers) p.ws.close()
     await app.close()
+    await pool.end()
   })
 
-  it('控制密钥错误或缺失返回 403，/control/status 只要 Bearer', async () => {
+  it('控制接口无登录返回 401；/control/status 只有 agents', async () => {
     const { id } = await newSession(uniq('pc'))
     const url = `/sessions/${encodeURIComponent(id)}/messages`
-    assert.equal((await call('POST', url, { text: 'hi' }, 'wrong')).status, 403)
-    assert.equal((await call('POST', url, { text: 'hi' }, null)).status, 403)
-    assert.equal((await call('POST', '/runs/x/stop', {}, 'wrong')).status, 403)
-    assert.equal((await call('POST', '/approvals/x', { decision: 'allow' }, 'wrong')).status, 403)
-    assert.equal((await call('POST', `/sessions/${encodeURIComponent(id)}/history`, {}, 'wrong')).status, 403)
-    const st = await call('GET', '/control/status', undefined, null)
+    assert.equal((await call('POST', url, { text: 'hi' }, 'wrong')).status, 401)
+    assert.equal((await call('POST', '/runs/x/stop', {}, 'wrong')).status, 401)
+    assert.equal((await call('POST', '/approvals/x', { decision: 'allow' }, 'wrong')).status, 401)
+    assert.equal((await call('POST', `/sessions/${encodeURIComponent(id)}/history`, {}, 'wrong')).status, 401)
+    const st = await call('GET', '/control/status')
     assert.equal(st.status, 200)
-    assert.equal(st.body.enabled, true)
-    assert.equal((await call('GET', '/control/status', undefined, null, 'bad')).status, 401)
-    // 执行器 WS 控制密钥错 → 4403
-    const ws = new WebSocket(base.replace('http', 'ws') + `/ws?token=${TOKEN}&role=agent&machine=x&control=bad`)
-    assert.equal(await new Promise<number>(r => (ws.onclose = e => r(e.code))), 4403)
+    assert.ok(Array.isArray(st.body.agents) && !('enabled' in st.body))
+    assert.equal((await call('GET', '/control/status', undefined, 'bad')).status, 401)
   })
 
   it('执行器不在线发消息 409，会话不存在 404', async () => {
@@ -160,7 +117,7 @@ describe('远程控制', () => {
     const v = await viewer()
     const ex = await executor(machine)
     await waitFor(() => find(v, 'agents', m => m.agents.includes(machine)))
-    assert.ok((await call('GET', '/control/status', undefined, null)).body.agents.includes(machine))
+    assert.ok((await call('GET', '/control/status')).body.agents.includes(machine))
     const { id, key } = await newSession(machine)
 
     assert.equal((await call('POST', `/sessions/${encodeURIComponent(id)}/messages`, { text: '' })).status, 400)
@@ -188,7 +145,7 @@ describe('远程控制', () => {
     await waitFor(() => find(v, 'run', m => m.run.id === runId && m.run.status === 'done'))
     assert.equal(find(v, 'message', m => m.message.role === 'assistant').message.text, 'OK2')
 
-    const q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages?limit=100`, undefined, null)
+    const q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages?limit=100`)
     assert.deepEqual(
       q.body.messages.map((m: any) => [m.role, m.text]),
       [
@@ -229,7 +186,7 @@ describe('远程控制', () => {
     assert.equal(pushed.approval.project, 'Demo')
     assert.equal(pushed.approval.tool, 'Write')
 
-    const pending = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`, undefined, null)
+    const pending = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)
     assert.equal(pending.body.approvals.length, 1)
     assert.ok(pending.body.messages.some((m: any) => m.role === 'approval' && m.text.includes('请求授权')))
 
@@ -301,7 +258,7 @@ describe('远程控制', () => {
     assert.equal(failed.run.error, '电脑端断开')
     await waitFor(() => find(v, 'approval', m => m.approval.id === created.approvalId && m.approval.status === 'expired'))
     await waitFor(() => find(v, 'agents', m => !m.agents.includes(machine) && v.msgs.indexOf(m) > v.msgs.indexOf(failed) - 5))
-    const q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`, undefined, null)
+    const q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)
     assert.equal(q.body.approvals.length, 0)
     assert.equal(q.body.run.status, 'failed')
   })
@@ -309,7 +266,7 @@ describe('远程控制', () => {
   it('同一 machine 的新执行器连接顶掉旧的', async () => {
     const machine = uniq('pc')
     const a = await executor(machine)
-    const b = await connect(`role=agent&machine=${machine}&control=${CTL}`)
+    const b = await connect(`role=agent&machine=${machine}`)
     await waitFor(() => a.closed)
     await sleep(150)
     assert.equal(a.closed!.code, 4000)
@@ -384,7 +341,7 @@ describe('远程控制', () => {
     // 轮询到 run 结束（说明前面的消息都已处理）
     let q: any
     for (let i = 0; i < 100; i++) {
-      q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages?limit=500`, undefined, null)
+      q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages?limit=500`)
       if (q.body.run.status === 'done') break
       await sleep(50)
     }
@@ -395,16 +352,15 @@ describe('远程控制', () => {
   })
 
   it('数据库时钟回拨后新消息仍排在旧消息之后', async () => {
-    const pool = createPool(DATABASE_URL)
     const id = uniq('clock-regression')
+    const u = await makeUser(pool)
     try {
-      await insertMessage(pool, id, null, 'assistant', 'before')
+      await insertMessage(pool, u.id, id, null, 'assistant', 'before')
       await pool.query("UPDATE messages SET created_at = now() + interval '1 hour' WHERE session_id = $1", [id])
-      await insertMessage(pool, id, null, 'assistant', 'after')
-      assert.deepEqual((await listMessages(pool, id, 200)).map(m => m.text), ['before', 'after'])
+      await insertMessage(pool, u.id, id, null, 'assistant', 'after')
+      assert.deepEqual((await listMessages(pool, u.id, id, 200)).map(m => m.text), ['before', 'after'])
     } finally {
       await pool.query('DELETE FROM messages WHERE session_id = $1', [id])
-      await pool.end()
     }
   })
 
@@ -418,7 +374,7 @@ describe('远程控制', () => {
     sendJson(ex, { type: 'run.status', runId, status: 'done' })
     let q: any
     for (let i = 0; i < 100; i++) {
-      q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`, undefined, null)
+      q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)
       if (q.body.run.status === 'done') break
       await sleep(50)
     }

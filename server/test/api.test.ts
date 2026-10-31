@@ -1,10 +1,11 @@
 import { after, before, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import type { FastifyInstance } from 'fastify'
+import pg from 'pg'
 import { buildApp } from '../src/index.ts'
+import { DATABASE_URL, makeUser } from './helpers.ts'
 
-const DATABASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:dev@localhost:55433/agenthub'
-const TOKEN = 'test-token'
+let TOKEN = ''
 const run = Date.now()
 let n = 0
 const sid = () => `t${run}-${n++}`
@@ -38,18 +39,23 @@ describe('AgentHub 服务端', () => {
     return (r.body.sessions as any[]).find(s => s.id === id)
   }
 
+  const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 2 })
   before(async () => {
-    app = await buildApp(DATABASE_URL, 'silent', { token: TOKEN })
+    app = await buildApp(DATABASE_URL, 'silent', {})
     base = await app.listen({ port: 0, host: '127.0.0.1' })
+    TOKEN = (await makeUser(pool)).token
   })
   after(async () => {
     await app.close()
+    await pool.end()
   })
 
   it('/health 免鉴权，其它接口无 token 或错 token 返回 401', async () => {
     assert.equal((await call('GET', '/health', undefined, null)).status, 200)
     assert.equal((await call('GET', '/sessions', undefined, null)).status, 401)
     assert.equal((await call('GET', '/sessions', undefined, 'wrong')).status, 401)
+    assert.equal((await call('GET', '/sessions', undefined, 'wrong')).body.error, '登录已过期，请重新登录')
+    assert.equal((await call('GET', '/sessions', undefined, null)).body.error, '请先登录')
     assert.equal((await call('POST', '/events', { events: [] }, null)).status, 401)
   })
 
