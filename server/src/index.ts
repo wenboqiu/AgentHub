@@ -4,22 +4,22 @@ import websocket from '@fastify/websocket'
 import { createPool, migrate, purgeOld } from './db.ts'
 import { registerRoutes } from './routes.ts'
 
-export type AppConfig = { token: string }
+export type AppConfig = { token: string; controlToken?: string; historyTimeoutMs?: number }
 
 // 构造应用（测试里直接用，不 listen）
-export async function buildApp(databaseUrl: string, logLevel = 'info', config: AppConfig = { token: process.env.AGENTHUB_TOKEN ?? '' }) {
+export async function buildApp(databaseUrl: string, logLevel = 'info', config: AppConfig = { token: process.env.AGENTHUB_TOKEN ?? '', controlToken: process.env.AGENTHUB_CONTROL_TOKEN ?? '' }) {
   if (!config.token) throw new Error('缺少环境变量 AGENTHUB_TOKEN')
   const pool = createPool(databaseUrl)
   await migrate(pool)
   const app = Fastify({ logger: { level: logLevel }, bodyLimit: 1024 * 1024, trustProxy: true })
-  await app.register(cors, { origin: true, methods: ['GET', 'HEAD', 'POST', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type'] })
+  await app.register(cors, { origin: true, methods: ['GET', 'HEAD', 'POST', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type', 'X-Control-Token'] })
   await app.register(websocket)
   app.setErrorHandler((err: { statusCode?: number }, req, reply) => {
     if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: '请求格式不对' })
     req.log.error(err)
     return reply.code(500).send({ error: '服务器出错了' })
   })
-  registerRoutes(app, pool, config.token)
+  registerRoutes(app, pool, config)
   // 每小时清掉 7 天没更新的会话
   const timer = setInterval(() => purgeOld(pool).catch(e => app.log.error(e, '清理会话失败')), 3600_000)
   timer.unref()
