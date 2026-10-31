@@ -23,30 +23,31 @@
 # 服务端
 docker start agenthub-pg 2>/dev/null || docker run -d --name agenthub-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=agenthub -p 55433:5432 postgres:16-alpine
 cd server && npm install && npm run check && npm test
-AGENTHUB_TOKEN=dev DATABASE_URL=postgres://postgres:dev@localhost:55433/agenthub node src/index.ts
+ADMIN_TOKEN=devadmin DATABASE_URL=postgres://postgres:dev@localhost:55433/agenthub node src/index.ts
+# 打开 http://127.0.0.1:3000/admin 用 devadmin 建账号，再在 App 里登录
 
 # 桌面端
 npm install
-npm run tauri dev          # 设置里填 http://127.0.0.1:3000 / dev
+npm run tauri dev          # 登录页填 http://127.0.0.1:3000 和管理页建的账号
 cd src-tauri && cargo test
-npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHub_0.2.0_x64-setup.exe
+npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHub_0.3.0_x64-setup.exe
 ```
 
-桌面配置保存在 `%APPDATA%\com.wenbo.agenthub\config.json`（serverUrl / token / machine / notifyDesktop / controlToken / allowedRoots / remoteEnabled）。
+桌面配置保存在 `%APPDATA%\com.wenbo.agenthub\config.json`（serverUrl / token / email / machine / notifyDesktop / allowedRoots / remoteEnabled；token 是登录后拿到的设备会话 token，不用手填）。
 
 ## 远程控制（第二版）
 
 ```
-手机/电脑 UI ──REST(控制密钥)──► 服务端 ──WS(role=agent)──► 电脑端「执行器」──► claude -p / codex app-server
+手机/电脑 UI ──REST(登录 token)──► 服务端 ──WS(role=agent)──► 电脑端「执行器」──► claude -p / codex app-server
      ▲                              │  ◄──────run 事件─────────┘
      └──────WS 广播 message/approval/run──┘
 ```
 
 **开启步骤**
 
-1. 服务端设环境变量 `AGENTHUB_CONTROL_TOKEN`（长随机串）。不设就是整体关闭。
-2. 电脑端「设置」：填同一个「控制密钥」，勾「允许手机远程执行」，在「允许的项目目录」里每行写一个目录（只有位于这些目录下的会话才能被远程接着跑；`D:\Work2Other` 不算在 `D:\Work2` 之下），保存。设置页会显示执行器连接状态。
-3. 手机「设置」填同一个控制密钥。之后点会话列表里的任意一行进入详情页：能看到对话、发消息、批授权、停止；「加载电脑上的历史记录」把本机 transcript / rollout 最近 30 条对话拉过来。有 pending 授权的会话在列表里标「待授权」并归入「待处理」，手机弹「<项目> · 请求授权」通知，点开 App 操作。
+1. 用同一个账号在电脑和手机上登录（见下面「账号」一节）。
+2. 电脑端「设置」：勾「允许手机远程执行」，在「允许的项目目录」里每行写一个目录（只有位于这些目录下的会话才能被远程接着跑；`D:\Work2Other` 不算在 `D:\Work2` 之下），保存。设置页会显示执行器连接状态。
+3. 之后在手机上点会话列表里的任意一行进入详情页：能看到对话、发消息、批授权、停止；「加载电脑上的历史记录」把本机 transcript / rollout 最近 30 条对话拉过来。有 pending 授权的会话在列表里标「待授权」并归入「待处理」，手机弹「<项目> · 请求授权」通知，点开 App 操作。
 
 **规则**
 
@@ -58,9 +59,9 @@ npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHu
 
 **安全说明**
 
-- 控制密钥和只读 token 分开：只读 token 泄露不能远程执行；服务端不设控制密钥时整个功能关闭，服务端和执行器都会校验控制密钥。
+- 没有单独的控制密钥：兜底是电脑端「允许手机远程执行」开关 + 项目目录白名单 + 每次授权都要在手机上确认；设备可以在设置页随时移除。
 - 电脑端有目录白名单（默认空 = 全部拒绝），并且必须手动打开「允许手机远程执行」。
-- 拿到控制密钥的人可以在白名单目录里让 agent 执行任意（经你批准的）操作，请当作密码保管，并务必用 HTTPS。
+- 能登录你账号的人可以在白名单目录里让 agent 执行任意（经你批准的）操作，请保管好密码，并务必用 HTTPS。
 
 ## 安装 Claude Code hook
 
@@ -95,7 +96,7 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 - 签名：有 `src-tauri/gen/android/keystore.properties`（已 gitignore）就用正式签名，否则 release 也用 debug 签名。
 - 前台服务类型用 `remoteMessaging`（不用 `dataSync`，Android 15 起每天限 6 小时）。
 - release 包默认禁止明文 HTTP，手机上请使用 `https://` 的服务端地址。
-- 手机上打开 App →「设置」填服务器地址和 token →「开启后台提醒」，并把电池优化设为「不限制」。
+- 手机上打开 App → 登录 →「设置」→「开启后台提醒」，并把电池优化设为「不限制」。
 
 ## 部署（Dokploy，本次未部署）
 
@@ -106,12 +107,19 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
    | 变量 | 说明 |
    |---|---|
    | `DATABASE_URL` | `postgres://<user>:<pass>@<host>:5432/agenthub` |
-   | `AGENTHUB_TOKEN` | 自己生成的长随机串 |
-   | `AGENTHUB_CONTROL_TOKEN` | 可选；远程控制密钥，另一个长随机串。不设则远程控制关闭 |
+   | `ADMIN_TOKEN` | 管理页令牌（长随机串）；不设则 `/admin*` 404、无法建账号 |
    | `PORT` | 默认 3000 |
    | `LOG_LEVEL` | 默认 info |
 
-4. 绑定域名并开启 HTTPS（WebSocket 需要反代透传 Upgrade）。桌面端和手机端「设置」里填这个域名与 token。
+4. 绑定域名并开启 HTTPS（WebSocket 需要反代透传 Upgrade）。首次上线：打开 `https://<域名>/admin`，输入 `ADMIN_TOKEN`，新建账号；桌面端和手机端的登录页填这个域名和账号。
+
+**升级到 0.3.0**：服务端和客户端都要升级。服务端启动时会清空旧的会话 / 运行 / 消息 / 授权表（只有临时状态数据）；旧客户端会收到 401，需要更新并登录。
+
+## 账号
+
+- 邮箱 + 密码登录，不开放注册，账号只能在服务端 `/admin` 页面创建。每个账号的数据互相隔离。
+- 每台设备登录后有自己的会话 token（保存在本地，不用手填）；设置页可以看「已登录设备」、移除其它设备、修改密码。
+- 登录失效（被移除、改密码、管理员重置）时，桌面端 / 手机端提示「登录已过期，请重新登录」，上报和执行器停止重试，重新登录后恢复。
 
 ## 已知限制
 
@@ -124,4 +132,4 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 - 本机 AgentHub 没运行时，hook 脚本每次会等 curl 超时（Windows 上连接被拒绝约 2 秒），上限 2 秒。
 - Android 端只有重连后「新发生」的变化会弹通知，断线期间错过的提醒不会补弹（列表里仍能看到待处理）。
 - Codex 第一版没有 `waiting` 状态；title 取第一条不以 `<` 开头的用户文本，可能是注入的上下文。
-- 仅 Windows + Android，不做 iOS / macOS，单用户（单 token + 单控制密钥）。没有任务 / 目标管理（后续版本）。
+- 仅 Windows + Android，不做 iOS / macOS，多账号隔离（管理员建账号）。没有任务 / 目标管理（后续版本）。

@@ -1,6 +1,6 @@
 [package]
 name = "agenthub"
-version = "0.2.0"
+version = "0.3.0"
 description = "Claude Code / Codex 会话状态集中监控"
 authors = ["wenbo"]
 edition = "2021"
