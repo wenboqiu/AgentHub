@@ -1,6 +1,6 @@
 //! 事件队列 + 后台线程批量上报服务端，失败指数退避
 
-use crate::config::SharedConfig;
+use crate::config::{SharedConfig, TokenBlock, AUTH_EXPIRED};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
@@ -101,11 +101,19 @@ impl Forwarder {
         };
         let (m, cv) = &*self.inner;
         let mut backoff = 0u64;
+        // 401 之后只排队不发，直到 token 变化（重新登录）
+        let mut block = TokenBlock::default();
         loop {
             // 等到有事件；没配置时只排队不发，隔几秒再看
             let cfg = config.read().unwrap().clone();
             let mut g = m.lock().unwrap();
-            if g.queue.is_empty() || cfg.server_url.trim().is_empty() || cfg.token.trim().is_empty() {
+            let was_blocked = block.is_set();
+            let blocked = block.blocked(cfg.token.trim());
+            if was_blocked && !blocked {
+                g.last_error = None;
+                backoff = 0;
+            }
+            if blocked || g.queue.is_empty() || cfg.server_url.trim().is_empty() || cfg.token.trim().is_empty() {
                 let _ = cv.wait_timeout(g, Duration::from_secs(2)).unwrap();
                 continue;
             }
@@ -126,6 +134,11 @@ impl Forwarder {
                 .send();
             let outcome = match res {
                 Ok(r) if r.status().is_success() => Ok(()),
+                // 401：登录失效，重发也没用，丢弃这一批并停止发送
+                Ok(r) if r.status().as_u16() == 401 => {
+                    block.set(cfg.token.trim());
+                    Err((AUTH_EXPIRED.to_string(), true))
+                }
                 // 400：事件格式有问题，重发也没用，丢弃避免卡死队列
                 Ok(r) if r.status().as_u16() == 400 => Err((format!("服务端拒绝事件（400），已丢弃 {} 条", batch.len()), true)),
                 Ok(r) => Err((format!("服务端返回 {}", r.status()), false)),

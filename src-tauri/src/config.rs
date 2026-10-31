@@ -11,8 +11,8 @@ pub struct Config {
     pub token: String,
     pub machine: String,
     pub notify_desktop: bool,
-    /// 远程控制密钥（和服务端 AGENTHUB_CONTROL_TOKEN 一致）
-    pub control_token: String,
+    /// 登录的邮箱（只用于显示；token 是登录后拿到的设备会话 token）
+    pub email: String,
     /// 允许手机远程执行的项目目录（会话 cwd 必须在其中某一项之下）
     pub allowed_roots: Vec<String>,
     /// 总开关：关闭时不连服务端的执行器通道
@@ -26,7 +26,7 @@ impl Default for Config {
             token: String::new(),
             machine: hostname(),
             notify_desktop: true,
-            control_token: String::new(),
+            email: String::new(),
             allowed_roots: Vec::new(),
             remote_enabled: false,
         }
@@ -34,6 +34,33 @@ impl Default for Config {
 }
 
 pub type SharedConfig = Arc<RwLock<Config>>;
+
+/// 登录失效（401 / 关闭码 4401）的提示文案
+pub const AUTH_EXPIRED: &str = "登录已过期，请重新登录";
+
+/// 收到 401 后记下失败的 token，在 token 变化（重新登录）之前不再发请求 / 重连
+#[derive(Default, Debug)]
+pub struct TokenBlock(Option<String>);
+
+impl TokenBlock {
+    pub fn set(&mut self, token: &str) {
+        self.0 = Some(token.to_string());
+    }
+    pub fn is_set(&self) -> bool {
+        self.0.is_some()
+    }
+    /// 这个 token 是否仍被拦住；token 变了就自动解除
+    pub fn blocked(&mut self, token: &str) -> bool {
+        match &self.0 {
+            Some(b) if b == token => true,
+            Some(_) => {
+                self.0 = None;
+                false
+            }
+            None => false,
+        }
+    }
+}
 
 pub fn hostname() -> String {
     std::env::var("COMPUTERNAME")
@@ -79,7 +106,7 @@ mod tests {
             token: "t".into(),
             machine: "m".into(),
             notify_desktop: false,
-            control_token: "c".into(),
+            email: "a@b.c".into(),
             allowed_roots: vec!["D:/Tmp".into()],
             remote_enabled: true,
         };
@@ -91,8 +118,25 @@ mod tests {
         assert_eq!(d.server_url, "http://y");
         assert!(d.notify_desktop);
         assert!(!d.remote_enabled);
-        assert!(d.allowed_roots.is_empty() && d.control_token.is_empty());
+        assert!(d.allowed_roots.is_empty() && d.email.is_empty());
         assert!(!d.machine.is_empty());
+        // 旧版配置里的 controlToken 等多余字段直接忽略
+        std::fs::write(&p, r#"{"serverUrl":"http://z","token":"t","controlToken":"old"}"#).unwrap();
+        let o = load(&p);
+        assert_eq!((o.server_url.as_str(), o.token.as_str()), ("http://z", "t"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn token_block_clears_when_token_changes() {
+        let mut b = TokenBlock::default();
+        assert!(!b.blocked("a"));
+        b.set("a");
+        assert!(b.is_set());
+        assert!(b.blocked("a"));
+        assert!(b.blocked("a"));
+        assert!(!b.blocked("b"), "token 变了就恢复");
+        assert!(!b.is_set());
+        assert!(!b.blocked("a"));
     }
 }
