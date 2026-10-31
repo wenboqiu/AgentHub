@@ -162,6 +162,17 @@ fn write_settings(path: &Path, v: &Value) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("写 settings.json 失败：{e}"))
 }
 
+/// 已安装过上报脚本时，启动时把它更新成本版本内置的内容（升级后不用重新点安装）
+pub fn refresh_script(hooks_dir: &Path) {
+    let path = hooks_dir.join(SCRIPT_NAME);
+    let want = SCRIPT.replace("
+", "
+");
+    if std::fs::read_to_string(&path).is_ok_and(|cur| cur != want) {
+        let _ = std::fs::write(&path, want);
+    }
+}
+
 /// 把上报脚本写到 hooks_dir，并向 settings 追加 hook（幂等）。返回是否改动了 settings
 pub fn install_hooks(settings: &Path, hooks_dir: &Path) -> Result<bool, String> {
     std::fs::create_dir_all(hooks_dir).map_err(|e| format!("创建 hooks 目录失败：{e}"))?;

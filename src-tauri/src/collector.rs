@@ -1,6 +1,7 @@
 //! 127.0.0.1:47821 本地 HTTP：接收 Claude hook 上报（POST /claude?pid=<winpid>）
 
 use crate::claude;
+use crate::focus;
 use crate::forwarder::Forwarder;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
@@ -33,6 +34,8 @@ pub fn spawn(fwd: Forwarder, status: CollectorStatus) {
                 let _ = req.respond(tiny_http::Response::empty(404));
                 continue;
             }
+            // 必须在回 204 之前解析：回完之后 hook 的 bash 很快退出，父进程链就断了
+            let pid = parse_pid(&url).map(focus::stable_pid);
             let mut body = String::new();
             let read = req.as_reader().take(BODY_MAX).read_to_string(&mut body);
             // 先回 204，hook 不用等后面读 transcript
@@ -41,7 +44,7 @@ pub fn spawn(fwd: Forwarder, status: CollectorStatus) {
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(ev) = claude::hook_to_event(&v, parse_pid(&url)) {
+                if let Some(ev) = claude::hook_to_event(&v, pid) {
                     fwd.push(ev);
                 }
             }

@@ -161,6 +161,9 @@ mod desktop {
                 let forwarder = Forwarder::new();
                 let collector_status: CollectorStatus = Arc::new(Mutex::new(None));
                 forwarder.spawn(shared.clone());
+                if let Ok(d) = claude::default_hooks_dir() {
+                    claude::refresh_script(&d);
+                }
                 collector::spawn(forwarder.clone(), collector_status.clone());
                 codex::spawn(forwarder.clone());
                 app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status });

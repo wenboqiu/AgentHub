@@ -91,14 +91,57 @@ mod win {
         Err("系统拒绝切换到该窗口".into())
     }
 
+    /// 从 pid 沿父链跳过 shell 进程，返回第一个非 shell 的祖先（通常是 claude.exe）
+    fn cmdline(pid: u32) -> Option<String> {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+        let mut sys = System::new();
+        let p = Pid::from_u32(pid);
+        sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[p]), false, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always));
+        let cmd = sys.process(p)?.cmd();
+        Some(cmd.iter().map(|a| a.to_string_lossy()).collect::<Vec<_>>().join(" "))
+    }
+
+    /// 从 `claude daemon run ... --spawned-by {"label":"claude","cwd":"...","pid":57584}` 里取 pid
+    pub fn spawned_by_pid(cmd: &str) -> Option<u32> {
+        if !cmd.contains("daemon run") {
+            return None;
+        }
+        let rest = &cmd[cmd.find("--spawned-by")?..];
+        let rest = &rest[rest.find("\"pid\"")? + 5..];
+        let digits: String = rest.trim_start_matches([':', ' ', '\\']).chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok().filter(|p| *p > 0)
+    }
+
+    pub fn stable_pid_in(procs: &HashMap<u32, Proc>, pid: u32) -> u32 {
+        const SHELLS: [&str; 6] = ["bash.exe", "sh.exe", "dash.exe", "zsh.exe", "env.exe", "cmd.exe"];
+        let mut cur = pid;
+        for _ in 0..10 {
+            match procs.get(&cur) {
+                Some(p) if SHELLS.contains(&p.exe.to_lowercase().as_str()) && procs.contains_key(&p.ppid) => cur = p.ppid,
+                _ => break,
+            }
+        }
+        cur
+    }
+
     pub fn focus(pid: Option<u32>, agent: &str) -> Result<(), String> {
         let procs = snapshot();
         if let Some(pid) = pid {
             // 沿父进程链往上找第一个有可见顶层窗口的进程
             let mut cur = pid;
-            for _ in 0..10 {
+            for _ in 0..16 {
                 if let Some(w) = window_of(cur) {
                     return bring_to_front(w);
+                }
+                // Claude Code 后台会话跑在 `claude daemon run` 下，和终端没有父子关系；
+                // daemon 的 --spawned-by 参数里记着启动它的前台 claude 进程号，从那里接着往上找
+                if procs.get(&cur).is_some_and(|p| p.exe.eq_ignore_ascii_case("claude.exe")) {
+                    if let Some(next) = cmdline(cur).as_deref().and_then(spawned_by_pid) {
+                        if next != cur && procs.contains_key(&next) {
+                            cur = next;
+                            continue;
+                        }
+                    }
                 }
                 match procs.get(&cur) {
                     Some(p) if p.ppid != 0 && p.ppid != cur => cur = p.ppid,
@@ -122,6 +165,18 @@ mod win {
     }
 }
 
+/// hook 脚本的 bash 进程上报完就退出，之后无法再沿它找父进程；
+/// 所以收到上报时（bash 还活着）就换成会话期间一直存在的祖先进程号
+#[cfg(windows)]
+pub fn stable_pid(pid: u32) -> u32 {
+    win::stable_pid_in(&win::snapshot(), pid)
+}
+
+#[cfg(not(windows))]
+pub fn stable_pid(pid: u32) -> u32 {
+    pid
+}
+
 #[cfg(windows)]
 pub fn focus_session(pid: Option<u32>, agent: &str) -> Result<(), String> {
     win::focus(pid, agent)
@@ -130,4 +185,28 @@ pub fn focus_session(pid: Option<u32>, agent: &str) -> Result<(), String> {
 #[cfg(not(windows))]
 pub fn focus_session(_pid: Option<u32>, _agent: &str) -> Result<(), String> {
     Err("窗口跳转目前只支持 Windows".into())
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::win::{spawned_by_pid, stable_pid_in, Proc};
+    use std::collections::HashMap;
+
+    #[test]
+    fn skips_hook_shells_up_to_claude() {
+        let mut m = HashMap::new();
+        for (pid, ppid, exe) in [(1, 0, "WindowsTerminal.exe"), (2, 1, "powershell.exe"), (3, 2, "claude.exe"), (4, 3, "bash.exe"), (5, 4, "bash.exe")] {
+            m.insert(pid, Proc { ppid, exe: exe.into() });
+        }
+        assert_eq!(stable_pid_in(&m, 5), 3);
+        assert_eq!(stable_pid_in(&m, 3), 3);
+        assert_eq!(stable_pid_in(&m, 99), 99);
+    }
+
+    #[test]
+    fn parses_daemon_spawned_by() {
+        let cmd = r#"C:\x\claude.exe daemon run --origin transient --spawned-by {"label":"claude","cwd":"D:\\Play","pid":57584}"#;
+        assert_eq!(spawned_by_pid(cmd), Some(57584));
+        assert_eq!(spawned_by_pid("claude.exe --session-id abc"), None);
+    }
 }
