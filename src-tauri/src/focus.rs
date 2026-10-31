@@ -124,6 +124,11 @@ mod win {
         cur
     }
 
+    /// 没有 pid 时，哪些进程算「Codex 窗口所在进程」
+    pub fn is_codex_exe(exe: &str) -> bool {
+        exe.eq_ignore_ascii_case("ChatGPT.exe") || exe.to_lowercase().contains("codex")
+    }
+
     pub fn focus(pid: Option<u32>, agent: &str) -> Result<(), String> {
         let procs = snapshot();
         if let Some(pid) = pid {
@@ -151,9 +156,10 @@ mod win {
             return Err("没找到该会话所在的窗口（可能已经关闭）".into());
         }
         if agent == "codex" {
-            // 尽力而为：按可执行名包含 codex 找带窗口的进程（该进程名没有实测过）
+            // Codex Desktop 的窗口进程是 ChatGPT.exe（实测），名字里没有 codex；
+            // 其它形态按可执行名包含 codex 兜底。都要求有可见主窗口
             for (pid, p) in &procs {
-                if p.exe.to_lowercase().contains("codex") {
+                if is_codex_exe(&p.exe) {
                     if let Some(w) = window_of(*pid) {
                         return bring_to_front(w);
                     }
@@ -189,7 +195,7 @@ pub fn focus_session(_pid: Option<u32>, _agent: &str) -> Result<(), String> {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::win::{spawned_by_pid, stable_pid_in, Proc};
+    use super::win::{is_codex_exe, spawned_by_pid, stable_pid_in, Proc};
     use std::collections::HashMap;
 
     #[test]
@@ -208,5 +214,16 @@ mod tests {
         let cmd = r#"C:\x\claude.exe daemon run --origin transient --spawned-by {"label":"claude","cwd":"D:\\Play","pid":57584}"#;
         assert_eq!(spawned_by_pid(cmd), Some(57584));
         assert_eq!(spawned_by_pid("claude.exe --session-id abc"), None);
+    }
+
+    #[test]
+    fn matches_codex_desktop_process() {
+        assert!(is_codex_exe("ChatGPT.exe"));
+        assert!(is_codex_exe("chatgpt.EXE"));
+        assert!(is_codex_exe("codex.exe"));
+        assert!(is_codex_exe("Codex Desktop.exe"));
+        assert!(!is_codex_exe("chatgpt-helper.exe"));
+        assert!(!is_codex_exe("claude.exe"));
+        assert!(!is_codex_exe("explorer.exe"));
     }
 }
