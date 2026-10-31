@@ -5,8 +5,8 @@ export type Config = {
   token: string;
   machine: string;
   notifyDesktop: boolean;
-  /** 远程控制密钥（两端都有；Android 存在 localStorage 的配置里） */
-  controlToken: string;
+  /** 登录的邮箱（只用于显示；token 是登录后拿到的设备会话 token） */
+  email: string;
   /** 仅桌面：允许手机远程执行的项目目录 */
   allowedRoots: string[];
   /** 仅桌面：允许手机远程执行 */
@@ -40,12 +40,13 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, controlToken: "", allowedRoots: [], remoteEnabled: false };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", allowedRoots: [], remoteEnabled: false };
 
 export async function loadConfig(): Promise<Config> {
   if (isDesktop) return invoke<Config>("get_config");
   try {
-    return { ...defaults, ...JSON.parse(localStorage.getItem(LS_KEY) ?? "{}") };
+    const { controlToken: _legacy, ...saved } = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}"); // 旧版的控制密钥丢掉
+    return { ...defaults, ...saved };
   } catch {
     return defaults;
   }

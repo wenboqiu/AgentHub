@@ -18,25 +18,20 @@ type Props = {
   bus: Bus;
   /** 这个会话当前 pending 的授权（App 从 WS 维护） */
   approvals: Approval[];
-  /** 服务端是否开启远程控制（null = 还不知道） */
-  controlEnabled: boolean | null;
   /** 在线的执行器（机器名） */
   agents: string[];
-  hasControlToken: boolean;
   onBack(): void;
 };
 
 /** 不能发消息的原因；null 表示可以发 */
-export function sendBlockReason(p: { session: Session; hasControlToken: boolean; controlEnabled: boolean | null; agents: string[]; running: boolean }): string | null {
-  if (!p.hasControlToken) return "没有配置控制密钥（设置里填写后才能发消息）";
-  if (p.controlEnabled === false) return "服务端没有开启远程控制";
+export function sendBlockReason(p: { session: Session; agents: string[]; running: boolean }): string | null {
   if (!p.agents.includes(p.session.machine)) return "电脑端不在线";
   if (p.running) return "这个会话正在运行";
   if (p.session.agent === "codex" && p.session.state === "running") return "这个 Codex 会话正在 Desktop 里运行，等它结束后再发";
   return null;
 }
 
-export default function SessionView({ session, api, bus, approvals, controlEnabled, agents, hasControlToken, onBack }: Props) {
+export default function SessionView({ session, api, bus, approvals, agents, onBack }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [text, setText] = useState("");
@@ -80,7 +75,7 @@ export default function SessionView({ session, api, bus, approvals, controlEnabl
   }
 
   const active = isRunActive(run);
-  const reason = sendBlockReason({ session, hasControlToken, controlEnabled, agents, running: active });
+  const reason = sendBlockReason({ session, agents, running: active });
 
   const guard = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -135,7 +130,7 @@ export default function SessionView({ session, api, bus, approvals, controlEnabl
       {session.title && <div className="title wrap">{session.title}</div>}
       <main className="chat">
         <div className="btns">
-          <button onClick={loadHistory} disabled={busy || controlEnabled === false || !hasControlToken || !agents.includes(session.machine)}>
+          <button onClick={loadHistory} disabled={busy || !agents.includes(session.machine)}>
             加载电脑上的历史记录
           </button>
         </div>

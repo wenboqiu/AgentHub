@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Api, connect, isPending, type Approval, type ConnState, type Session } from "./lib/api";
-import { desktop, isDesktop, loadConfig, type Config } from "./lib/platform";
+import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session } from "./lib/api";
+import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
 import SessionView from "./SessionView";
 import { makeBus } from "./lib/sessionSync";
 import Settings from "./Settings";
@@ -126,16 +126,28 @@ export default function App() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   const [agents, setAgents] = useState<string[]>([]);
-  const [controlEnabled, setControlEnabled] = useState<boolean | null>(null);
+  const [notice, setNotice] = useState("");
   const bus = useMemo(() => makeBus(), []);
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState("");
   const cfgRef = useRef<Config | null>(null);
   cfgRef.current = cfg;
 
+  // 登录失效（任何请求 401 / WS 以 4401 关闭）：清掉本地 token，回到登录页并提示
+  const expire = useCallback(() => {
+    const c = cfgRef.current;
+    if (!c || !c.token) return;
+    const next: Config = { ...c, token: "", email: "" };
+    cfgRef.current = next;
+    setCfg(next);
+    setNotice(AUTH_EXPIRED_TEXT);
+    setOpenId(null);
+    saveConfig(next).catch(() => {});
+  }, []);
+
   const api = useMemo(
-    () => (cfg?.serverUrl && cfg.token ? new Api(cfg.serverUrl, cfg.token, cfg.controlToken ?? "") : null),
-    [cfg?.serverUrl, cfg?.token, cfg?.controlToken],
+    () => (cfg?.serverUrl && cfg.token ? new Api(cfg.serverUrl, cfg.token, expire) : null),
+    [cfg?.serverUrl, cfg?.token, expire],
   );
 
   const say = useCallback((m: string) => {
@@ -144,10 +156,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    loadConfig().then((c) => {
-      setCfg(c);
-      if (!c.serverUrl || !c.token) setView("settings");
-    });
+    loadConfig().then(setCfg);
   }, []);
 
   useEffect(() => {
@@ -162,14 +171,15 @@ export default function App() {
       setSessions(new Map());
       setApprovals(new Map());
       setAgents([]);
-      setControlEnabled(null);
       return;
     }
     return connect(api.url, api.token, {
       onState: (c) => {
         setConn(c);
-        if (c === "open") api.controlStatus().then((r) => setControlEnabled(r.enabled), () => {});
+        // 握手被 401 拒绝时浏览器只给 1006，没法区分；断线后探一下登录是否还有效（401 会触发 expire）
+        if (c === "closed") api.me().catch(() => {});
       },
+      onAuthExpired: expire,
       onSnapshot: (list, ag, aps) => {
         setSessions(new Map(list.map((s) => [s.id, s])));
         setAgents(ag);
@@ -200,7 +210,7 @@ export default function App() {
       },
       onAgents: setAgents,
     });
-  }, [api, bus]);
+  }, [api, bus, expire]);
 
   const list = useMemo(() => [...sessions.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)), [sessions]);
   const approvalSessions = useMemo(() => new Set([...approvals.values()].map((a) => a.sessionId)), [approvals]);
@@ -251,13 +261,17 @@ export default function App() {
   };
 
   if (!cfg) return null;
-  if (view === "settings") {
+  // 没登录：直接显示登录页
+  if (!cfg.token.trim() || view === "settings") {
     return (
       <Settings
         cfg={cfg}
+        api={api}
+        notice={notice}
         onClose={() => setView("list")}
         onSaved={(c) => {
           setCfg(c);
+          setNotice("");
           setView("list");
         }}
       />
@@ -271,9 +285,7 @@ export default function App() {
         api={api}
         bus={bus}
         approvals={[...approvals.values()].filter((a) => a.sessionId === openId)}
-        controlEnabled={controlEnabled}
         agents={agents}
-        hasControlToken={!!cfg.controlToken?.trim()}
         onBack={closeSession}
       />
     );

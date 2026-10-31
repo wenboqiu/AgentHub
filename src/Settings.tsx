@@ -1,8 +1,39 @@
-import { useEffect, useState } from "react";
-import { Api } from "./lib/api";
+import { useCallback, useEffect, useState } from "react";
+import { Api, type Device } from "./lib/api";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
-export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClose(): void; onSaved(c: Config): void }) {
+export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
+
+/** 登录时上报的设备名：桌面「<machine>（电脑）」，Android「<机型>（手机）」 */
+export function deviceName(cfg: Config): string {
+  if (isAndroid) {
+    // UA 形如 "... (Linux; Android 14; OPPO PHN110 Build/...) ..."；新版 Chrome 会把机型缩成 "K"，那就取不到
+    const m = /Android[^;)]*;\s*([^;)]+)/.exec(navigator.userAgent);
+    const model = m?.[1]?.replace(/\s*Build\/.*$/, "").trim() ?? "";
+    return model.length > 1 ? `${model}（手机）` : "Android 手机";
+  }
+  if (isDesktop) return `${cfg.machine.trim() || "电脑"}（电脑）`;
+  return "浏览器";
+}
+
+const fmtTime = (iso: string) => {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
+type Props = {
+  cfg: Config;
+  /** 已登录时的 API（401 时会通知 App 回到登录页） */
+  api: Api | null;
+  /** 登录页上方的提示（比如「登录已过期，请重新登录」） */
+  notice?: string;
+  onClose(): void;
+  onSaved(c: Config): void;
+};
+
+export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) {
+  const loggedIn = !!cfg.token.trim();
   const [form, setForm] = useState<Config>(cfg);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -13,6 +44,16 @@ export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClo
   const [autostart, setAutostart] = useState(false);
   const [bg, setBg] = useState(false);
   const [notif, setNotif] = useState(true);
+
+  // 登录表单
+  const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
+  const [email, setEmail] = useState(cfg.email ?? "");
+  const [password, setPassword] = useState("");
+  // 已登录：设备列表、改密码
+  const [devices, setDevices] = useState<Device[] | null>(null);
+  const [oldPw, setOldPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [newPw2, setNewPw2] = useState("");
 
   const set = <K extends keyof Config>(k: K, v: Config[K]) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -37,28 +78,86 @@ export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClo
     return () => window.clearInterval(t);
   }, []);
 
-  const test = async () => {
+  const loadDevices = useCallback(() => {
+    api?.devices().then(setDevices, () => {});
+  }, [api]);
+  useEffect(() => {
+    if (loggedIn) loadDevices();
+  }, [loggedIn, loadDevices]);
+
+  const login = async () => {
+    const url = server.trim().replace(/\/+$/, "");
+    if (!url || !email.trim() || !password) return setMsg("请填好服务器地址、邮箱和密码");
     setBusy(true);
-    setMsg("测试中…");
+    setMsg("登录中…");
     try {
-      const api = new Api(form.serverUrl, form.token, form.controlToken);
-      await api.health();
-      const list = await api.sessions();
-      setMsg(`连接成功，服务端当前有 ${list.length} 个会话`);
+      const r = await Api.login(url, email, password, deviceName(cfg));
+      const c: Config = { ...cfg, serverUrl: url, token: r.token, email: r.email };
+      await saveConfig(c);
+      // Android 后台提醒开着时，用新 token 重启原生服务
+      if (isAndroid && native()?.isRunning()) native()?.start(c.serverUrl, c.token);
+      setPassword("");
+      setMsg("");
+      onSaved(c);
     } catch (e) {
-      setMsg(`连接失败：${e instanceof Error ? e.message : String(e)}`);
+      setMsg(`登录失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
   };
 
+  const logout = async () => {
+    setBusy(true);
+    try {
+      await api?.logout().catch(() => {});
+      const c: Config = { ...cfg, token: "", email: "" };
+      await saveConfig(c);
+      if (isAndroid) native()?.stop();
+      onSaved(c);
+    } catch (e) {
+      setMsg(`退出失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const changePassword = async () => {
+    if (!api) return;
+    if (newPw.length < 8) return setMsg("新密码至少 8 位");
+    if (newPw.length > 200) return setMsg("新密码太长");
+    if (newPw !== newPw2) return setMsg("两次输入的新密码不一致");
+    setBusy(true);
+    try {
+      await api.changePassword(oldPw, newPw);
+      setOldPw("");
+      setNewPw("");
+      setNewPw2("");
+      setMsg("密码已修改，其它设备需要重新登录");
+      loadDevices();
+    } catch (e) {
+      setMsg(`修改失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeDevice = async (d: Device) => {
+    if (!api) return;
+    try {
+      await api.removeDevice(d.id);
+      loadDevices();
+    } catch (e) {
+      setMsg(`移除失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const save = async () => {
+    // 只改设置页管理的字段；服务器地址、token、邮箱以 App 里最新的 cfg 为准
     const c: Config = {
-      ...form,
-      serverUrl: form.serverUrl.trim().replace(/\/+$/, ""),
-      token: form.token.trim(),
+      ...cfg,
       machine: form.machine.trim(),
-      controlToken: form.controlToken.trim(),
+      notifyDesktop: form.notifyDesktop,
+      remoteEnabled: form.remoteEnabled,
       allowedRoots: rootsText
         .split(/\r?\n/)
         .map((l) => l.trim())
@@ -66,8 +165,6 @@ export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClo
     };
     try {
       await saveConfig(c);
-      // Android 后台服务已开启时，把新地址同步给原生
-      if (isAndroid && bg && c.serverUrl && c.token) native()?.start(c.serverUrl, c.token);
       onSaved(c);
     } catch (e) {
       setMsg(`保存失败：${String(e)}`);
@@ -97,18 +194,54 @@ export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClo
   const toggleBg = (on: boolean) => {
     const n = native();
     if (!n) return setMsg("当前环境没有 Android 原生桥");
-    if (on) {
-      if (!form.serverUrl || !form.token) return setMsg("请先填好服务器地址和 token");
-      // 先把配置存下来，原生服务才拿到最新值
-      saveConfig({ ...form }).catch(() => {});
-      n.start(form.serverUrl.trim().replace(/\/+$/, ""), form.token.trim());
-    } else n.stop();
+    if (on) n.start(cfg.serverUrl.trim().replace(/\/+$/, ""), cfg.token.trim());
+    else n.stop();
     window.setTimeout(() => {
       setBg(n.isRunning());
       setNotif(n.notificationsEnabled());
     }, 500);
     setBg(on);
   };
+
+  // ---------- 未登录：只显示登录表单 ----------
+  if (!loggedIn) {
+    return (
+      <div className="app settings">
+        <header>
+          <h1>登录 AgentHub</h1>
+        </header>
+        <main>
+          {notice && <p className="msg bad">{notice}</p>}
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void login();
+            }}
+          >
+            <label>
+              服务器地址
+              <input value={server} onChange={(e) => setServer(e.target.value)} placeholder={DEFAULT_SERVER} autoCapitalize="off" autoCorrect="off" />
+            </label>
+            <label>
+              邮箱
+              <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoCapitalize="off" autoCorrect="off" autoComplete="username" />
+            </label>
+            <label>
+              密码
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+            </label>
+            <div className="btns">
+              <button className="primary" type="submit" disabled={busy}>
+                登录
+              </button>
+            </div>
+          </form>
+          {msg && <p className="msg">{msg}</p>}
+          <p className="hint">没有注册入口，账号由管理员创建。</p>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="app settings">
@@ -118,32 +251,70 @@ export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClo
         <button onClick={onClose}>返回</button>
       </header>
       <main>
-        <label>
-          服务器地址
-          <input value={form.serverUrl} onChange={(e) => set("serverUrl", e.target.value)} placeholder="https://agenthub.example.com" autoCapitalize="off" autoCorrect="off" />
-        </label>
-        <label>
-          Token
-          <input type="password" value={form.token} onChange={(e) => set("token", e.target.value)} autoCapitalize="off" autoCorrect="off" />
-        </label>
-        <label>
-          控制密钥（可选；填了才能在手机 / 电脑上给会话发消息、批授权）
-          <input type="password" value={form.controlToken} onChange={(e) => set("controlToken", e.target.value)} autoCapitalize="off" autoCorrect="off" />
-        </label>
+        <section className="box">
+          <h2>账号</h2>
+          <p className="kv">
+            邮箱：<b>{cfg.email || "（未知）"}</b>
+          </p>
+          <p className="kv">
+            服务器：<b>{cfg.serverUrl}</b>
+          </p>
+          <div className="btns">
+            <button onClick={logout} disabled={busy}>
+              退出登录
+            </button>
+          </div>
+          <h3>修改密码</h3>
+          <label>
+            旧密码
+            <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+          </label>
+          <label>
+            新密码（8 位以上）
+            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+          </label>
+          <label>
+            再输一次新密码
+            <input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} autoComplete="new-password" />
+          </label>
+          <div className="btns">
+            <button onClick={changePassword} disabled={busy || !oldPw || !newPw}>
+              修改密码
+            </button>
+          </div>
+          <h3>已登录设备</h3>
+          {devices === null && <p className="hint">加载中…</p>}
+          <ul className="devices">
+            {(devices ?? []).map((d) => (
+              <li key={d.id}>
+                <span className="dev-name">
+                  {d.device || "未知设备"}
+                  {d.current && <span className="tag claude">本机</span>}
+                </span>
+                <span className="dev-time">最近使用 {fmtTime(d.lastUsedAt)}</span>
+                {!d.current && (
+                  <button className="link" onClick={() => removeDevice(d)}>
+                    移除
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+
         {isDesktop && (
           <label>
-            本机名称（machine）
+            本机名称（machine；下次登录时作为设备名）
             <input value={form.machine} onChange={(e) => set("machine", e.target.value)} />
           </label>
         )}
-        <div className="btns">
-          <button onClick={test} disabled={busy || !form.serverUrl}>
-            测试连接
-          </button>
-          <button className="primary" onClick={save}>
-            保存
-          </button>
-        </div>
+        {isDesktop && (
+          <div className="btns">
+            <button className="primary" onClick={save}>
+              保存
+            </button>
+          </div>
+        )}
         {msg && <p className="msg">{msg}</p>}
 
         {isDesktop && (
@@ -159,7 +330,7 @@ export default function Settings({ cfg, onClose, onSaved }: { cfg: Config; onClo
             </label>
             <label className="check">
               <input type="checkbox" checked={form.remoteEnabled} onChange={(e) => set("remoteEnabled", e.target.checked)} />
-              允许手机远程执行（保存后生效；需要填上面的控制密钥）
+              允许手机远程执行（保存后生效；每次授权仍要在手机上确认）
             </label>
             <label>
               允许的项目目录（每行一个；只有位于这些目录下的会话才能被远程接着跑）
