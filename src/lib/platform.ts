@@ -5,7 +5,14 @@ export type Config = {
   token: string;
   machine: string;
   notifyDesktop: boolean;
+  /** 远程控制密钥（两端都有；Android 存在 localStorage 的配置里） */
+  controlToken: string;
+  /** 仅桌面：允许手机远程执行的项目目录 */
+  allowedRoots: string[];
+  /** 仅桌面：允许手机远程执行 */
+  remoteEnabled: boolean;
 };
+export type RemoteInfo = { connected: boolean; lastError: string | null };
 
 export type HooksStatus = { installed: boolean; scriptExists: boolean; settingsExists: boolean };
 export type CollectorInfo = {
@@ -33,7 +40,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, controlToken: "", allowedRoots: [], remoteEnabled: false };
 
 export async function loadConfig(): Promise<Config> {
   if (isDesktop) return invoke<Config>("get_config");
@@ -58,6 +65,7 @@ export async function saveConfig(c: Config): Promise<void> {
 
 export const desktop = {
   status: () => invoke<CollectorInfo>("get_status"),
+  remoteStatus: () => invoke<RemoteInfo>("remote_status"),
   hooksStatus: () => invoke<HooksStatus>("claude_hooks_status"),
   installHooks: () => invoke<HooksStatus>("install_claude_hooks"),
   uninstallHooks: () => invoke<HooksStatus>("uninstall_claude_hooks"),

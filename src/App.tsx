@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Api, connect, isPending, type ConnState, type Session } from "./lib/api";
+import { Api, connect, isPending, type Approval, type ConnState, type Session } from "./lib/api";
 import { desktop, isDesktop, loadConfig, type Config } from "./lib/platform";
+import SessionView from "./SessionView";
+import { makeBus } from "./lib/sessionSync";
 import Settings from "./Settings";
 
 const AGENT_LABEL = { claude: "Claude", codex: "Codex" } as const;
@@ -47,21 +49,53 @@ async function notifyDesktop(s: Session) {
   }
 }
 
-function Row({ s, now, machine, onAck, onFocus }: { s: Session; now: number; machine: string; onAck(): void; onFocus(): void }) {
+async function notifyApproval(a: Approval) {
+  try {
+    const n = await import("@tauri-apps/plugin-notification");
+    let ok = await n.isPermissionGranted();
+    if (!ok) ok = (await n.requestPermission()) === "granted";
+    if (!ok) return;
+    n.sendNotification({ title: `${a.project || "会话"} · 请求授权`, body: `${a.tool} ${a.detail}`.slice(0, 80) });
+  } catch {
+    /* 通知失败不影响主流程 */
+  }
+}
+
+function Row({
+  s,
+  now,
+  machine,
+  needsApproval,
+  onOpen,
+  onAck,
+  onFocus,
+}: {
+  s: Session;
+  now: number;
+  machine: string;
+  needsApproval: boolean;
+  onOpen(): void;
+  onAck(): void;
+  onFocus(): void;
+}) {
   const [open, setOpen] = useState(false);
-  const pending = isPending(s);
+  const pending = isPending(s) || needsApproval;
+  const stop = (fn: () => void) => (e: { stopPropagation(): void }) => {
+    e.stopPropagation();
+    fn();
+  };
   const canFocus = isDesktop && s.machine === machine && (s.pid != null || s.agent === "codex");
   return (
-    <li className={`row ${pending ? "pending" : ""} st-${s.state}`}>
+    <li className={`row clickable ${pending ? "pending" : ""} st-${s.state}`} onClick={onOpen}>
       <div className="row-head">
         <span className={`tag ${s.agent}`}>{AGENT_LABEL[s.agent]}</span>
         <strong className="project">{s.project || "(未知项目)"}</strong>
         <span className="machine">{s.machine}</span>
-        {pending && <span className="badge">{ALERT_LABEL[s.state]}</span>}
+        {needsApproval ? <span className="badge">待授权</span> : isPending(s) && <span className="badge">{ALERT_LABEL[s.state]}</span>}
       </div>
       {s.title && <div className="title">{s.title}</div>}
       {s.summary && (
-        <div className={`summary ${open ? "open" : ""}`} onClick={() => setOpen(!open)} title="点击展开/收起">
+        <div className={`summary ${open ? "open" : ""}`} onClick={stop(() => setOpen(!open))} title="点击展开/收起">
           {s.summary}
         </div>
       )}
@@ -69,12 +103,12 @@ function Row({ s, now, machine, onAck, onFocus }: { s: Session; now: number; mac
         <span className="since">{sinceText(s, now)}</span>
         <span className="actions">
           {canFocus && (
-            <button className="link" onClick={onFocus}>
+            <button className="link" onClick={stop(onFocus)}>
               跳转
             </button>
           )}
-          {pending && (
-            <button className="link" onClick={onAck}>
+          {isPending(s) && (
+            <button className="link" onClick={stop(onAck)}>
               已处理
             </button>
           )}
@@ -89,12 +123,20 @@ export default function App() {
   const [sessions, setSessions] = useState<Map<string, Session>>(new Map());
   const [conn, setConn] = useState<ConnState>("closed");
   const [view, setView] = useState<"list" | "settings">("list");
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
+  const [agents, setAgents] = useState<string[]>([]);
+  const [controlEnabled, setControlEnabled] = useState<boolean | null>(null);
+  const bus = useMemo(() => makeBus(), []);
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState("");
   const cfgRef = useRef<Config | null>(null);
   cfgRef.current = cfg;
 
-  const api = useMemo(() => (cfg?.serverUrl && cfg.token ? new Api(cfg.serverUrl, cfg.token) : null), [cfg?.serverUrl, cfg?.token]);
+  const api = useMemo(
+    () => (cfg?.serverUrl && cfg.token ? new Api(cfg.serverUrl, cfg.token, cfg.controlToken ?? "") : null),
+    [cfg?.serverUrl, cfg?.token, cfg?.controlToken],
+  );
 
   const say = useCallback((m: string) => {
     setToast(m);
@@ -118,11 +160,22 @@ export default function App() {
     if (!api) {
       setConn("closed");
       setSessions(new Map());
+      setApprovals(new Map());
+      setAgents([]);
+      setControlEnabled(null);
       return;
     }
     return connect(api.url, api.token, {
-      onState: setConn,
-      onSnapshot: (list) => setSessions(new Map(list.map((s) => [s.id, s]))),
+      onState: (c) => {
+        setConn(c);
+        if (c === "open") api.controlStatus().then((r) => setControlEnabled(r.enabled), () => {});
+      },
+      onSnapshot: (list, ag, aps) => {
+        setSessions(new Map(list.map((s) => [s.id, s])));
+        setAgents(ag);
+        setApprovals(new Map(aps.filter((a) => a.status === "pending").map((a) => [a.id, a])));
+        bus.emit({ kind: "resync" });
+      },
       onSession: (s, notify) => {
         setSessions((m) => new Map(m).set(s.id, s));
         // Android 前端不弹通知（交给原生服务，避免重复）
@@ -134,13 +187,27 @@ export default function App() {
           n.delete(id);
           return n;
         }),
+      onRun: (r) => bus.emit({ kind: "run", r }),
+      onMessage: (m) => bus.emit({ kind: "message", m }),
+      onApproval: (a, notify) => {
+        setApprovals((m) => {
+          const n = new Map(m);
+          if (a.status === "pending") n.set(a.id, a);
+          else n.delete(a.id);
+          return n;
+        });
+        if (notify && a.status === "pending" && isDesktop && cfgRef.current?.notifyDesktop) void notifyApproval(a);
+      },
+      onAgents: setAgents,
     });
-  }, [api]);
+  }, [api, bus]);
 
   const list = useMemo(() => [...sessions.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)), [sessions]);
-  const pending = list.filter(isPending);
-  const running = list.filter((s) => s.state === "running");
-  const others = list.filter((s) => !isPending(s) && s.state !== "running");
+  const approvalSessions = useMemo(() => new Set([...approvals.values()].map((a) => a.sessionId)), [approvals]);
+  const needsAttention = (s: Session) => isPending(s) || approvalSessions.has(s.id);
+  const pending = list.filter(needsAttention);
+  const running = list.filter((s) => !needsAttention(s) && s.state === "running");
+  const others = list.filter((s) => !needsAttention(s) && s.state !== "running");
 
   useEffect(() => {
     if (isDesktop) desktop.setBadge(pending.length).catch(() => {});
@@ -158,6 +225,21 @@ export default function App() {
     import("@tauri-apps/api/event").then(({ listen }) => listen("tray-ack-all", () => void ackAll()).then((f) => (un = f)));
     return () => un?.();
   }, [ackAll]);
+
+  // 进入详情页时 pushState，这样 Android 返回键 / 浏览器后退能回到列表
+  const openSession = (id: string) => {
+    window.history.pushState({ agenthub: "session" }, "");
+    setOpenId(id);
+  };
+  useEffect(() => {
+    const onPop = () => setOpenId(null);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+  const closeSession = () => {
+    if (window.history.state?.agenthub === "session") window.history.back();
+    else setOpenId(null);
+  };
 
   const focus = async (s: Session) => {
     try {
@@ -182,11 +264,35 @@ export default function App() {
     );
   }
 
+  if (openId && api) {
+    return (
+      <SessionView
+        session={sessions.get(openId)}
+        api={api}
+        bus={bus}
+        approvals={[...approvals.values()].filter((a) => a.sessionId === openId)}
+        controlEnabled={controlEnabled}
+        agents={agents}
+        hasControlToken={!!cfg.controlToken?.trim()}
+        onBack={closeSession}
+      />
+    );
+  }
+
   const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
   const renderList = (items: Session[]) => (
     <ul className="list">
       {items.map((s) => (
-        <Row key={s.id} s={s} now={now} machine={cfg.machine} onAck={() => ack(s.id)} onFocus={() => focus(s)} />
+        <Row
+          key={s.id}
+          s={s}
+          now={now}
+          machine={cfg.machine}
+          needsApproval={approvalSessions.has(s.id)}
+          onOpen={() => openSession(s.id)}
+          onAck={() => ack(s.id)}
+          onFocus={() => focus(s)}
+        />
       ))}
     </ul>
   );

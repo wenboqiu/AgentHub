@@ -264,3 +264,116 @@ input:not([type="checkbox"]) {
   color: var(--dim);
   font-size: 12px;
 }
+.row.clickable {
+  cursor: pointer;
+}
+textarea {
+  font: inherit;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--fg);
+  resize: vertical;
+  width: 100%;
+}
+textarea:disabled {
+  opacity: 0.6;
+}
+.title.wrap {
+  white-space: normal;
+  margin: 0 0 4px;
+}
+.session-view {
+  display: flex;
+  flex-direction: column;
+}
+.session-view .chat {
+  flex: 1;
+}
+.msgs {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--card);
+  border: 1px solid var(--line);
+}
+.msg.user {
+  align-self: flex-end;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.msg.assistant {
+  align-self: flex-start;
+}
+.msg.tool,
+.msg.system {
+  align-self: flex-start;
+  max-width: 100%;
+  background: none;
+  border: none;
+  padding: 0 4px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.msg.tool {
+  font-family: ui-monospace, Consolas, monospace;
+}
+.msg.approval {
+  align-self: stretch;
+  max-width: 100%;
+  background: #fff7dc;
+  border-color: #e5c34a;
+  color: #4a3b00;
+  font-size: 13px;
+}
+@media (prefers-color-scheme: dark) {
+  .msg.approval {
+    background: #3a3317;
+    border-color: #7a6a25;
+    color: #f1e3a6;
+  }
+}
+.approval-card {
+  border: 1px solid #e5a000;
+  background: var(--card);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+.approval-card pre {
+  margin: 6px 0;
+  max-height: 200px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.run-error {
+  color: var(--alert);
+  font-size: 13px;
+}
+.composer {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg);
+  padding: 8px 0 4px;
+}
+.composer .btns {
+  justify-content: flex-end;
+}
