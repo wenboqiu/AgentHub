@@ -48,6 +48,10 @@ class AgentHubService : Service() {
   private var backoff = 1000L
   private var connected = false
   private var stopped = false
+
+  // 登录失效（握手 401 / 关闭码 4401）：停止重连，直到下次 start() 带来新 token
+  private var authExpired = false
+  private var activeToken = ""
   private var netCallback: ConnectivityManager.NetworkCallback? = null
 
   override fun onBind(intent: Intent?): IBinder? = null
@@ -64,6 +68,18 @@ class AgentHubService : Service() {
       startForegroundCompat()
       stopSelf()
       return START_NOT_STICKY
+    }
+    // start() 每次都会重新进到这里：token 变了（重新登录）就放弃旧连接、清掉失效状态
+    val token = p.getString("token", "") ?: ""
+    if (authExpired || token != activeToken) {
+      authExpired = false
+      activeToken = token
+      generation++
+      ws?.cancel()
+      ws = null
+      connected = false
+      backoff = 1000L
+      handler.removeCallbacks(reconnect)
     }
     startForegroundCompat()
     running = true
@@ -105,7 +121,7 @@ class AgentHubService : Service() {
   private fun startForegroundCompat() {
     val n: Notification = NotificationCompat.Builder(this, CH_SERVICE)
       .setSmallIcon(R.drawable.ic_stat)
-      .setContentTitle("AgentHub 正在监听")
+      .setContentTitle(if (authExpired) "登录已过期，请打开 AgentHub 重新登录" else "AgentHub 正在监听")
       .setPriority(NotificationCompat.PRIORITY_MIN)
       .setOngoing(true)
       .setContentIntent(openAppIntent())
@@ -148,23 +164,44 @@ class AgentHubService : Service() {
         handler.post { if (gen == generation) handleMessage(text) }
       }
 
+      override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+        if (code == 4401) handler.post { if (gen == generation) markAuthExpired() }
+      }
+
       override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-        handler.post { if (gen == generation) dropAndRetry() }
+        handler.post {
+          if (gen != generation) return@post
+          if (code == 4401) markAuthExpired() else dropAndRetry()
+        }
       }
 
       override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-        handler.post { if (gen == generation) dropAndRetry() }
+        handler.post {
+          if (gen != generation) return@post
+          if (response?.code == 401) markAuthExpired() else dropAndRetry()
+        }
       }
     })
   }
 
   private val reconnect = Runnable { connect() }
 
+  // 登录失效：不再重连，常驻通知提示去重新登录；下次 start()（重新登录后）才恢复
+  private fun markAuthExpired() {
+    if (authExpired) return
+    authExpired = true
+    connected = false
+    ws?.cancel()
+    ws = null
+    handler.removeCallbacks(reconnect)
+    if (!stopped) startForegroundCompat()
+  }
+
   // 断开后 1s -> 60s 指数退避重连
   private fun dropAndRetry() {
     connected = false
     ws = null
-    if (stopped) return
+    if (stopped || authExpired) return
     handler.removeCallbacks(reconnect)
     handler.postDelayed(reconnect, backoff)
     backoff = (backoff * 2).coerceAtMost(60_000L)
@@ -177,7 +214,7 @@ class AgentHubService : Service() {
       // 网络恢复时立即重连（已连上就不动）
       override fun onAvailable(network: Network) {
         handler.post {
-          if (stopped || connected) return@post
+          if (stopped || connected || authExpired) return@post
           handler.removeCallbacks(reconnect)
           backoff = 1000L
           connect()
