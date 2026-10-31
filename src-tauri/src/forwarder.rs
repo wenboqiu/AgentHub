@@ -54,6 +54,15 @@ pub struct Forwarder {
 }
 
 /// 队列满了丢最旧的
+/// Postgres 的 text 不能含 NUL：带 NUL 的事件会让服务端整批 500，队列一直重试卡住
+fn strip_nul(e: &mut Event) {
+    for s in [&mut e.session_id, &mut e.cwd].into_iter().chain(e.title.as_mut()).chain(e.summary.as_mut()) {
+        if s.contains('\0') {
+            *s = s.replace('\0', "");
+        }
+    }
+}
+
 fn push_trim(q: &mut VecDeque<Event>, ev: Event) {
     q.push_back(ev);
     while q.len() > QUEUE_MAX {
@@ -107,6 +116,7 @@ impl Forwarder {
                 if e.machine.is_empty() {
                     e.machine = cfg.machine.clone();
                 }
+                strip_nul(e);
             }
             let url = format!("{}/events", cfg.server_url.trim().trim_end_matches('/'));
             let res = client
@@ -163,6 +173,15 @@ mod tests {
             pid: None,
             quiet: false,
         }
+    }
+
+    #[test]
+    fn strips_nul_chars() {
+        let mut e = ev(1);
+        e.summary = Some("a\0b".into());
+        e.cwd = "x\0".into();
+        strip_nul(&mut e);
+        assert_eq!((e.summary.as_deref(), e.cwd.as_str()), (Some("ab"), "x"));
     }
 
     #[test]
