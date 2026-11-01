@@ -27,27 +27,38 @@
 
 ## 提交与重新打包
 
-任务管理和 UI 实现已提交：`58a3cfe`。2026-11-01 重新构建了以下 0.5.0 产物，均包含最新 UI；没有推送、部署或覆盖安装用户现有应用。
+任务管理和初版 UI 实现已提交：`58a3cfe`。后续窗口与横栏修正见下节。以下为最新 0.5.0 产物；没有推送、部署或覆盖安装用户现有应用。
 
 | 产物 | 文件 | 大小 |
 |---|---|---|
-| Windows x64 安装包 | `src-tauri/target/release/bundle/nsis/AgentHub_0.5.0_x64-setup.exe` | 2,199,613 字节 |
-| Android ARM64 APK | `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 6,190,431 字节 |
+| Windows x64 安装包 | `src-tauri/target/release/bundle/nsis/AgentHub_0.5.0_x64-setup.exe` | 2,200,354 字节 |
+| Android ARM64 APK | `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 6,190,479 字节 |
 
 - `npm run tauri build`：退出码 0。
 - `npm run tauri android build -- --apk --target aarch64`：退出码 0；构建后 Gradle daemon 已停止。
-- 两次构建的前端资源一致：`index-BLtX6vGE.css`、`index-DKqshHDy.js`。
+- 两次构建的前端资源一致：`index-KTfpz9TY.css`、`index-PtwIyvKt.js`。
 - APK 签名通过 `apksigner verify`；包名 `com.wenbo.agenthub`，版本 `0.5.0` / `5000`，架构 `arm64-v8a`。
 
 SHA-256：
 
 ```text
-Windows 162F614F45CFF4FCB0E7D54ABC7C67ADE9D57118A564E1FF71D16B5E4DB2F8B4
-Android A470D9C6D455E48A4985967FD0D0D8B3FEB67B4A2FE35EC99E0117A2F51E04BF
+Windows E6E6CC5C09AE60A418FCA07A9A33A63C7CA2432DAA4FD5279E89EF39C3A646F7
+Android 2970F0B1FB6D03A2278C53B00E9B524E5E45E3659BE19AEFC43CE3602D710329
 ```
 
 ## 截图
 
+以下任务页截图记录初版 UI；横栏铺满后的效果见下节。
+
 ![桌面深色任务页](desktop-dark.png)
 
 ![手机浅色任务页](mobile-light.png)
+
+## 窗口与横栏修正
+
+- Windows 默认窗口从 `520×760` 调整为 `1000×760`，仍允许缩小到原有最小尺寸。
+- 顶部横栏背景与底部分隔线铺满可用窗口宽度，内部控件保持与正文一致的内边距及安全区。
+- 登录与设置页仅限制表单宽度，横栏不再受表单宽度限制。
+- `npm run build` 通过。浏览器实测 `1000×760` 与 `400×800`：横栏左边界为 0，右边界分别为 1000 和 400，没有横向溢出。
+
+![默认宽度与铺满横栏](header-wide.png)

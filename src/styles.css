@@ -41,8 +41,9 @@ input[type="checkbox"], input[type="radio"] { width: 20px; height: 20px; accent-
   .entity-row:hover, .row.clickable:hover { background: var(--field); }
   button.link:hover, .session-open:hover { background: var(--accent-soft); }
 }
-.app { width: 100%; min-height: 100vh; min-height: 100dvh; padding: env(safe-area-inset-top) max(clamp(16px,3vw,48px),env(safe-area-inset-right)) calc(env(safe-area-inset-bottom) + 32px) max(clamp(16px,3vw,48px),env(safe-area-inset-left)); }
-.app > header { position: sticky; top: env(safe-area-inset-top); z-index: 5; display: flex; align-items: center; gap: 12px; min-height: 76px; padding: 14px 0; background: var(--glass); backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%); border-bottom: 1px solid var(--line); }
+.app { --gutter-left: max(clamp(16px,3vw,48px),env(safe-area-inset-left)); --gutter-right: max(clamp(16px,3vw,48px),env(safe-area-inset-right)); width: 100%; min-height: 100vh; min-height: 100dvh; padding: env(safe-area-inset-top) var(--gutter-right) calc(env(safe-area-inset-bottom) + 32px) var(--gutter-left); }
+/* Extend the toolbar surface to the window edges; its controls still align with content. */
+.app > header { position: sticky; top: env(safe-area-inset-top); z-index: 5; display: flex; align-items: center; gap: 12px; min-height: 76px; margin-left: calc(-1 * var(--gutter-left)); margin-right: calc(-1 * var(--gutter-right)); padding: 14px var(--gutter-right) 14px var(--gutter-left); background: var(--glass); backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%); border-bottom: 1px solid var(--line); }
 header h1 { font-size: 20px; font-weight: 650; letter-spacing: -.5px; }
 h1, h2, h3, p { overflow-wrap: anywhere; }
 h1 { margin: 0; }
@@ -124,8 +125,7 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .entity-detail > .list { margin-bottom: 16px; }
 .entity-detail > .danger, .action-bar .danger { margin-top: 20px; }
 .toast { position: relative; z-index: 6; background: var(--card); border: 1px solid var(--line); box-shadow: var(--shadow); color: var(--fg); padding: 14px 18px; border-radius: 16px; margin: 12px 0; overflow-wrap: anywhere; }
-.app.settings { max-width: 720px; margin: 0 auto; }
-.settings main { padding-top: 24px; }
+.settings main { width: 100%; max-width: 640px; margin: 0 auto; padding-top: 24px; }
 .settings main > form { padding: 28px; border-radius: 24px; background: var(--card); }
 .settings label { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; font-size: 13px; color: var(--dim); }
 .settings label.check { flex-direction: row; align-items: center; gap: 12px; color: var(--fg); min-height: 44px; }
