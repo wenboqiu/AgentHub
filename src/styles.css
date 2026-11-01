@@ -34,10 +34,16 @@ body {
   color: var(--fg);
 }
 .app {
-  max-width: 720px;
-  margin: 0 auto;
+  /* 铺满窗口：窄屏 12px 边距（和手机一致），宽屏随窗口增加到 32px */
+  width: 100%;
   min-height: 100vh;
-  padding: env(safe-area-inset-top) 12px calc(env(safe-area-inset-bottom) + 16px);
+  box-sizing: border-box;
+  padding: env(safe-area-inset-top) clamp(12px, 3vw, 32px) calc(env(safe-area-inset-bottom) + 16px);
+}
+/* 设置和登录是表单，拉得太宽反而难用，限制宽度并居中 */
+.app.settings {
+  max-width: 640px;
+  margin: 0 auto;
 }
 header {
   display: flex;
@@ -300,7 +306,7 @@ textarea:disabled {
   gap: 8px;
 }
 .msg {
-  max-width: 85%;
+  max-width: min(85%, 960px);
   padding: 8px 12px;
   border-radius: 12px;
   white-space: pre-wrap;
