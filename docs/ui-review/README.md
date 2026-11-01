@@ -23,7 +23,28 @@
 - 隔离的内存数据验证：任务详情编辑/保存出现“已保存”；返回任务列表保留修改；Tab 导航显示清晰焦点；目标进度正确显示。
 - 截图使用模拟数据，不连接生产服务，不读取或改写已安装应用的配置。
 
-未重新打包 Windows 安装包或 APK；此前的 0.5.0 安装产物不包含本次 UI 更新。未进行手机软键盘、原生 WebView 与屏幕阅读器的完整验收。
+未进行手机软键盘、原生 WebView 与屏幕阅读器的完整验收。
+
+## 提交与重新打包
+
+任务管理和 UI 实现已提交：`58a3cfe`。2026-11-01 重新构建了以下 0.5.0 产物，均包含最新 UI；没有推送、部署或覆盖安装用户现有应用。
+
+| 产物 | 文件 | 大小 |
+|---|---|---|
+| Windows x64 安装包 | `src-tauri/target/release/bundle/nsis/AgentHub_0.5.0_x64-setup.exe` | 2,199,613 字节 |
+| Android ARM64 APK | `src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release.apk` | 6,190,431 字节 |
+
+- `npm run tauri build`：退出码 0。
+- `npm run tauri android build -- --apk --target aarch64`：退出码 0；构建后 Gradle daemon 已停止。
+- 两次构建的前端资源一致：`index-BLtX6vGE.css`、`index-DKqshHDy.js`。
+- APK 签名通过 `apksigner verify`；包名 `com.wenbo.agenthub`，版本 `0.5.0` / `5000`，架构 `arm64-v8a`。
+
+SHA-256：
+
+```text
+Windows 162F614F45CFF4FCB0E7D54ABC7C67ADE9D57118A564E1FF71D16B5E4DB2F8B4
+Android A470D9C6D455E48A4985967FD0D0D8B3FEB67B4A2FE35EC99E0117A2F51E04BF
+```
 
 ## 截图
 
