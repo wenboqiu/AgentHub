@@ -63,6 +63,19 @@ npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHu
 - 电脑端有目录白名单（默认空 = 全部拒绝），并且必须手动打开「允许手机远程执行」。
 - 能登录你账号的人可以在白名单目录里让 agent 执行任意（经你批准的）操作，请保管好密码，并务必用 HTTPS。
 
+## 基于已有会话新开、在终端打开（0.4.0）
+
+会话详情页的「新开会话」有两种模式，输入第一条消息后由电脑端在后台启动，新会话出现在列表里，和普通会话一样能收提醒、发消息、批授权、停止（手机和电脑都能用）：
+
+- **分叉（带上下文）**：复制原会话的全部对话，从那里接着聊，原会话不受影响。Claude 用 `claude -p --resume <id> --fork-session ...`，Codex 用 app-server 的 `thread/fork`。
+- **同目录新开（不带上下文）**：沿用原会话的目录和 agent 类型，对话从零开始。Claude 不带 `--resume`，Codex 用 `thread/start`。
+
+安全规则不变：电脑端要开「允许手机远程执行」、目录在白名单内、授权在手机上确认。分叉和新开不写原会话，所以不受「Claude 会话在终端里还开着就拒绝」的限制。
+
+新会话的真实 id 要等 CLI 启动后才知道：服务端先建一个临时会话（id 形如 `claude:pending-<runId>`），界面立刻跳过去；执行器拿到真实 id 后上报 `run.session`，服务端把临时会话改名（真实 id 已被 hook / 轮询抢先登记时合并）。拿到真实 id 之前就失败，临时会话标为「已中断」并显示错误，可手动删除。
+
+**在终端打开**（仅桌面端、本机的会话）：Claude 会话在原目录新开一个 Windows Terminal 窗口执行 `claude --resume <id>`（`wt.exe` 失败时回退 `cmd /k`）；如果这个会话已经在终端里开着，就直接切过去。Codex 会话把 Codex Desktop 切到前台（无法直接定位到具体会话）。AgentHub 正在运行这个会话时按钮禁用。这是本机的主动点击，不走目录白名单。
+
 ## 安装 Claude Code hook
 
 打开桌面端「设置」→「安装 Claude Code hook」。它会：
@@ -122,6 +135,9 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 - 登录失效（被移除、改密码、管理员重置）时，桌面端 / 手机端提示「登录已过期，请重新登录」，上报和执行器停止重试，重新登录后恢复。
 
 ## 已知限制
+
+- 手机上新开的会话在运行过程中，电脑终端里看不到实时输出；跑完后可以用「在终端打开」继续。
+- 「在终端打开」对 Codex 只能把 Codex Desktop 切到前台，没法定位到具体会话。
 
 - Codex 窗口跳转：没有进程号时匹配可执行名为 `ChatGPT.exe`（Codex Desktop 的窗口进程，实测）或包含 `codex` 且有可见主窗口的进程；找不到会提示「没找到 Codex 窗口」。
 - 手机上发给 Codex 的消息，Codex Desktop 界面**不会实时显示**（重新打开那个会话才能看到）；Desktop 自己的 app-server 是私有的，外部连不进去。

@@ -64,6 +64,7 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 |---|---|---|
 | GET | `/control/status` | `{agents}`，本账号在线执行器的机器名 |
 | POST | `/sessions/:id/messages` | body `{text}`（1–8000 字符）。会话不存在 404；该会话所在 machine 没有在线执行器 409 `电脑端不在线`；已有 queued/running 的 run 409 `这个会话正在运行`；Codex 会话状态是 `running` 时 409。成功返回 `{runId}` |
+| POST | `/sessions/:id/spawn` | body `{mode:'fork'或'fresh', text}`（text 1–8000 字符）。基于已有会话新开：fork 带上下文分叉，fresh 同目录从零开始。会话不存在 404；执行器不在线 409 `电脑端不在线`；**不**检查原会话是否在运行。成功建一个临时会话 `<agent>:pending-<runId>`（state running，title 取首条消息前 80 字）并返回 `{runId, sessionId}`，同时广播 `session` / `run` / `message` |
 | POST | `/runs/:id/stop` | 转发给执行器，返回 `{ok:true}` |
 | POST | `/approvals/:id` | body `{decision:'allow'` 或 `'deny'}`；不是 pending 返回 409 |
 | POST | `/sessions/:id/history` | 请执行器读本地记录并写入 messages（等最多 10 秒，超时 504，执行器不在线 409）。返回新插入的 `{messages}`（和已有消息完全重复的会跳过） |
@@ -73,12 +74,14 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 
 | 方向 | 消息 |
 |---|---|
-| 服务端 → 执行器 | `run.start {runId, sessionId, agent, sessionKey, cwd, text}`、`run.stop {runId}`、`approval.created {localId, approvalId}`、`approval.decide {approvalId, decision}`、`history.request {requestId, agent, sessionKey, cwd}` |
-| 执行器 → 服务端 | `run.status {runId, status, error?}`（status 为 running / done / failed / stopped）、`run.message {runId, role, text}`（role 为 assistant / tool / system）、`run.approval {runId, localId, tool, detail}`、`run.approvalExpired {runId, approvalId}`、`history.result {requestId, messages:[{role,text}], error?}` |
+| 服务端 → 执行器 | `run.start {runId, sessionId, agent, sessionKey, cwd, text, mode}`（`mode` 为 `resume`（`/messages`）/ `fork` / `fresh`（`/spawn`）；缺省按 resume；fork / fresh 时 `sessionId` 是临时 id、`sessionKey` 是原会话的 sid）、`run.stop {runId}`、`approval.created {localId, approvalId}`、`approval.decide {approvalId, decision}`、`history.request {requestId, agent, sessionKey, cwd}` |
+| 执行器 → 服务端 | `run.status {runId, status, error?}`（status 为 running / done / failed / stopped）、`run.message {runId, role, text}`（role 为 assistant / tool / system）、`run.approval {runId, localId, tool, detail}`、`run.approvalExpired {runId, approvalId}`、`run.session {runId, sessionKey}`（fork / fresh 拿到真实 id 后只发一次；`sessionKey` 须匹配 `^[A-Za-z0-9_-]{1,100}$`，run 必须属于该执行器且仍是临时会话，否则忽略）、`history.result {requestId, messages:[{role,text}], error?}` |
 
 执行器断线（或被顶掉）时，它名下 queued/running 的 run 标 `failed`（`电脑端断开`），pending 授权标 `expired`。
 
 授权在执行器等待 30 分钟超时后，立即上报 `run.approvalExpired`。服务端核对机器及运行归属，仅将 pending 授权改为 expired 并广播，运行可继续；重复通知无副作用。此修复需要同时更新桌面执行器和服务端。
+
+`run.session` 处理：在一个事务里把临时会话改名为 `<agent>:<sessionKey>`（`runs` / `messages` / `approvals` 的 session_id 一起改）；真实 id 已存在则保留真实行（标题为空时补上临时行的标题）并删除临时行；随后广播 `removed`（临时 id）、`session`（真实行，notify=false）、`session.renamed {from, to}` 和该 run 的最新状态。拿到真实 id 之前 run 失败 / 停止 / 执行器断线，临时会话标 `aborted`（summary 为错误信息，notify=true）。
 
 viewer 的 `/ws` 新增广播：`{type:'run', run}`、`{type:'message', message}`、`{type:'approval', approval(带 project), notify}`（`notify` 只在新建 pending 时为 true）、`{type:'agents', agents}`；`snapshot` 里多带 `agents` 和 pending 的 `approvals`。
 
