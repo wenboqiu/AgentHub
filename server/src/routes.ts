@@ -5,12 +5,14 @@ import {
   AGENTS,
   MESSAGE_ROLES,
   STATES,
+  abortPendingSession,
   ackAll,
   ackSession,
   activeRun,
   applyEvent,
   cleanText,
   createApproval,
+  createPendingSession,
   createRun,
   decideApproval,
   expireApproval,
@@ -21,11 +23,13 @@ import {
   getSession,
   insertHistory,
   insertMessage,
+  isPendingId,
   latestRun,
   listMessages,
   listSessions,
   pendingApprovals,
   removeSession,
+  renamePendingSession,
   setRunStatus,
   type Approval,
   type EventIn,
@@ -83,6 +87,8 @@ function parseEvent(raw: unknown): EventIn | null {
 }
 
 const TERMINAL = ['done', 'failed', 'stopped']
+const PENDING = ':pending-'
+const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
@@ -144,7 +150,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 执行器掉线（或被新连接顶掉）：它名下的 run 标 failed，pending 授权标 expired
   async function dropExecutor(userId: number, machine: string) {
     const runs = await failActiveRuns(pool, userId, machine, '电脑端断开')
-    for (const r of runs) pushRun(userId, r)
+    for (const r of runs) {
+      pushRun(userId, r)
+      await abortPending(userId, r.sessionId, r.error)
+    }
     const expired = await expireApprovalsOfRuns(
       pool,
       userId,
@@ -157,6 +166,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         w.resolve({ messages: [], error: '电脑端断开' })
       }
     }
+  }
+
+  // 拿到真实 id 之前 run 就结束了：临时会话标 aborted 并提醒
+  async function abortPending(userId: number, sessionId: string, error: string) {
+    if (!isPendingId(sessionId)) return
+    const s = await abortPendingSession(pool, userId, sessionId, error || '启动失败')
+    if (s) pushSession(userId, s, true)
   }
 
   // 鉴权：/health、/auth/login、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）免登录；其它都要设备会话 token
@@ -260,6 +276,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       sessionKey: id.slice(id.indexOf(':') + 1),
       cwd: session.cwd,
       text: clean,
+      mode: 'resume',
     })
     if (!sent) {
       const failed = await setRunStatus(pool, userId, run.id, 'failed', '电脑端不在线')
@@ -267,6 +284,51 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       return reply.code(409).send({ error: '电脑端不在线' })
     }
     return { runId: run.id }
+  })
+
+  // 基于已有会话新开：fork = 带上下文分叉，fresh = 同目录从零开始
+  app.post('/sessions/:id/spawn', async (req, reply) => {
+    const userId = req.userId
+    const id = (req.params as { id: string }).id
+    const body = req.body as { mode?: unknown; text?: unknown } | null
+    const mode = body?.mode
+    const text = body?.text
+    if (mode !== 'fork' && mode !== 'fresh') return reply.code(400).send({ error: "mode 必须是 'fork' 或 'fresh'" })
+    if (typeof text !== 'string' || text.trim().length < 1 || text.length > 8000) return reply.code(400).send({ error: 'text 必须是 1–8000 字符' })
+    const clean = text.replaceAll('\0', '')
+    const res = await serial(async () => {
+      const session = await getSession(pool, userId, id)
+      if (!session) return { code: 404, error: '会话不存在' } as const
+      if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
+      const runId = randomUUID()
+      const pendingId = `${session.agent}${PENDING}${runId}`
+      const pending = await createPendingSession(pool, userId, pendingId, session, clean.replace(/\s+/g, ' ').trim())
+      const run = await createRun(pool, userId, runId, pendingId, session.machine)
+      const message = await insertMessage(pool, userId, pendingId, runId, 'user', clean)
+      return { code: 200, run, message, pending, session, pendingId } as const
+    })
+    if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
+    const { run, message, pending, session, pendingId } = res as Extract<typeof res, { code: 200 }>
+    pushSession(userId, pending, false)
+    pushRun(userId, run)
+    pushMessage(userId, message)
+    const sent = sendExecutor(userId, session.machine, {
+      type: 'run.start',
+      runId: run.id,
+      sessionId: pendingId,
+      agent: session.agent,
+      sessionKey: id.slice(id.indexOf(':') + 1),
+      cwd: session.cwd,
+      text: clean,
+      mode,
+    })
+    if (!sent) {
+      const failed = await setRunStatus(pool, userId, run.id, 'failed', '电脑端不在线')
+      if (failed) pushRun(userId, failed)
+      await abortPending(userId, pendingId, '电脑端不在线')
+      return reply.code(409).send({ error: '电脑端不在线' })
+    }
+    return { runId: run.id, sessionId: pendingId }
   })
 
   app.post('/runs/:id/stop', async (req, reply) => {
@@ -349,9 +411,26 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const updated = await setRunStatus(pool, userId, run.id, status as Run['status'], str(m.error))
         if (!updated) return
         pushRun(userId, updated)
+        if (status === 'failed' || status === 'stopped') await abortPending(userId, updated.sessionId, str(m.error) || (status === 'stopped' ? '已停止' : '启动失败'))
         if (TERMINAL.includes(status)) {
           for (const a of await expireApprovalsOfRuns(pool, userId, [run.id])) await pushApproval(userId, a, false)
         }
+        return
+      }
+      case 'run.session': {
+        const key = str(m.sessionKey)
+        if (!SESSION_KEY_RE.test(key)) return
+        const run = await getRun(pool, userId, str(m.runId))
+        if (!run || run.machine !== machine || !isPendingId(run.sessionId)) return
+        const from = run.sessionId
+        const to = `${from.slice(0, from.indexOf(':'))}:${key}`
+        const session = await renamePendingSession(pool, userId, from, to)
+        if (!session) return
+        broadcast(userId, { type: 'removed', id: from })
+        pushSession(userId, session, false)
+        broadcast(userId, { type: 'session.renamed', from, to })
+        const latest = await getRun(pool, userId, run.id)
+        if (latest) pushRun(userId, latest)
         return
       }
       case 'run.message': {

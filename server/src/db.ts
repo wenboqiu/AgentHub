@@ -245,6 +245,64 @@ export async function removeSession(pool: pg.Pool, userId: number, id: string): 
   return (r.rowCount ?? 0) > 0
 }
 
+export const PENDING_MARK = ':pending-'
+export const isPendingId = (id: string) => id.includes(PENDING_MARK)
+
+// 新开会话：先建一个临时会话（id = <agent>:pending-<runId>），拿到真实 id 后改名
+export async function createPendingSession(pool: pg.Pool, userId: number, id: string, base: Session, title: string): Promise<Session> {
+  const row = (
+    await pool.query<Row>(
+      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'running','',now(),true,null,now(),now()) RETURNING *`,
+      [userId, id, base.agent, base.machine, base.cwd, base.project, cleanText(title, 80)],
+    )
+  ).rows[0]
+  return toSession(row)
+}
+
+// 拿到真实 id 之前 run 就失败/停止：临时会话标 aborted，让用户看到失败
+export async function abortPendingSession(pool: pg.Pool, userId: number, id: string, error: string): Promise<Session | null> {
+  const r = await pool.query<Row>(
+    "UPDATE sessions SET state = 'aborted', summary = $3, acked = false, state_since = now(), event_at = now(), updated_at = now(), pid = null WHERE user_id = $1 AND id = $2 RETURNING *",
+    [userId, id, cleanText(error, 300)],
+  )
+  return r.rows[0] ? toSession(r.rows[0]) : null
+}
+
+// 临时会话改成真实 id（一个事务里）。真实行已存在（hook / 轮询抢先上报）则合并：保留真实行，删掉临时行
+export async function renamePendingSession(pool: pg.Pool, userId: number, from: string, to: string): Promise<Session | null> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const pending = (await client.query<Row>('SELECT * FROM sessions WHERE user_id = $1 AND id = $2 FOR UPDATE', [userId, from])).rows[0]
+    if (!pending) {
+      await client.query('ROLLBACK')
+      return null
+    }
+    const real = (await client.query<Row>('SELECT * FROM sessions WHERE user_id = $1 AND id = $2 FOR UPDATE', [userId, to])).rows[0]
+    let out: Row
+    if (!real) {
+      out = (await client.query<Row>('UPDATE sessions SET id = $3, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING *', [userId, from, to])).rows[0]
+    } else {
+      out = real
+      if (!real.title && pending.title) {
+        out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
+      }
+      await client.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, from])
+    }
+    for (const t of ['runs', 'messages', 'approvals']) {
+      await client.query(`UPDATE ${t} SET session_id = $3 WHERE user_id = $1 AND session_id = $2`, [userId, from, to])
+    }
+    await client.query('COMMIT')
+    return toSession(out)
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+}
+
 export async function purgeOld(pool: pg.Pool): Promise<number> {
   const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '7 days'")
   await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '7 days'")
