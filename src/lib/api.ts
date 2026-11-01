@@ -112,6 +112,9 @@ export class Api {
   controlStatus = () => this.call<{ agents: string[] }>("GET", "/control/status");
   messages = (sessionId: string) =>
     this.call<{ messages: Message[]; approvals: Approval[]; run: Run | null }>("GET", `/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`);
+  /** 基于已有会话新开：fork = 带上下文分叉，fresh = 同目录从零开始。返回临时会话 id */
+  spawn = (sessionId: string, mode: "fork" | "fresh", text: string) =>
+    this.call<{ runId: string; sessionId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/spawn`, { mode, text });
   send = (sessionId: string, text: string) => this.call<{ runId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/messages`, { text });
   stop = (runId: string) => this.call("POST", `/runs/${encodeURIComponent(runId)}/stop`, {});
   decide = (approvalId: string, decision: "allow" | "deny") => this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision });
@@ -125,6 +128,8 @@ export type Handlers = {
   onSnapshot(list: Session[], agents: string[], approvals: Approval[]): void;
   onSession(s: Session, notify: boolean): void;
   onRemoved(id: string): void;
+  /** 新开的临时会话拿到真实 id */
+  onRenamed(from: string, to: string): void;
   onRun(r: Run): void;
   onMessage(m: Message): void;
   onApproval(a: Approval, notify: boolean): void;
@@ -160,6 +165,7 @@ export function connect(url: string, token: string, h: Handlers) {
         if (m.type === "snapshot") h.onSnapshot(m.sessions, m.agents ?? [], m.approvals ?? []);
         else if (m.type === "session") h.onSession(m.session, !!m.notify);
         else if (m.type === "removed") h.onRemoved(m.id);
+        else if (m.type === "session.renamed") h.onRenamed(m.from, m.to);
         else if (m.type === "run") h.onRun(m.run);
         else if (m.type === "message") h.onMessage(m.message);
         else if (m.type === "approval") h.onApproval(m.approval, !!m.notify);

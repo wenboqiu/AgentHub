@@ -132,6 +132,8 @@ export default function App() {
   const [toast, setToast] = useState("");
   const cfgRef = useRef<Config | null>(null);
   cfgRef.current = cfg;
+  const openIdRef = useRef<string | null>(null);
+  openIdRef.current = openId;
 
   // 登录失效（任何请求 401 / WS 以 4401 关闭）：清掉本地 token，回到登录页并提示
   const expire = useCallback(() => {
@@ -197,6 +199,21 @@ export default function App() {
           n.delete(id);
           return n;
         }),
+      onRenamed: (from, to) => {
+        setSessions((m) => {
+          if (!m.has(from)) return m;
+          const n = new Map(m);
+          n.delete(from);
+          return n;
+        });
+        if (openIdRef.current === from) {
+          // 不多压一层历史
+          if (window.history.state?.agenthub === "session") window.history.replaceState({ agenthub: "session" }, "");
+          setOpenId(to);
+          openIdRef.current = to;
+        }
+        bus.emit({ kind: "resync" });
+      },
       onRun: (r) => bus.emit({ kind: "run", r }),
       onMessage: (m) => bus.emit({ kind: "message", m }),
       onApproval: (a, notify) => {
@@ -241,6 +258,12 @@ export default function App() {
     window.history.pushState({ agenthub: "session" }, "");
     setOpenId(id);
   };
+  // 从详情页跳到另一个会话（新开会话）：替换当前历史项，返回键仍然回到列表
+  const switchSession = (id: string) => {
+    if (window.history.state?.agenthub === "session") window.history.replaceState({ agenthub: "session" }, "");
+    else window.history.pushState({ agenthub: "session" }, "");
+    setOpenId(id);
+  };
   useEffect(() => {
     const onPop = () => setOpenId(null);
     window.addEventListener("popstate", onPop);
@@ -281,7 +304,10 @@ export default function App() {
   if (openId && api) {
     return (
       <SessionView
+        sessionId={openId}
         session={sessions.get(openId)}
+        localMachine={cfg.machine}
+        onSwitch={switchSession}
         api={api}
         bus={bus}
         approvals={[...approvals.values()].filter((a) => a.sessionId === openId)}

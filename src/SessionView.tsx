@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { isRunActive, type Api, type Approval, type Message, type Run, type Session } from "./lib/api";
+import { desktop, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 
 const AGENT_LABEL = { claude: "Claude", codex: "Codex" } as const;
@@ -13,7 +14,13 @@ const STATE_LABEL: Record<string, string> = {
 };
 
 type Props = {
+  /** 当前打开的会话 id（session 可能还没到，例如刚新开、广播还没送到） */
+  sessionId: string;
   session: Session | undefined;
+  /** 本机的 machine 名（桌面端才有意义） */
+  localMachine: string;
+  /** 跳到另一个会话（新开会话后跳到临时会话） */
+  onSwitch(id: string): void;
   api: Api;
   bus: Bus;
   /** 这个会话当前 pending 的授权（App 从 WS 维护） */
@@ -24,14 +31,19 @@ type Props = {
 };
 
 /** 不能发消息的原因；null 表示可以发 */
+export const isPendingSession = (id: string) => id.includes(":pending-");
+
 export function sendBlockReason(p: { session: Session; agents: string[]; running: boolean }): string | null {
+  if (isPendingSession(p.session.id)) return p.session.state === "running" ? "新会话正在启动…" : "这个新会话没能启动";
   if (!p.agents.includes(p.session.machine)) return "电脑端不在线";
   if (p.running) return "这个会话正在运行";
   if (p.session.agent === "codex" && p.session.state === "running") return "这个 Codex 会话正在 Desktop 里运行，等它结束后再发";
   return null;
 }
 
-export default function SessionView({ session, api, bus, approvals, agents, onBack }: Props) {
+const NOT_FOUND_GRACE_MS = 5000;
+
+export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [text, setText] = useState("");
@@ -39,6 +51,11 @@ export default function SessionView({ session, api, bus, approvals, agents, onBa
   const [busy, setBusy] = useState(false);
   const [deciding, setDeciding] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState("");
+  const [spawnOpen, setSpawnOpen] = useState(false);
+  const [spawnMode, setSpawnMode] = useState<"fork" | "fresh">("fork");
+  const [spawnText, setSpawnText] = useState("");
+  const [gaveUp, setGaveUp] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const id = session?.id ?? "";
 
@@ -59,6 +76,20 @@ export default function SessionView({ session, api, bus, approvals, agents, onBa
     return () => { sync.dispose(); syncRef.current = null; };
   }, [api, bus, id]);
 
+  // 会话暂时不在列表里（刚新开、广播还没到）：先显示「加载中」，等够 5 秒才判定不存在
+  const exists = !!session;
+  useEffect(() => {
+    setGaveUp(false);
+    if (exists) return;
+    const t = window.setTimeout(() => setGaveUp(true), NOT_FOUND_GRACE_MS);
+    return () => window.clearTimeout(t);
+  }, [sessionId, exists]);
+
+  useEffect(() => {
+    setSpawnOpen(false);
+    setSpawnText("");
+  }, [sessionId]);
+
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length, approvals.length]);
@@ -69,7 +100,7 @@ export default function SessionView({ session, api, bus, approvals, agents, onBa
         <header>
           <button onClick={onBack}>返回</button>
         </header>
-        <p className="empty">这个会话已经不存在了</p>
+        <p className="empty">{gaveUp ? "这个会话已经不存在了" : "加载中…"}</p>
       </div>
     );
   }
@@ -98,6 +129,25 @@ export default function SessionView({ session, api, bus, approvals, agents, onBa
       await reload();
     });
   };
+  const startSpawn = () => {
+    const t = spawnText.trim();
+    if (!t) return;
+    void guard(async () => {
+      const r = await api.spawn(id, spawnMode, t);
+      setSpawnOpen(false);
+      setSpawnText("");
+      onSwitch(r.sessionId);
+    });
+  };
+  const sessionKey = id.slice(id.indexOf(":") + 1);
+  const pendingSession = isPendingSession(id);
+  const canOpenInTerminal = isDesktop && session.machine === localMachine && !pendingSession;
+  const openInTerminal = () =>
+    void guard(async () => {
+      const msg = await desktop.openInTerminal(session.agent, sessionKey, session.cwd);
+      setNote(msg);
+      window.setTimeout(() => setNote(""), 3500);
+    });
   const stop = () => run && void guard(() => api.stop(run.id));
   const loadHistory = () =>
     void guard(async () => {
@@ -128,6 +178,46 @@ export default function SessionView({ session, api, bus, approvals, agents, onBa
         </span>
       </header>
       {session.title && <div className="title wrap">{session.title}</div>}
+      {!pendingSession && (
+        <div className="btns">
+          <button onClick={() => setSpawnOpen((o) => !o)} disabled={busy || !agents.includes(session.machine)} title={agents.includes(session.machine) ? "" : "电脑端不在线"}>
+            新开会话
+          </button>
+          {canOpenInTerminal && (
+            <button onClick={openInTerminal} disabled={busy || active} title={active ? "AgentHub 正在运行这个会话，结束后再打开" : ""}>
+              {session.agent === "codex" ? "打开 Codex Desktop" : "在终端打开"}
+            </button>
+          )}
+        </div>
+      )}
+      {canOpenInTerminal && active && <p className="hint">AgentHub 正在运行这个会话，结束后再打开</p>}
+      {spawnOpen && !pendingSession && (
+        <div className="spawn-panel">
+          <label className="radio">
+            <input type="radio" name="spawn-mode" checked={spawnMode === "fork"} onChange={() => setSpawnMode("fork")} />
+            <span>
+              <b>分叉（带上下文）</b>
+              <small>复制这个会话的全部对话，从这里接着聊，原会话不受影响</small>
+            </span>
+          </label>
+          <label className="radio">
+            <input type="radio" name="spawn-mode" checked={spawnMode === "fresh"} onChange={() => setSpawnMode("fresh")} />
+            <span>
+              <b>同目录新开（不带上下文）</b>
+              <small>沿用这个会话的项目目录和 {AGENT_LABEL[session.agent]}，对话从零开始</small>
+            </span>
+          </label>
+          <textarea value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={busy} />
+          <div className="btns">
+            <button onClick={() => setSpawnOpen(false)} disabled={busy}>
+              取消
+            </button>
+            <button className="primary" onClick={startSpawn} disabled={busy || !spawnText.trim()}>
+              开始
+            </button>
+          </div>
+        </div>
+      )}
       <main className="chat">
         <div className="btns">
           <button onClick={loadHistory} disabled={busy || !agents.includes(session.machine)}>
@@ -162,7 +252,7 @@ export default function SessionView({ session, api, bus, approvals, agents, onBa
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
         <div ref={endRef} />
       </main>
-      {err && <div className="toast">{err}</div>}
+      {(err || note) && <div className="toast">{err || note}</div>}
       <footer className="composer">
         {reason && <p className="hint">{reason}</p>}
         <textarea

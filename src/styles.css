@@ -406,3 +406,34 @@ textarea:disabled {
   color: var(--dim);
   font-size: 12px;
 }
+
+.spawn-panel {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin: 8px 0;
+}
+.spawn-panel label.radio {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.spawn-panel label.radio span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.spawn-panel label.radio small {
+  color: var(--dim);
+  font-size: 12px;
+}
+.spawn-panel textarea {
+  margin-top: 4px;
+}
+.spawn-panel .btns {
+  justify-content: flex-end;
+}

@@ -71,5 +71,6 @@ export const desktop = {
   installHooks: () => invoke<HooksStatus>("install_claude_hooks"),
   uninstallHooks: () => invoke<HooksStatus>("uninstall_claude_hooks"),
   focus: (pid: number | null, agent: string) => invoke<void>("focus_session", { pid, agent }),
+  openInTerminal: (agent: string, sessionKey: string, cwd: string) => invoke<string>("open_in_terminal", { agent, sessionKey, cwd }),
   setBadge: (count: number) => invoke<void>("set_badge", { count }),
 };
