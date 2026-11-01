@@ -1,4 +1,7 @@
 export type State = "idle" | "running" | "waiting" | "done" | "aborted" | "ended";
+export type Goal = { id: number; title: string; notes: string; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string };
+export type Task = { id: number; goalId: number | null; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent" | "machine" | "cwd" | "status">>;
 
 export type Session = {
   id: string;
@@ -98,6 +101,17 @@ export class Api {
     if (!res.ok) throw new Error(`/health 返回 ${res.status}`);
   }
   sessions = async () => (await this.call<{ sessions: Session[] }>("GET", "/sessions")).sessions;
+  goals = async () => (await this.call<{goals: Goal[]}>("GET", "/goals")).goals;
+  tasks = async () => (await this.call<{tasks: Task[]}>("GET", "/tasks")).tasks;
+  createGoal = async (input: {title: string; notes?: string}) => (await this.call<{goal: Goal}>("POST", "/goals", input)).goal;
+  updateGoal = async (id: number, input: Partial<Pick<Goal,"title"|"notes"|"status">>) => (await this.call<{goal: Goal}>("PATCH", `/goals/${id}`, input)).goal;
+  deleteGoal = (id: number) => this.call("DELETE", `/goals/${id}`);
+  createTask = async (input: TaskInput & {title: string}) => (await this.call<{task: Task}>("POST", "/tasks", input)).task;
+  updateTask = async (id: number, input: TaskInput) => (await this.call<{task: Task}>("PATCH", `/tasks/${id}`, input)).task;
+  deleteTask = (id: number) => this.call("DELETE", `/tasks/${id}`);
+  linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
+  unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
+  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId: string; sessionId: string; task: Task}>("POST", `/tasks/${id}/start`, input);
   ack = (id: string) => this.call("POST", `/sessions/${encodeURIComponent(id)}/ack`);
   ackAll = () => this.call("POST", "/sessions/ack-all");
 
@@ -125,7 +139,11 @@ export type ConnState = "connecting" | "open" | "closed";
 
 export type Handlers = {
   onState(s: ConnState): void;
-  onSnapshot(list: Session[], agents: string[], approvals: Approval[]): void;
+  onSnapshot(list: Session[], agents: string[], approvals: Approval[], goals: Goal[], tasks: Task[]): void;
+  onGoal(goal: Goal): void;
+  onGoalRemoved(id: number): void;
+  onTask(task: Task): void;
+  onTaskRemoved(id: number): void;
   onSession(s: Session, notify: boolean): void;
   onRemoved(id: string): void;
   /** 新开的临时会话拿到真实 id */
@@ -162,7 +180,11 @@ export function connect(url: string, token: string, h: Handlers) {
     ws.onmessage = (e) => {
       try {
         const m = JSON.parse(String(e.data));
-        if (m.type === "snapshot") h.onSnapshot(m.sessions, m.agents ?? [], m.approvals ?? []);
+        if (m.type === "snapshot") h.onSnapshot(m.sessions, m.agents ?? [], m.approvals ?? [], m.goals ?? [], m.tasks ?? []);
+        else if (m.type === "goal") h.onGoal(m.goal);
+        else if (m.type === "goal.removed") h.onGoalRemoved(m.id);
+        else if (m.type === "task") h.onTask(m.task);
+        else if (m.type === "task.removed") h.onTaskRemoved(m.id);
         else if (m.type === "session") h.onSession(m.session, !!m.notify);
         else if (m.type === "removed") h.onRemoved(m.id);
         else if (m.type === "session.renamed") h.onRenamed(m.from, m.to);

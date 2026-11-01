@@ -52,6 +52,29 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | DELETE | `/sessions/:id` | 删除并广播 `{type:'removed', id}` |
 | GET (WS) | `/ws?token=` | 连上先发 `{type:'snapshot', sessions}`；之后每次变化发 `{type:'session', session, notify}`；服务端每 30 秒发 ping |
 
+### 目标与任务（0.5.0）
+
+新增 `goals`、`tasks`、`task_sessions` 表，保留已有数据。以下接口均需登录并按账号隔离；无权访问的目标、任务和会话返回 404。标题去 NUL 并 trim，长度 1–200；备注最多 4000；状态或字段非法返回 400。
+
+| 方法 | 路径 | 请求与返回 |
+|---|---|---|
+| GET | `/goals`、`/tasks` | `{goals}`、`{tasks}`，任务包含 `sessionIds` |
+| POST | `/goals` | `{title, notes?}` → `{goal}` |
+| PATCH | `/goals/:id` | `{title?, notes?, status?}` → `{goal}`；状态 active/done/archived |
+| DELETE | `/goals/:id` | `{ok:true}`；任务保留，goalId 清空并广播 |
+| POST | `/tasks` | `{title, notes?, goalId?, agent?, machine?, cwd?}` → `{task}` |
+| PATCH | `/tasks/:id` | 上述字段及 `status?` → `{task}`；状态 todo/doing/review/done，doneAt 随状态写入/清空 |
+| DELETE | `/tasks/:id` | `{ok:true}`；关联会话保留 |
+| POST | `/tasks/:id/sessions` | `{sessionId}` → `{task}`，重复挂接幂等 |
+| DELETE | `/tasks/:id/sessions/:sessionId` | `{task}`；会话清理后仍可取消挂接 |
+| POST | `/tasks/:id/start` | `{agent?, machine?, cwd?, text?}` → `{runId, sessionId, task}` |
+
+开始任务时，body 优先于任务默认设置；没有 machine 且只有一台在线电脑时自动选用它。text 默认备注或标题（1–8000 字符）。离线预检查返回 409 且任务不变。创建运行、临时会话、首条消息、挂接关系和 doing 状态在事务内完成；提交后发送 `mode:'fresh'`。发送失败返回 409，保留 doing 状态和 aborted 临时会话。执行器仍负责目录白名单和授权。
+
+临时会话改名时挂接关系跟随迁移，重复挂接合并。关联会话 done：doing → review；关联会话 running：review → doing。任一关联会话完成即触发，todo/done 不自动改变。完成事件来自 `/events` 或执行器 `run.status`；改名后补算当前状态，覆盖完成先于改名的情况。
+
+viewer 的 snapshot 增加 `goals`、`tasks` 数组。新增同账号广播：`{type:'goal',goal}`、`{type:'goal.removed',id}`、`{type:'task',task}`、`{type:'task.removed',id}`；任务对象始终包含 `sessionIds`。旧客户端可忽略这些扩展。CORS 允许 PATCH。
+
 ### 远程控制（第二版）
 
 在手机 / 电脑的 AgentHub 里给会话发消息、批授权、停止。电脑端 Rust「执行器」用 WebSocket 连上来，服务端把指令转给它，它在本机接着跑 `claude -p` / `codex app-server`，输出和授权请求再经服务端广播给 UI。

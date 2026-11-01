@@ -1,6 +1,7 @@
 # AgentHub：目标 + 任务 + 关联会话（任务管理第一版）
 
 > 记录日期：2026-11-01
+> 状态：功能已实现；自动测试、双端构建与 Codex 完成流程通过。Haiku 正常回复受额度限制，精确尺寸截图尚未完成，详见 `docs/task-management-verification.md`，不标记全部验证通过。
 > 背景：0.4.1 之前只有会话监控、手机发消息、新开会话。用户要围绕它做任务管理（第二版的遗留项），并希望最终支持**通用**的任务和目标管理（不只是 agent 的活）。本文是自包含的实现计划，交给子代理实现时不依赖任何对话上下文。
 
 ## 目标
@@ -94,8 +95,8 @@ task_sessions(
 1. 取参数：`agent`（body 优先，其次任务上的，都没有 → 400「请选择 Claude 或 Codex」）；`cwd`（同理，没有 → 400「请填写项目目录」）；`machine`（body → 任务上 → 在线执行器只有一台就用它 → 否则 400「请选择电脑」）；`text`（body → 任务 `notes` → 任务标题，去 NUL，1–8000 字符）。
 2. 该账号该机器没有在线执行器 → 409「电脑端不在线」。
 3. 建临时会话：`id = '<agent>:pending-<runId>'`，agent / machine / cwd 来自上面，`project` 取 cwd 最后一段（和现有 `projectOf` 一致），`title` = 任务标题。`createPendingSession` 目前要传源会话，改成接受一个 `{agent, machine, cwd}` 对象（保持现有 spawn 调用不变，行为不变）。
-4. 建 run + user 消息，广播 `session`/`run`/`message`，向执行器发 `run.start {runId, sessionId: 临时id, agent, sessionKey: '', cwd, text, mode:'fresh'}`；发送失败的处理同 spawn（run failed、`abortPending`、409）。
-5. 把临时会话挂到任务（`task_sessions`），任务 `status` 改成 `doing`（`todo`/`review`/`done` 都改成 doing），广播 `task`。
+4. 在事务内建临时会话、run、user 消息，并把临时会话挂到任务（`task_sessions`），任务 `status` 改成 `doing`（`todo`/`review`/`done` 都改成 doing），清空 `done_at`。
+5. 提交后广播 `session`/`run`/`message`/`task`，向执行器发 `run.start {runId, sessionId: 临时id, agent, sessionKey: '', cwd, text, mode:'fresh'}`；发送失败的处理同 spawn（run failed、`abortPending`、409），保留挂接关系和 doing 状态。参数校验或离线预检查失败不改任务。
 6. 返回 `{runId, sessionId: 临时id, task}`。
 7. 如果这次运行后来失败（会话变已中断），任务保持「进行中」，用户看到失败的会话后可以再点「开始」重试——不要自动回退状态。
 
@@ -106,6 +107,7 @@ task_sessions(
 - 挂接的会话变成 `running`，且任务当前是 `review` → 任务改回 `doing`。
 - 一个任务挂了多个会话时：只要任一挂接会话变 done 且任务是 doing 就进 review（不要求全部完成）。
 - 流转后广播 `task`。把这个逻辑做成一个函数 `syncTaskForSession(pool, userId, sessionId, sessionState)` 返回被改的任务列表，方便单测。
+- 会话改名后按真实会话当前状态和该 run 状态补算任务状态（run 已 done 时优先按 done），覆盖完成事件先于改名到达的情况；事件写入和任务流转放在同一个 serial 段内。
 
 **WebSocket 广播**（只发给同账号 viewer）：`{type:'goal', goal}`、`{type:'goal.removed', id}`、`{type:'task', task}`（task 带 `sessionIds`）、`{type:'task.removed', id}`。snapshot 里增加 `goals: Goal[]`、`tasks: Task[]`。
 
@@ -149,6 +151,11 @@ Task = { id: number; goalId: number | null; title: string; notes: string; status
 |---|---|
 | `server/src/db.ts` | 三张新表和索引；goals/tasks/task_sessions 的增删改查；`syncTaskForSession`；`createPendingSession` 改成接受 `{agent, machine, cwd}`；`renamePendingSession` 带上 `task_sessions` |
 | `server/src/routes.ts` | 新接口、`/tasks/:id/start`（抽出与 spawn 共用的建临时会话+run+发 `run.start` 的函数）、自动流转触发点、新广播、snapshot 增加 goals/tasks |
+| `server/src/tasks.ts`（新） | 将目标与任务的类型、建表、校验、CRUD 和自动流转集中在独立模块；`db.ts` 在既有迁移锁内调用新表迁移 |
+| `server/src/index.ts` | 允许 PATCH 的 CORS 预检，并返回任务字段校验的中文错误 |
+| `server/tools/task-acceptance.ts`（新） | 隔离本地桌面验收夹具，备份/恢复配置、启动测试程序、记录状态并清理本地测试账号 |
+| `server/tools/task-acceptance-cleanup.ts`（新） | 校验唯一临时项目路径，归档本次 Codex 线程并清理本次 Claude 会话目录 |
+| `src/lib/taskSync.ts`、`test/taskSync.test.ts`（新） | 防止慢 HTTP 响应覆盖较新的任务/目标广播，覆盖同毫秒事件 |
 | `server/test/tasks.test.ts`（新） | 见验证 |
 | `src/lib/api.ts`、`src/App.tsx`、`src/SessionView.tsx`、`src/styles.css` | 见前端 |
 | `src/TasksPanel.tsx`、`src/TaskView.tsx`、`src/GoalsPanel.tsx`、`src/GoalView.tsx`（新） | 见前端 |
@@ -185,7 +192,7 @@ Task = { id: number; goalId: number | null; title: string; notes: string; status
 - Node 22 只能用可擦除 TS 语法，本地 import 带 `.ts`。写含 `\0` 的源码用 Edit 工具（不要用 Python 字符串替换，会写进真正的 NUL 字节）。用户环境有 `HTTP_PROXY`，curl 测本地加 `--noproxy '*'`（带引号）。
 - 桌面 UI 自动化：`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333` 启动后用原生 CDP（Node `WebSocket` 连 `http://127.0.0.1:9333/json` 的 `webSocketDebuggerUrl`，`Runtime.evaluate`；React 受控输入框用原生 value setter + `input` 事件；截图用 `Page.captureScreenshot`，可用 `Emulation.setDeviceMetricsOverride` 切换成 400×800 看手机宽度、1400×800 看宽窗口）。不要用 playwright 的 connectOverCDP。测完不带该环境变量重启，不留调试端口。
 - Android 构建：`export ANDROID_HOME='D:/Android/SDK'; export NDK_HOME='D:/Android/SDK/ndk/28.2.13676358'`，结束 `src-tauri/gen/android/gradlew --stop`。**不要安装到手机/平板**。
-- 前端改动要打进安装包：改完 `npm run build` 后 `npm run tauri build`；验证已安装的窗口里确实是新界面（用 CDP 检查 DOM 里有标签栏）。
+- 前端改动要打进安装包：改完 `npm run build` 后 `npm run tauri build`；验证本次构建的测试程序窗口里确实是新界面。原安装版只在测试结束后原样恢复，不覆盖安装。
 
 ## 验证
 

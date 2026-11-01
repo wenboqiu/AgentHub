@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { migrateTasks } from './tasks.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended'] as const
 export type State = (typeof STATES)[number]
@@ -136,6 +137,7 @@ export async function migrate(pool: pg.Pool) {
   try {
     await client.query('SELECT pg_advisory_lock(727001)')
     await migrateAll(client)
+    await migrateTasks(client)
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()
@@ -249,12 +251,12 @@ export const PENDING_MARK = ':pending-'
 export const isPendingId = (id: string) => id.includes(PENDING_MARK)
 
 // 新开会话：先建一个临时会话（id = <agent>:pending-<runId>），拿到真实 id 后改名
-export async function createPendingSession(pool: pg.Pool, userId: number, id: string, base: Session, title: string): Promise<Session> {
+export async function createPendingSession(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, base: Pick<Session, 'agent' | 'machine' | 'cwd'>, title: string): Promise<Session> {
   const row = (
     await pool.query<Row>(
       `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'running','',now(),true,null,now(),now()) RETURNING *`,
-      [userId, id, base.agent, base.machine, base.cwd, base.project, cleanText(title, 80)],
+      [userId, id, base.agent, base.machine, base.cwd, projectOf(base.cwd), cleanText(title, 200)],
     )
   ).rows[0]
   return toSession(row)
@@ -293,6 +295,9 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
     for (const t of ['runs', 'messages', 'approvals']) {
       await client.query(`UPDATE ${t} SET session_id = $3 WHERE user_id = $1 AND session_id = $2`, [userId, from, to])
     }
+    await client.query(`INSERT INTO task_sessions(user_id,task_id,session_id,created_at)
+      SELECT user_id,task_id,$3,created_at FROM task_sessions WHERE user_id=$1 AND session_id=$2 ON CONFLICT DO NOTHING`, [userId,from,to])
+    await client.query('DELETE FROM task_sessions WHERE user_id=$1 AND session_id=$2', [userId,from])
     await client.query('COMMIT')
     return toSession(out)
   } catch (e) {
@@ -384,7 +389,7 @@ export function cleanText(v: string, max: number) {
   return v.replaceAll('\0', '').slice(0, max)
 }
 
-export async function createRun(pool: pg.Pool, userId: number, id: string, sessionId: string, machine: string): Promise<Run> {
+export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string): Promise<Run> {
   const r = await pool.query<RunRow>("INSERT INTO runs (id, user_id, session_id, machine, status) VALUES ($1,$4,$2,$3,'queued') RETURNING *", [id, sessionId, machine, userId])
   return toRun(r.rows[0])
 }
@@ -419,7 +424,7 @@ export async function failActiveRuns(pool: pg.Pool, userId: number, machine: str
 }
 
 // 排序按 created_at、id；每个会话只留最近 KEEP_MESSAGES 条
-async function trimMessages(pool: pg.Pool, userId: number, sessionId: string) {
+async function trimMessages(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string) {
   await pool.query(
     `DELETE FROM messages WHERE user_id = $3 AND session_id = $1 AND id NOT IN (
        SELECT id FROM messages WHERE user_id = $3 AND session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2)`,
@@ -427,7 +432,7 @@ async function trimMessages(pool: pg.Pool, userId: number, sessionId: string) {
   )
 }
 
-export async function insertMessage(pool: pg.Pool, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string): Promise<Message> {
+export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string): Promise<Message> {
   // 数据库主机校时时可能回拨；新消息不能排到已有消息之前（同时间用 id 排序）。
   const r = await pool.query<MessageRow>(`INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
     VALUES ($5,$1,$2,$3,$4,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE user_id = $5 AND session_id = $1))) RETURNING *`, [

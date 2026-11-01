@@ -38,6 +38,7 @@ import {
   type Session,
 } from './db.ts'
 import { authenticate, type Kick } from './auth.ts'
+import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
   send(data: string): void
@@ -116,8 +117,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const sendExecutor = (userId: number, machine: string, msg: unknown) => {
     const e = executors.get(execKey(userId, machine))
     if (!e || e.sock.readyState !== 1) return false
-    e.sock.send(JSON.stringify(msg))
-    return true
+    try { e.sock.send(JSON.stringify(msg)); return true } catch { return false }
   }
 
   // approval 广播里带上 project，Android 通知用
@@ -145,6 +145,37 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const p = chain.then(fn, fn)
     chain = p.catch(() => {})
     return p
+  }
+
+  const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
+  const syncTask = async (userId: number, sessionId: string, state: Session['state']) => {
+    for (const t of await syncTaskForSession(pool,userId,sessionId,state)) pushTask(userId,t)
+  }
+  // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number) {
+    const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
+    const db = await pool.connect()
+    let pending: Session, run: Run, message: Message, task: Task | undefined
+    try {
+      await db.query('BEGIN')
+      pending = await createPendingSession(db,userId,pendingId,base,title)
+      run = await createRun(db,userId,runId,pendingId,base.machine)
+      message = await insertMessage(db,userId,pendingId,runId,'user',text)
+      if (taskId !== undefined) {
+        await linkSession(db,userId,taskId,pendingId)
+        task = await saveTask(db,userId,{status:'doing'},taskId)
+      }
+      await db.query('COMMIT')
+    } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
+    pushSession(userId,pending,false); pushRun(userId,run); pushMessage(userId,message)
+    if (task) pushTask(userId,task)
+    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text,mode})) {
+      const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
+      if (failed) pushRun(userId,failed)
+      await abortPending(userId,pendingId,'电脑端不在线')
+      throw new TaskError('电脑端不在线',409)
+    }
+    return {runId,sessionId:pendingId,...(task ? {task} : {})}
   }
 
   // 执行器掉线（或被新连接顶掉）：它名下的 run 标 failed，pending 授权标 expired
@@ -200,10 +231,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (events.some(e => !e)) return reply.code(400).send({ error: '事件格式不对' })
     let accepted = 0
     for (const ev of events as EventIn[]) {
-      const res = await serial(() => applyEvent(pool, req.userId, ev))
+      const res = await serial(async () => {
+        const r = await applyEvent(pool,req.userId,ev)
+        if (r) { pushSession(req.userId,r.session,r.notify); await syncTask(req.userId,r.session.id,r.session.state) }
+        return r
+      })
       if (!res) continue
       accepted++
-      pushSession(req.userId, res.session, res.notify)
     }
     return { accepted }
   })
@@ -212,6 +246,59 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const q = req.query as { all?: string }
     return { sessions: await listSessions(pool, req.userId, q.all === '1') }
   })
+
+  // ---------- 目标与任务（所有变更与执行器事件串行） ----------
+  app.get('/goals', async req => serial(async () => ({goals:await listGoals(pool,req.userId)})))
+  app.get('/tasks', async req => serial(async () => ({tasks:await listTasks(pool,req.userId)})))
+  app.post('/goals', async req => serial(async () => {
+    const goal = await saveGoal(pool,req.userId,req.body)
+    broadcast(req.userId,{type:'goal',goal}); return {goal}
+  }))
+  app.patch('/goals/:id', async req => serial(async () => {
+    const goal = await saveGoal(pool,req.userId,req.body,entityId((req.params as {id:string}).id))
+    broadcast(req.userId,{type:'goal',goal}); return {goal}
+  }))
+  app.delete('/goals/:id', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const affected = (await listTasks(pool,req.userId)).filter(t => t.goalId === id)
+    await deleteGoal(pool,req.userId,id)
+    broadcast(req.userId,{type:'goal.removed',id})
+    for (const t of affected) pushTask(req.userId,await getTask(pool,req.userId,t.id))
+    return {ok:true}
+  }))
+  app.post('/tasks', async req => serial(async () => {
+    const task = await saveTask(pool,req.userId,req.body)
+    pushTask(req.userId,task); return {task}
+  }))
+  app.patch('/tasks/:id', async req => serial(async () => {
+    const task = await saveTask(pool,req.userId,req.body,entityId((req.params as {id:string}).id))
+    pushTask(req.userId,task); return {task}
+  }))
+  app.delete('/tasks/:id', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await deleteTask(pool,req.userId,id)
+    broadcast(req.userId,{type:'task.removed',id}); return {ok:true}
+  }))
+  app.post('/tasks/:id/sessions', async req => serial(async () => {
+    const task = await linkSession(pool,req.userId,entityId((req.params as {id:string}).id),taskText(object(req.body).sessionId,'会话 ID',200))
+    pushTask(req.userId,task); return {task}
+  }))
+  app.delete('/tasks/:id/sessions/:sessionId', async req => serial(async () => {
+    const p = req.params as {id:string;sessionId:string}
+    const task = await linkSession(pool,req.userId,entityId(p.id),p.sessionId,true)
+    pushTask(req.userId,task); return {task}
+  }))
+  app.post('/tasks/:id/start', async req => serial(async () => {
+    const task = await getTask(pool,req.userId,entityId((req.params as {id:string}).id)), b = object(req.body ?? {})
+    const agent = b.agent ?? task.agent
+    if (agent !== 'claude' && agent !== 'codex') throw new TaskError('请选择 Claude 或 Codex')
+    const cwd = taskText(b.cwd ?? task.cwd ?? '', '项目目录',4000)
+    const online = agentList(req.userId)
+    const machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''),'电脑名',4000)
+    const text = taskText(b.text ?? (task.notes || task.title),'第一条消息',8000)
+    if (!executors.has(execKey(req.userId,machine))) throw new TaskError('电脑端不在线',409)
+    return startSession(req.userId,{agent,machine,cwd},task.title,text,'fresh','',task.id)
+  }))
 
   app.post('/sessions/ack-all', async req => {
     const list = await ackAll(pool, req.userId)
@@ -300,35 +387,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       const session = await getSession(pool, userId, id)
       if (!session) return { code: 404, error: '会话不存在' } as const
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
-      const runId = randomUUID()
-      const pendingId = `${session.agent}${PENDING}${runId}`
-      const pending = await createPendingSession(pool, userId, pendingId, session, clean.replace(/\s+/g, ' ').trim())
-      const run = await createRun(pool, userId, runId, pendingId, session.machine)
-      const message = await insertMessage(pool, userId, pendingId, runId, 'user', clean)
-      return { code: 200, run, message, pending, session, pendingId } as const
+      return { code: 200, result: await startSession(userId,session,clean.replace(/\s+/g,' ').trim().slice(0,80),clean,mode,id.slice(id.indexOf(':')+1)) } as const
     })
     if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
-    const { run, message, pending, session, pendingId } = res as Extract<typeof res, { code: 200 }>
-    pushSession(userId, pending, false)
-    pushRun(userId, run)
-    pushMessage(userId, message)
-    const sent = sendExecutor(userId, session.machine, {
-      type: 'run.start',
-      runId: run.id,
-      sessionId: pendingId,
-      agent: session.agent,
-      sessionKey: id.slice(id.indexOf(':') + 1),
-      cwd: session.cwd,
-      text: clean,
-      mode,
-    })
-    if (!sent) {
-      const failed = await setRunStatus(pool, userId, run.id, 'failed', '电脑端不在线')
-      if (failed) pushRun(userId, failed)
-      await abortPending(userId, pendingId, '电脑端不在线')
-      return reply.code(409).send({ error: '电脑端不在线' })
-    }
-    return { runId: run.id, sessionId: pendingId }
+    return (res as Extract<typeof res, {code:200}>).result
   })
 
   app.post('/runs/:id/stop', async (req, reply) => {
@@ -411,6 +473,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const updated = await setRunStatus(pool, userId, run.id, status as Run['status'], str(m.error))
         if (!updated) return
         pushRun(userId, updated)
+        if (!isPendingId(updated.sessionId) && (status === 'done' || status === 'running')) await syncTask(userId,updated.sessionId,status)
         if (status === 'failed' || status === 'stopped') await abortPending(userId, updated.sessionId, str(m.error) || (status === 'stopped' ? '已停止' : '启动失败'))
         if (TERMINAL.includes(status)) {
           for (const a of await expireApprovalsOfRuns(pool, userId, [run.id])) await pushApproval(userId, a, false)
@@ -431,6 +494,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         broadcast(userId, { type: 'session.renamed', from, to })
         const latest = await getRun(pool, userId, run.id)
         if (latest) pushRun(userId, latest)
+        for (const task of await tasksForSession(pool,userId,to)) pushTask(userId,task)
+        await syncTask(userId,to,latest?.status === 'done' ? 'done' : session.state)
         return
       }
       case 'run.message': {
@@ -519,17 +584,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
 
     const me: Conn = { sock: socket, userId, authSessionId }
-    clients.add(me)
     socket.on('close', () => clients.delete(me))
     socket.on('error', () => clients.delete(me))
+    await serial(async () => {
+    if (socket.readyState !== 1) return
     socket.send(
       JSON.stringify({
         type: 'snapshot',
         sessions: await listSessions(pool, userId, false),
         agents: agentList(userId),
         approvals: await Promise.all((await pendingApprovals(pool, userId)).map(a => withProject(userId, a))),
+        goals: await listGoals(pool,userId),
+        tasks: await listTasks(pool,userId),
       }),
     )
+    clients.add(me)
+    })
   })
 
   const ping = setInterval(() => {

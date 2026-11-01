@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { isRunActive, type Api, type Approval, type Message, type Run, type Session } from "./lib/api";
+import { isRunActive, type Api, type Approval, type Message, type Run, type Session, type Task } from "./lib/api";
 import { desktop, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
+import { QuickCreate } from "./TasksPanel";
+import Icon from "./Icon";
 
 const AGENT_LABEL = { claude: "Claude", codex: "Codex" } as const;
 const STATE_LABEL: Record<string, string> = {
@@ -28,6 +30,9 @@ type Props = {
   /** 在线的执行器（机器名） */
   agents: string[];
   onBack(): void;
+  tasks: Task[];
+  onTask(id:number):void;
+  onTaskSaved(task:Task):void;
 };
 
 /** 不能发消息的原因；null 表示可以发 */
@@ -43,7 +48,7 @@ export function sendBlockReason(p: { session: Session; agents: string[]; running
 
 const NOT_FOUND_GRACE_MS = 5000;
 
-export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack }: Props) {
+export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [text, setText] = useState("");
@@ -56,6 +61,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [spawnMode, setSpawnMode] = useState<"fork" | "fresh">("fork");
   const [spawnText, setSpawnText] = useState("");
   const [gaveUp, setGaveUp] = useState(false);
+  const [linkingTask,setLinkingTask] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const id = session?.id ?? "";
 
@@ -120,7 +126,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     return (
       <div className="app">
         <header>
-          <button onClick={onBack}>返回</button>
+          <button className="back-button" onClick={onBack}><Icon name="back"/>返回</button>
         </header>
         <p className="empty">{gaveUp ? "这个会话已经不存在了" : "加载中…"}</p>
       </div>
@@ -191,7 +197,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   return (
     <div className="app session-view">
       <header>
-        <button onClick={onBack}>返回</button>
+        <button className="back-button" onClick={onBack}><Icon name="back"/>返回</button>
         <span className={`tag ${session.agent}`}>{AGENT_LABEL[session.agent]}</span>
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
@@ -200,6 +206,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         </span>
       </header>
       {session.title && <div className="title wrap">{session.title}</div>}
+      <div className="task-links">{tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}<button onClick={()=>setLinkingTask(!linkingTask)}>关联到任务</button></div>
+      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={busy} onClick={()=>void guard(async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}>{t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/></div>}
       {!pendingSession && (
         <div className="btns">
           <button onClick={() => setSpawnOpen((o) => !o)} disabled={busy || !agents.includes(session.machine)} title={agents.includes(session.machine) ? "" : "电脑端不在线"}>
@@ -229,7 +237,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               <small>沿用这个会话的项目目录和 {AGENT_LABEL[session.agent]}，对话从零开始</small>
             </span>
           </label>
-          <textarea value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={busy} />
+          <textarea aria-label="新会话的第一条消息" value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={busy} />
           <div className="btns">
             <button onClick={() => setSpawnOpen(false)} disabled={busy}>
               取消
@@ -278,6 +286,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       <footer className="composer">
         {reason && <p className="hint">{reason}</p>}
         <textarea
+          aria-label="会话消息"
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={reason ?? "发消息给这个会话…（Ctrl+Enter 发送）"}

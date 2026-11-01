@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session } from "./lib/api";
+import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task } from "./lib/api";
 import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
 import SessionView from "./SessionView";
 import { makeBus } from "./lib/sessionSync";
+import { mergeEntity } from "./lib/taskSync";
 import Settings from "./Settings";
+import TasksPanel from "./TasksPanel";
+import GoalsPanel from "./GoalsPanel";
+import TaskView from "./TaskView";
+import GoalView from "./GoalView";
+import Icon from "./Icon";
+type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
+type Tab = "sessions"|"tasks"|"goals";
 
 const AGENT_LABEL = { claude: "Claude", codex: "Codex" } as const;
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
@@ -89,15 +97,15 @@ function Row({
     <li className={`row clickable ${pending ? "pending" : ""} st-${s.state}`} onClick={onOpen}>
       <div className="row-head">
         <span className={`tag ${s.agent}`}>{AGENT_LABEL[s.agent]}</span>
-        <strong className="project">{s.project || "(未知项目)"}</strong>
+        <button className="session-open" onClick={stop(onOpen)}>{s.project || "(未知项目)"}<span className="sr-only">：{s.title || "打开会话"}</span></button>
         <span className="machine">{s.machine}</span>
         {needsApproval ? <span className="badge">待授权</span> : isPending(s) && <span className="badge">{ALERT_LABEL[s.state]}</span>}
       </div>
       {s.title && <div className="title">{s.title}</div>}
       {s.summary && (
-        <div className={`summary ${open ? "open" : ""}`} onClick={stop(() => setOpen(!open))} title="点击展开/收起">
+        <button className={`summary ${open ? "open" : ""}`} onClick={stop(() => setOpen(!open))} aria-expanded={open} title="点击展开/收起">
           {s.summary}
-        </div>
+        </button>
       )}
       <div className="row-foot">
         <span className="since">{sinceText(s, now)}</span>
@@ -123,7 +131,11 @@ export default function App() {
   const [sessions, setSessions] = useState<Map<string, Session>>(new Map());
   const [conn, setConn] = useState<ConnState>("closed");
   const [view, setView] = useState<"list" | "settings">("list");
-  const [openId, setOpenId] = useState<string | null>(null);
+  const [detail,setDetail] = useState<Detail>(null);
+  const [tab,setTab] = useState<Tab>("sessions");
+  const [goals,setGoals] = useState<Map<number,Goal>>(new Map());
+  const [tasks,setTasks] = useState<Map<number,Task>>(new Map());
+  const openId = detail?.kind === "session" ? detail.id : null;
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   const [agents, setAgents] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
@@ -133,6 +145,7 @@ export default function App() {
   const cfgRef = useRef<Config | null>(null);
   cfgRef.current = cfg;
   const openIdRef = useRef<string | null>(null);
+  const renamedIds = useRef(new Map<string,string>());
   openIdRef.current = openId;
 
   // 登录失效（任何请求 401 / WS 以 4401 关闭）：清掉本地 token，回到登录页并提示
@@ -143,7 +156,9 @@ export default function App() {
     cfgRef.current = next;
     setCfg(next);
     setNotice(AUTH_EXPIRED_TEXT);
-    setOpenId(null);
+    setDetail(null);
+    setTab("sessions");
+    window.history.replaceState({agenthub:true,detail:null,tab:"sessions"},"");
     saveConfig(next).catch(() => {});
   }, []);
 
@@ -173,6 +188,10 @@ export default function App() {
       setSessions(new Map());
       setApprovals(new Map());
       setAgents([]);
+      setGoals(new Map());
+      setTasks(new Map());
+      setDetail(null);
+      renamedIds.current.clear();
       return;
     }
     return connect(api.url, api.token, {
@@ -182,10 +201,12 @@ export default function App() {
         if (c === "closed") api.me().catch(() => {});
       },
       onAuthExpired: expire,
-      onSnapshot: (list, ag, aps) => {
+      onSnapshot: (list, ag, aps, gs, ts) => {
         setSessions(new Map(list.map((s) => [s.id, s])));
         setAgents(ag);
         setApprovals(new Map(aps.filter((a) => a.status === "pending").map((a) => [a.id, a])));
+        setGoals(new Map(gs.map(g=>[g.id,g])));
+        setTasks(new Map(ts.map(t=>[t.id,t])));
         bus.emit({ kind: "resync" });
       },
       onSession: (s, notify) => {
@@ -200,6 +221,7 @@ export default function App() {
           return n;
         }),
       onRenamed: (from, to) => {
+        renamedIds.current.set(from,to);
         setSessions((m) => {
           if (!m.has(from)) return m;
           const n = new Map(m);
@@ -208,8 +230,9 @@ export default function App() {
         });
         if (openIdRef.current === from) {
           // 不多压一层历史
-          if (window.history.state?.agenthub === "session") window.history.replaceState({ agenthub: "session" }, "");
-          setOpenId(to);
+          const next: Detail = {kind:"session",id:to};
+          window.history.replaceState({...window.history.state,detail:next}, "");
+          setDetail(next);
           openIdRef.current = to;
         }
         bus.emit({ kind: "resync" });
@@ -226,6 +249,10 @@ export default function App() {
         if (notify && a.status === "pending" && isDesktop && cfgRef.current?.notifyDesktop) void notifyApproval(a);
       },
       onAgents: setAgents,
+      onGoal: g=>setGoals(m=>mergeEntity(m,g)),
+      onGoalRemoved: id=>setGoals(m=>{const n=new Map(m);n.delete(id);return n;}),
+      onTask: t=>setTasks(m=>mergeEntity(m,t)),
+      onTaskRemoved: id=>setTasks(m=>{const n=new Map(m);n.delete(id);return n;}),
     });
   }, [api, bus, expire]);
 
@@ -253,26 +280,41 @@ export default function App() {
     return () => un?.();
   }, [ackAll]);
 
-  // 进入详情页时 pushState，这样 Android 返回键 / 浏览器后退能回到列表
-  const openSession = (id: string) => {
-    window.history.pushState({ agenthub: "session" }, "");
-    setOpenId(id);
+  // 每层历史保存详情类型和标签，任务 → 会话 → 返回可恢复任务详情。
+  const navigate = (next: Detail, replace=false) => {
+    const state={agenthub:true,detail:next,tab};
+    if(replace) window.history.replaceState(state,"");
+    else window.history.pushState(state,"");
+    setDetail(next);
   };
+  const openSession = (id:string)=>navigate({kind:"session",id});
+  const openTask = (id:number)=>navigate({kind:"task",id});
+  const openGoal = (id:number)=>navigate({kind:"goal",id});
   // 从详情页跳到另一个会话（新开会话）：替换当前历史项，返回键仍然回到列表
   const switchSession = (id: string) => {
-    if (window.history.state?.agenthub === "session") window.history.replaceState({ agenthub: "session" }, "");
-    else window.history.pushState({ agenthub: "session" }, "");
-    setOpenId(id);
+    navigate({kind:"session",id},detail?.kind === "session");
   };
   useEffect(() => {
-    const onPop = () => setOpenId(null);
+    window.history.replaceState({agenthub:true,detail:null,tab:"sessions"},"");
+    const onPop = (e:PopStateEvent) => {
+      let next:Detail=e.state?.detail ?? null;
+      if(next?.kind === "session") {
+        const renamed=renamedIds.current.get(next.id);
+        if(renamed) { next={kind:"session",id:renamed};window.history.replaceState({...e.state,detail:next},""); }
+      }
+      setDetail(next);setTab(e.state?.tab ?? "sessions");
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
   }, []);
   const closeSession = () => {
-    if (window.history.state?.agenthub === "session") window.history.back();
-    else setOpenId(null);
+    if (window.history.state?.detail) window.history.back();
+    else setDetail(null);
   };
+  const saveTask=(t:Task)=>setTasks(m=>mergeEntity(m,t,"response"));
+  const saveGoal=(g:Goal)=>setGoals(m=>mergeEntity(m,g,"response"));
+  const taskList=[...tasks.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+  const goalList=[...goals.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
 
   const focus = async (s: Session) => {
     try {
@@ -313,8 +355,21 @@ export default function App() {
         approvals={[...approvals.values()].filter((a) => a.sessionId === openId)}
         agents={agents}
         onBack={closeSession}
+        tasks={taskList}
+        onTask={openTask}
+        onTaskSaved={saveTask}
       />
     );
+  }
+  if (detail && api) {
+    if(detail.kind === "task") {
+      const task=tasks.get(detail.id);
+      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
+    }
+    if(detail.kind === "goal") {
+      const goal=goals.get(detail.id);
+      return goal ? <GoalView key={goal.id} goal={goal} tasks={taskList} api={api} onBack={closeSession} onTask={openTask} onSaved={saveGoal} onTaskSaved={saveTask} onDeleted={()=>{setGoals(m=>{const n=new Map(m);n.delete(goal.id);return n;});setTasks(m=>new Map([...m].map(([id,t])=>[id,t.goalId===goal.id ? {...t,goalId:null} : t])));closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个目标已经不存在了</p></div>;
+    }
   }
 
   const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
@@ -336,22 +391,22 @@ export default function App() {
   );
 
   return (
-    <div className="app">
+    <div className="app home">
       <header>
         <h1>AgentHub</h1>
         <span className={`conn ${conn}`}>
           <i /> {connText}
         </span>
         <span className="spacer" />
-        {pending.length > 0 && (
-          <button onClick={ackAll} className="primary">
-            全部已处理
-          </button>
-        )}
-        <button onClick={() => setView("settings")}>设置</button>
+        <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>
-      {toast && <div className="toast">{toast}</div>}
+      <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","goals"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span>{{sessions:"会话",tasks:"任务",goals:"目标"}[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}</button>)}</nav>
+      {toast && <div className="toast" role="status">{toast}</div>}
       <main>
+        <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
+        <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async title=>saveGoal(await api.createGoal({title}))}/>}</div>
+        <div hidden={tab!=="sessions"}>
+        <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
         <section>
           <h2>待处理 {pending.length > 0 && <span className="count">{pending.length}</span>}</h2>
           {pending.length ? renderList(pending) : <p className="empty">没有待处理的会话</p>}
@@ -364,6 +419,7 @@ export default function App() {
           <summary>其它（{others.length}）</summary>
           {others.length ? renderList(others) : <p className="empty">空</p>}
         </details>
+        </div>
       </main>
     </div>
   );

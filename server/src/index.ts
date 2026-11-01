@@ -5,6 +5,7 @@ import { createPool, migrate, purgeOld } from './db.ts'
 import { registerRoutes } from './routes.ts'
 import { registerAuth } from './auth.ts'
 import { registerAdmin } from './admin.ts'
+import { TaskError } from './tasks.ts'
 
 // adminToken：管理页（/admin）用，不设则 /admin* 全部 404
 export type AppConfig = { adminToken?: string; historyTimeoutMs?: number }
@@ -14,9 +15,10 @@ export async function buildApp(databaseUrl: string, logLevel = 'info', config: A
   const pool = createPool(databaseUrl)
   await migrate(pool)
   const app = Fastify({ logger: { level: logLevel }, bodyLimit: 1024 * 1024, trustProxy: true })
-  await app.register(cors, { origin: true, methods: ['GET', 'HEAD', 'POST', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type'] })
+  await app.register(cors, { origin: true, methods: ['GET', 'HEAD', 'POST', 'PATCH', 'DELETE'], allowedHeaders: ['Authorization', 'Content-Type'] })
   await app.register(websocket)
   app.setErrorHandler((err: { statusCode?: number }, req, reply) => {
+    if (err instanceof TaskError) return reply.code(err.statusCode).send({ error: err.message })
     if (err.statusCode && err.statusCode < 500) return reply.code(err.statusCode).send({ error: '请求格式不对' })
     req.log.error(err)
     return reply.code(500).send({ error: '服务器出错了' })
