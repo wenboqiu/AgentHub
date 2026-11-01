@@ -98,6 +98,27 @@ describe('AgentHub 服务端', () => {
     assert.equal((await get(`claude:${s}`)).state, 'done')
   })
 
+  it('Codex 改名可同步，状态核对不能覆盖新事件；Claude 首条标题不随提示词变化', async () => {
+    const s=sid(), at=iso(-3000), newer=iso(-1000)
+    await send([ev(s,'running',{agent:'codex',title:'首条提示',at})])
+    await send([ev(s,'running',{agent:'codex',title:'Codex 显示名',at,expectedAt:at,quiet:true})])
+    assert.equal((await get(`codex:${s}`)).title,'Codex 显示名')
+    await send([ev(s,'running',{agent:'codex',at:newer})])
+    const stale=await send([ev(s,'idle',{agent:'codex',at:iso(),expectedAt:at,quiet:true})])
+    assert.equal(stale.body.accepted,0)
+    assert.equal((await get(`codex:${s}`)).state,'running')
+    await send([ev(s,'unknown',{agent:'codex',at:newer,expectedAt:newer,quiet:true})])
+    assert.equal((await get(`codex:${s}`)).state,'unknown')
+    const end=iso()
+    await send([ev(s,'done',{agent:'codex',at:end})])
+    await send([ev(s,'done',{agent:'codex',title:'重命名后',at:end,expectedAt:end,quiet:true})])
+    assert.equal((await get(`codex:${s}`)).title,'重命名后')
+    assert.equal((await get(`codex:${s}`)).acked,false)
+    await send([ev(s,'running',{title:'原始标题',at})])
+    await send([ev(s,'running',{title:'新一轮提示',at:newer})])
+    assert.equal((await get(`claude:${s}`)).title,'原始标题')
+  })
+
   it('quiet 不提醒，done 直接已处理', async () => {
     const s = sid()
     const ws = new WebSocket(base.replace('http', 'ws') + `/ws?token=${TOKEN}`)

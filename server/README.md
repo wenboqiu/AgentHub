@@ -19,6 +19,8 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 
 ### 账号接口
 
+会话状态包括 `idle/running/waiting/done/aborted/ended/unknown`；`unknown` 表示本机记录缺失，不能确定状态。`/events` 可带 `expectedAt`：仅当当前 `event_at` 与它相等时接受校正，防止旧快照覆盖新事件。Codex 事件的非空 `title` 可更新已有标题，以同步 Codex 显示名称。
+
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/auth/login` | `{email, password, device}` → `{token, email}`；同一 IP 每分钟 10 次，超过 429；错误统一 401 `邮箱或密码不对` |

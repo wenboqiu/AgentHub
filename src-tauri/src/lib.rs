@@ -15,6 +15,8 @@ mod forwarder;
 #[cfg(desktop)]
 mod remote;
 #[cfg(desktop)]
+mod reconcile;
+#[cfg(desktop)]
 mod runner;
 #[cfg(desktop)]
 mod terminal;
@@ -186,6 +188,7 @@ mod desktop {
                 }
                 collector::spawn(forwarder.clone(), collector_status.clone());
                 codex::spawn(forwarder.clone());
+                crate::reconcile::spawn(shared.clone());
                 let remote_status = remote::spawn(shared.clone());
                 app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
                 build_tray(app.handle())?;

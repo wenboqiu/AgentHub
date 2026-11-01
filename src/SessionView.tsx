@@ -8,6 +8,7 @@ import Icon from "./Icon";
 const AGENT_LABEL = { claude: "Claude", codex: "Codex" } as const;
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
+  unknown: "状态未知",
   running: "运行中",
   waiting: "等待授权",
   done: "已完成",

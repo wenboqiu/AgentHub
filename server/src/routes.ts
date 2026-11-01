@@ -70,6 +70,7 @@ function parseEvent(raw: unknown): EventIn | null {
   const e = raw as Record<string, unknown>
   if (!AGENTS.includes(e.agent as never) || !STATES.includes(e.state as never)) return null
   if (typeof e.sessionId !== 'string' || !e.sessionId || typeof e.at !== 'string' || Number.isNaN(Date.parse(e.at))) return null
+  if (e.expectedAt !== undefined && (typeof e.expectedAt !== 'string' || Number.isNaN(Date.parse(e.expectedAt)))) return null
   // Postgres 的 text 不能含 NUL，不去掉会整批 500
   const clean = (v: string) => v.replaceAll('\0', '')
   const str = (v: unknown) => (typeof v === 'string' ? clean(v) : '')
@@ -84,6 +85,7 @@ function parseEvent(raw: unknown): EventIn | null {
     summary: typeof e.summary === 'string' ? clean(e.summary) : undefined,
     pid: typeof e.pid === 'number' && Number.isInteger(e.pid) && e.pid > 0 ? e.pid : null,
     quiet: e.quiet === true,
+    expectedAt: e.expectedAt as string | undefined,
   }
 }
 

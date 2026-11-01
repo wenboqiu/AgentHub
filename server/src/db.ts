@@ -1,12 +1,13 @@
 import pg from 'pg'
 import { migrateTasks } from './tasks.ts'
 
-export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended'] as const
+export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
 export const AGENTS = ['claude', 'codex'] as const
 export type Agent = (typeof AGENTS)[number]
 
 export type EventIn = {
+  expectedAt?: string
   agent: Agent
   sessionId: string
   machine: string
@@ -191,6 +192,8 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const id = `${ev.agent}:${ev.sessionId}`
   const at = new Date(ev.at)
   const cur = (await pool.query<Row>('SELECT * FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])).rows[0]
+  // 本机核对只修正查询时的版本，不能覆盖核对期间收到的新事件。
+  if (ev.expectedAt !== undefined && (!cur || cur.event_at.getTime() !== Date.parse(ev.expectedAt))) return null
   if (cur && at.getTime() < cur.event_at.getTime()) return null
 
   const quiet = ev.quiet === true
@@ -207,7 +210,7 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const notify = alert && !quiet
   const stateSince = !cur || cur.state !== ev.state || notify ? at : cur.state_since
   const cwd = ev.cwd || cur?.cwd || ''
-  const title = cur?.title || ev.title || ''
+  const title = (ev.agent === 'codex' ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
   const row = (

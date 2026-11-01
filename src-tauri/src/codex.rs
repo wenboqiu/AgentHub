@@ -203,9 +203,14 @@ pub fn spawn(fwd: Forwarder) {
     std::thread::spawn(move || {
         let mut files: HashMap<PathBuf, FileState> = HashMap::new();
         loop {
+            let names = root.parent().and_then(|p| std::fs::read_to_string(p.join("session_index.jsonl")).ok())
+                .map(|s| crate::reconcile::titles(&s)).unwrap_or_default();
             for path in recent_rollouts(&root) {
                 let first = !files.contains_key(&path);
                 let st = files.entry(path.clone()).or_insert_with(|| FileState::new(id_from_name(&path)));
+                if let Some(name) = st.session_id.as_ref().and_then(|id| names.get(id)) {
+                    st.title = Some(name.clone());
+                }
                 let Some((lines, new_off)) = read_new_lines(&path, st.offset) else { continue };
                 st.offset = new_off;
                 if lines.is_empty() && !first {

@@ -1,4 +1,4 @@
-export type State = "idle" | "running" | "waiting" | "done" | "aborted" | "ended";
+export type State = "idle" | "running" | "waiting" | "done" | "aborted" | "ended" | "unknown";
 export type Goal = { id: number; title: string; notes: string; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string };
 export type Task = { id: number; goalId: number | null; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent" | "machine" | "cwd" | "status">>;

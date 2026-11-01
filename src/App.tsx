@@ -37,6 +37,8 @@ function sinceText(s: Session, now: number): string {
       return `${t}开始运行`;
     case "ended":
       return `${t}结束`;
+    case "unknown":
+      return "本机记录缺失，状态未知";
     default:
       return `${t}登记`;
   }
