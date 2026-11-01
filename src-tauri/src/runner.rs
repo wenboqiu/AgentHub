@@ -62,6 +62,118 @@ pub fn parse_claude_agents(text: &str) -> Result<Vec<String>, String> {
     Ok(arr.iter().filter_map(|a| a.get("sessionId").and_then(|s| s.as_str()).map(String::from)).collect())
 }
 
+/// 运行模式：Resume = 接着原会话聊；Fork = 复制原会话上下文另起新会话；Fresh = 同目录从零开始
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mode {
+    Resume,
+    Fork,
+    Fresh,
+}
+
+impl Mode {
+    /// 空串按 Resume（兼容旧服务端）；未知值返回 None
+    pub fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "" | "resume" => Some(Mode::Resume),
+            "fork" => Some(Mode::Fork),
+            "fresh" => Some(Mode::Fresh),
+            _ => None,
+        }
+    }
+
+    /// Resume / Fork 需要原会话 id；Fresh 不需要
+    pub fn needs_key(self) -> bool {
+        self != Mode::Fresh
+    }
+
+    /// 只有 Resume 会写原会话，才需要确认它没在终端里开着
+    pub fn checks_open(self) -> bool {
+        self == Mode::Resume
+    }
+}
+
+/// 前置检查（不含「会话还开着」，那个要跑外部命令）
+pub fn precheck(mode: Mode, key: &str, cwd: &str, roots: &[String]) -> Result<(), String> {
+    if mode.needs_key() && !valid_key(key) {
+        return Err("会话 id 格式不对".into());
+    }
+    if !cwd_allowed(cwd, roots) {
+        return Err(format!("项目目录不在允许列表里：{cwd}"));
+    }
+    Ok(())
+}
+
+/// claude 命令行参数
+pub fn claude_args(mode: Mode, key: &str) -> Vec<String> {
+    let mut a: Vec<String> = vec!["-p".into()];
+    if mode != Mode::Fresh {
+        a.push("--resume".into());
+        a.push(key.into());
+        if mode == Mode::Fork {
+            a.push("--fork-session".into());
+        }
+    }
+    for s in ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--permission-mode", "default"] {
+        a.push(s.into());
+    }
+    a
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ClaudeInit {
+    /// 不是 init 行（或没有 session_id）
+    NotInit,
+    /// 新会话 id
+    NewId(String),
+    /// Fork 时 id 没变：分叉没有生效
+    Unchanged,
+}
+
+/// 解析 `{"type":"system","subtype":"init","session_id":...}`；Fork 时 id 等于原 id 视为异常
+pub fn claude_init_session(line: &str, mode: Mode, key: &str) -> ClaudeInit {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return ClaudeInit::NotInit };
+    if v.get("type").and_then(|t| t.as_str()) != Some("system") || v.get("subtype").and_then(|t| t.as_str()) != Some("init") {
+        return ClaudeInit::NotInit;
+    }
+    match v.get("session_id").and_then(|s| s.as_str()) {
+        Some(id) if !id.is_empty() => {
+            if mode == Mode::Fork && id == key {
+                ClaudeInit::Unchanged
+            } else {
+                ClaudeInit::NewId(id.to_string())
+            }
+        }
+        _ => ClaudeInit::NotInit,
+    }
+}
+
+/// Codex 初始化之后的第一个请求：Resume 恢复、Fork 分叉、Fresh 新建线程
+pub fn codex_thread_request(id: i64, mode: Mode, key: &str, cwd: &str) -> String {
+    match mode {
+        Mode::Resume => rpc_request(id, "thread/resume", json!({"threadId":key})),
+        Mode::Fork => rpc_request(id, "thread/fork", json!({"threadId":key})),
+        Mode::Fresh => rpc_request(id, "thread/start", json!({"cwd":cwd,"approvalPolicy":"on-request","sandbox":"workspace-write"})),
+    }
+}
+
+/// 从 thread/fork、thread/start 的响应里取新线程 id
+pub fn codex_thread_id(result: &Value) -> Option<String> {
+    result.pointer("/thread/id").and_then(|i| i.as_str()).filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// `claude agents --json` 的输出里取 (sessionId, pid)
+pub fn parse_claude_agent_entries(text: &str) -> Result<Vec<(String, Option<u32>)>, String> {
+    let v: Value = serde_json::from_str(text.trim()).map_err(|e| format!("解析失败：{e}"))?;
+    let arr = v.as_array().ok_or("输出不是数组")?;
+    Ok(arr
+        .iter()
+        .filter_map(|a| {
+            let id = a.get("sessionId").and_then(|s| s.as_str())?;
+            Some((id.to_string(), a.get("pid").and_then(|p| p.as_u64()).and_then(|p| u32::try_from(p).ok())))
+        })
+        .collect())
+}
+
 fn clip(s: &str) -> String {
     truncate_chars(s, TEXT_MAX)
 }
@@ -480,6 +592,14 @@ fn run_with_timeout(cmd: &mut Command, dur: Duration) -> Result<String, String> 
     }
 }
 
+/// 终端里开着的 Claude 会话：(sessionId, pid)
+pub fn claude_open_entries() -> Result<Vec<(String, Option<u32>)>, String> {
+    let mut c = Command::new("claude");
+    c.args(["agents", "--json"]);
+    let text = run_with_timeout(&mut c, Duration::from_secs(10))?;
+    parse_claude_agent_entries(&text)
+}
+
 fn claude_open_sessions() -> Result<Vec<String>, String> {
     let mut c = Command::new("claude");
     c.args(["agents", "--json"]);
@@ -615,6 +735,11 @@ impl Run {
     fn fail(&self, error: &str) {
         self.status("failed", error);
     }
+
+    /// Fork / Fresh：告诉服务端新会话的真实 id
+    fn session(&self, key: &str) {
+        let _ = self.out.send(json!({"type":"run.session","runId":self.run_id,"sessionKey":key}));
+    }
 }
 
 fn stderr_tail(buf: &Arc<Mutex<String>>) -> String {
@@ -669,22 +794,9 @@ fn report(run: &Run, f: Finish) {
     }
 }
 
-fn run_claude(run: &Run, key: &str, cwd: &str, text: &str) {
+fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str) {
     let mut cmd = Command::new("claude");
-    cmd.args([
-        "-p",
-        "--resume",
-        key,
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--verbose",
-        "--permission-prompt-tool",
-        "stdio",
-        "--permission-mode",
-        "default",
-    ])
+    cmd.args(claude_args(mode, key))
     .current_dir(cwd)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -704,6 +816,7 @@ fn run_claude(run: &Run, key: &str, cwd: &str, text: &str) {
     let start = Instant::now();
     let mut approvals = Approvals::default();
     let mut finish: Option<Finish> = None;
+    let mut session_reported = mode == Mode::Resume;
     while finish.is_none() {
         if start.elapsed() > RUN_TIMEOUT {
             run.message("system", "运行超过 2 小时，已强制停止");
@@ -712,6 +825,19 @@ fn run_claude(run: &Run, key: &str, cwd: &str, text: &str) {
         }
         match run.rx.recv_timeout(Duration::from_millis(500)) {
             Ok(RunMsg::Line(l)) => {
+                if !session_reported {
+                    match claude_init_session(&l, mode, key) {
+                        ClaudeInit::NewId(id) => {
+                            session_reported = true;
+                            run.session(&id);
+                        }
+                        ClaudeInit::Unchanged => {
+                            session_reported = true;
+                            run.message("system", "分叉没有生成新会话");
+                        }
+                        ClaudeInit::NotInit => {}
+                    }
+                }
                 for m in parse_claude_line(&l) {
                     match m {
                         ClaudeMsg::Text(t) => run.message("assistant", &t),
@@ -784,7 +910,7 @@ fn reap(child: &mut Child, wait: Duration) {
     kill_tree(child);
 }
 
-fn run_codex(run: &Run, exe: &Path, key: &str, cwd: &str, text: &str) {
+fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str) {
     let mut cmd = Command::new(exe);
     cmd.arg("app-server").current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match no_window(&mut cmd).spawn() {
@@ -806,6 +932,8 @@ fn run_codex(run: &Run, exe: &Path, key: &str, cwd: &str, text: &str) {
     let start = Instant::now();
     let mut approvals = Approvals::default();
     let mut turn_id: Option<String> = None;
+    // Resume 用原线程；Fork / Fresh 在响应里拿到新线程 id 后替换
+    let mut thread_id = key.to_string();
     let mut interrupt_deadline: Option<Instant> = None;
     let mut finish: Option<Finish> = None;
     while finish.is_none() {
@@ -825,15 +953,27 @@ fn run_codex(run: &Run, exe: &Path, key: &str, cwd: &str, text: &str) {
                         match id {
                             ID_INIT => {
                                 write_line(&mut stdin, &rpc_notify("initialized"));
-                                write_line(&mut stdin, &rpc_request(ID_RESUME, "thread/resume", json!({"threadId":key})));
+                                write_line(&mut stdin, &codex_thread_request(ID_RESUME, mode, key, cwd));
                             }
                             ID_RESUME => {
+                                if mode != Mode::Resume {
+                                    match codex_thread_id(&result) {
+                                        Some(t) => {
+                                            run.session(&t);
+                                            thread_id = t;
+                                        }
+                                        None => {
+                                            finish = Some(Finish::Failed("Codex 没有返回新线程 id".into()));
+                                            continue;
+                                        }
+                                    }
+                                }
                                 write_line(
                                     &mut stdin,
                                     &rpc_request(
                                         ID_TURN,
                                         "turn/start",
-                                        json!({"threadId":key,"input":[{"type":"text","text":text,"text_elements":[]}],"approvalPolicy":"on-request"}),
+                                        json!({"threadId":thread_id,"input":[{"type":"text","text":text,"text_elements":[]}],"approvalPolicy":"on-request"}),
                                     ),
                                 );
                             }
@@ -874,7 +1014,7 @@ fn run_codex(run: &Run, exe: &Path, key: &str, cwd: &str, text: &str) {
             }
             Ok(RunMsg::Stop) => match &turn_id {
                 Some(t) => {
-                    write_line(&mut stdin, &rpc_request(ID_INTERRUPT, "turn/interrupt", json!({"threadId":key,"turnId":t})));
+                    write_line(&mut stdin, &rpc_request(ID_INTERRUPT, "turn/interrupt", json!({"threadId":thread_id,"turnId":t})));
                     interrupt_deadline = Some(Instant::now() + CODEX_INTERRUPT_GRACE);
                 }
                 None => finish = Some(Finish::Stopped),
@@ -949,7 +1089,7 @@ impl Runner {
     pub fn handle(&self, msg: &Value) {
         let s = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         match msg.get("type").and_then(|t| t.as_str()) {
-            Some("run.start") => self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text")),
+            Some("run.start") => self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), s("mode")),
             Some("run.stop") => {
                 if let Some(e) = self.runs.lock().unwrap().get(&s("runId")) {
                     let _ = e.tx.send(RunMsg::Stop);
@@ -980,7 +1120,7 @@ impl Runner {
         }
     }
 
-    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String) {
+    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, mode: String) {
         let (tx, rx) = mpsc::channel();
         let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone() };
         {
@@ -995,30 +1135,31 @@ impl Runner {
         let roots = self.config.read().unwrap().allowed_roots.clone();
         let runs = self.runs.clone();
         std::thread::spawn(move || {
-            execute(&run, &roots, &agent, &key, &cwd, &text);
+            execute(&run, &roots, &agent, &mode, &key, &cwd, &text);
             runs.lock().unwrap().remove(&run.run_id);
         });
     }
 }
 
 /// 前置检查 + 按 agent 分派
-fn execute(run: &Run, roots: &[String], agent: &str, key: &str, cwd: &str, text: &str) {
-    if !valid_key(key) {
-        return run.fail("会话 id 格式不对");
-    }
-    if !cwd_allowed(cwd, roots) {
-        return run.fail(&format!("项目目录不在允许列表里：{cwd}"));
+fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str) {
+    let Some(mode) = Mode::parse(mode) else {
+        return run.fail(&format!("不支持的模式：{mode}"));
+    };
+    if let Err(e) = precheck(mode, key, cwd, roots) {
+        return run.fail(&e);
     }
     match agent {
+        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text),
         "claude" => match claude_open_sessions() {
             Ok(open) if open.iter().any(|s| s == key) => {
                 run.fail("这个会话在终端里还开着，请先关掉它或直接在终端里继续")
             }
-            Ok(_) => run_claude(run, key, cwd, text),
+            Ok(_) => run_claude(run, mode, key, cwd, text),
             Err(e) => run.fail(&format!("无法确认这个会话是否还开在终端里（claude agents --json：{e}）")),
         },
         "codex" => match default_codex_bin_dir().and_then(|d| find_codex_exe(&d)) {
-            Some(exe) => run_codex(run, &exe, key, cwd, text),
+            Some(exe) => run_codex(run, mode, &exe, key, cwd, text),
             None => run.fail("没找到 Codex Desktop 自带的 codex.exe"),
         },
         other => run.fail(&format!("不认识的 agent：{other}")),
@@ -1049,6 +1190,83 @@ mod tests {
         assert!(!cwd_allowed("D:\\Work2", &roots(&[""])));
         assert!(cwd_allowed("\\\\?\\D:\\Work2\\a", &r));
         assert!(cwd_allowed("D:\\a", &roots(&["D:\\"])));
+    }
+
+    #[test]
+    fn mode_parse_and_rules() {
+        assert_eq!(Mode::parse(""), Some(Mode::Resume));
+        assert_eq!(Mode::parse("resume"), Some(Mode::Resume));
+        assert_eq!(Mode::parse("fork"), Some(Mode::Fork));
+        assert_eq!(Mode::parse("fresh"), Some(Mode::Fresh));
+        assert_eq!(Mode::parse("Fork"), None);
+        assert_eq!(Mode::parse("xx"), None);
+        assert!(Mode::Resume.needs_key() && Mode::Fork.needs_key() && !Mode::Fresh.needs_key());
+        assert!(Mode::Resume.checks_open() && !Mode::Fork.checks_open() && !Mode::Fresh.checks_open());
+    }
+
+    #[test]
+    fn precheck_by_mode() {
+        let r = roots(&["D:\\Work2"]);
+        assert!(precheck(Mode::Fresh, "", "D:\\Work2\\a", &r).is_ok(), "Fresh 不要求 key");
+        assert!(precheck(Mode::Fresh, "bad key", "D:\\Work2\\a", &r).is_ok());
+        assert!(precheck(Mode::Resume, "", "D:\\Work2\\a", &r).is_err());
+        assert!(precheck(Mode::Fork, "a b", "D:\\Work2\\a", &r).is_err());
+        assert!(precheck(Mode::Fork, "abc-1", "D:\\Work2\\a", &r).is_ok());
+        for m in [Mode::Resume, Mode::Fork, Mode::Fresh] {
+            let e = precheck(m, "abc", "D:\\Play", &r).unwrap_err();
+            assert!(e.starts_with("项目目录不在允许列表里"), "{e}");
+        }
+    }
+
+    #[test]
+    fn claude_args_by_mode() {
+        let tail = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--permission-mode", "default"];
+        let mut resume = vec!["-p", "--resume", "k1"];
+        resume.extend(tail);
+        assert_eq!(claude_args(Mode::Resume, "k1"), resume);
+        let mut fork = vec!["-p", "--resume", "k1", "--fork-session"];
+        fork.extend(tail);
+        assert_eq!(claude_args(Mode::Fork, "k1"), fork);
+        let mut fresh = vec!["-p"];
+        fresh.extend(tail);
+        assert_eq!(claude_args(Mode::Fresh, "k1"), fresh);
+    }
+
+    #[test]
+    fn claude_init_line() {
+        let l = r#"{"type":"system","subtype":"init","session_id":"new-1","cwd":"x"}"#;
+        assert_eq!(claude_init_session(l, Mode::Fork, "old"), ClaudeInit::NewId("new-1".into()));
+        assert_eq!(claude_init_session(l, Mode::Fresh, ""), ClaudeInit::NewId("new-1".into()));
+        assert_eq!(claude_init_session(r#"{"type":"system","subtype":"init","session_id":"old"}"#, Mode::Fork, "old"), ClaudeInit::Unchanged);
+        assert_eq!(claude_init_session(r#"{"type":"system","subtype":"hook_started","session_id":"x"}"#, Mode::Fork, "old"), ClaudeInit::NotInit);
+        assert_eq!(claude_init_session(r#"{"type":"system","subtype":"init"}"#, Mode::Fork, "old"), ClaudeInit::NotInit);
+        assert_eq!(claude_init_session(r#"{"type":"assistant"}"#, Mode::Fork, "old"), ClaudeInit::NotInit);
+        assert_eq!(claude_init_session("junk", Mode::Fork, "old"), ClaudeInit::NotInit);
+    }
+
+    #[test]
+    fn codex_thread_requests() {
+        let v = |s: String| serde_json::from_str::<Value>(&s).unwrap();
+        let r = v(codex_thread_request(2, Mode::Resume, "t1", "D:\\x"));
+        assert_eq!((r["id"].clone(), r["method"].as_str()), (json!(2), Some("thread/resume")));
+        assert_eq!(r["params"], json!({"threadId":"t1"}));
+        let r = v(codex_thread_request(2, Mode::Fork, "t1", "D:\\x"));
+        assert_eq!(r["method"], "thread/fork");
+        assert_eq!(r["params"], json!({"threadId":"t1"}));
+        let r = v(codex_thread_request(2, Mode::Fresh, "t1", "D:\\x"));
+        assert_eq!(r["method"], "thread/start");
+        assert_eq!(r["params"], json!({"cwd":"D:\\x","approvalPolicy":"on-request","sandbox":"workspace-write"}));
+        assert_eq!(codex_thread_id(&json!({"thread":{"id":"n1"},"cwd":"x"})), Some("n1".into()));
+        assert_eq!(codex_thread_id(&json!({"thread":{"id":""}})), None);
+        assert_eq!(codex_thread_id(&json!({})), None);
+        assert_eq!(codex_thread_id(&Value::Null), None);
+    }
+
+    #[test]
+    fn agent_entries_with_pid() {
+        let t = r#"[{"pid":17868,"sessionId":"a-1","cwd":"x"},{"sessionId":"b-2"},{"pid":5}]"#;
+        assert_eq!(parse_claude_agent_entries(t).unwrap(), vec![("a-1".to_string(), Some(17868)), ("b-2".to_string(), None)]);
+        assert!(parse_claude_agent_entries("{}").is_err());
     }
 
     #[test]
