@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime};
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
-const HISTORY_COUNT: usize = 30;
+const HISTORY_COUNT: usize = 50;
 const TEXT_MAX: usize = 4000;
 
 // ---------------------------------------------------------------- 纯函数

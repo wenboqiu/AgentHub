@@ -76,6 +76,28 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     return () => { sync.dispose(); syncRef.current = null; };
   }, [api, bus, id]);
 
+  // 打开详情页时自动从电脑上拉一次最新记录（服务端存的可能是旧的）；每个会话只自动拉一次
+  const online = !!session && agents.includes(session.machine);
+  const [syncing, setSyncing] = useState(false);
+  const autoLoaded = useRef("");
+  useEffect(() => {
+    if (!id || !online || isPendingSession(id) || autoLoaded.current === id) return;
+    autoLoaded.current = id;
+    let gone = false;
+    setSyncing(true);
+    api
+      .history(id)
+      .then(() => (gone ? undefined : syncRef.current?.reload()))
+      .catch(() => {}) // 电脑上读不到就保留已有记录，手动刷新时才提示错误
+      .finally(() => {
+        if (!gone) setSyncing(false);
+      });
+    return () => {
+      gone = true;
+      setSyncing(false);
+    };
+  }, [api, id, online]);
+
   // 会话暂时不在列表里（刚新开、广播还没到）：先显示「加载中」，等够 5 秒才判定不存在
   const exists = !!session;
   useEffect(() => {
@@ -220,12 +242,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       <main className="chat">
         <div className="btns">
-          <button onClick={loadHistory} disabled={busy || !agents.includes(session.machine)}>
-            加载电脑上的历史记录
+          <button onClick={loadHistory} disabled={busy || syncing || !agents.includes(session.machine)}>
+            {syncing ? "正在同步电脑上的记录…" : "刷新电脑上的记录"}
           </button>
         </div>
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && <p className="empty">还没有消息。可以发一条，或者加载电脑上的历史记录。</p>}
+        {!loading && messages.length === 0 && !syncing && <p className="empty">还没有消息。可以发一条，或者刷新电脑上的记录。</p>}
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`msg ${m.role}`}>
