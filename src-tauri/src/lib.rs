@@ -17,6 +17,8 @@ mod remote;
 #[cfg(desktop)]
 mod runner;
 #[cfg(desktop)]
+mod terminal;
+#[cfg(desktop)]
 mod tray;
 
 #[cfg(desktop)]
@@ -26,7 +28,7 @@ mod desktop {
     use crate::config::{self, Config, SharedConfig};
     use crate::forwarder::{ForwardStatus, Forwarder};
     use crate::remote::{self, RemoteStatus, Status as RemoteInfo};
-    use crate::{codex, focus, tray};
+    use crate::{codex, focus, terminal, tray};
     use serde::Serialize;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, RwLock};
@@ -102,6 +104,11 @@ mod desktop {
     }
 
     #[tauri::command]
+    fn open_in_terminal(agent: String, session_key: String, cwd: String) -> Result<String, String> {
+        terminal::open_in_terminal(&agent, &session_key, &cwd)
+    }
+
+    #[tauri::command]
     fn set_badge(app: AppHandle, count: u32) {
         let Some(t) = app.tray_by_id("main") else { return };
         let tip = if count == 0 { "AgentHub".to_string() } else { format!("AgentHub：{count} 个待处理") };
@@ -165,6 +172,7 @@ mod desktop {
                 install_claude_hooks,
                 uninstall_claude_hooks,
                 focus_session,
+                open_in_terminal,
                 set_badge
             ])
             .setup(move |app| {
