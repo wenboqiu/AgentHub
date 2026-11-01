@@ -441,32 +441,43 @@ export async function insertMessage(pool: pg.Pool, userId: number, sessionId: st
   return toMessage(r.rows[0])
 }
 
-// 历史记录：run_id 为 null，跳过和已有消息（同角色同文本）完全重复的；
-// created_at 排在现有最早消息之前，这样详情页里历史在新对话上面
-export async function insertHistory(pool: pg.Pool, userId: number, sessionId: string, items: { role: string; text: string }[]): Promise<Message[]> {
-  const existing = await pool.query<{ role: string; text: string }>('SELECT role, text FROM messages WHERE user_id = $1 AND session_id = $2', [userId, sessionId])
-  const seen = new Set(existing.rows.map(r => `${r.role}\u0001${r.text}`))
-  const fresh: { role: string; text: string }[] = []
-  for (const it of items) {
-    const text = cleanText(it.text, 4000)
-    const key = `${it.role}\u0001${text}`
-    if (!text || seen.has(key)) continue
-    seen.add(key)
-    fresh.push({ role: it.role, text })
-  }
-  const out: Message[] = []
-  const n = fresh.length
-  for (let i = 0; i < n; i++) {
-    const r = await pool.query<MessageRow>(
-      `INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
-       VALUES ($5, $1, null, $2, $3, COALESCE((SELECT min(created_at) FROM messages WHERE user_id = $5 AND session_id = $1), now()) - ($4 * interval '1 millisecond'))
-       RETURNING *`,
-      [sessionId, fresh[i].role, fresh[i].text, n - i, userId],
+// 历史记录：电脑上的会话记录才是准的（AgentHub 发起的对话也写在里面），
+// 所以用快照整体替换这个会话已存的消息，只保留进行中的 run 的消息（快照里可能还没有）。
+// 快照按原顺序插入，时间排在保留消息之前。
+export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: { role: string; text: string }[]): Promise<Message[]> {
+  const snapshot = items.map(it => ({ role: it.role, text: cleanText(it.text, 4000) })).filter(it => it.text).slice(-KEEP_MESSAGES)
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const active = await client.query<{ id: string }>(
+      "SELECT id FROM runs WHERE user_id = $1 AND session_id = $2 AND status IN ('queued', 'running') LIMIT 1",
+      [userId, sessionId],
     )
-    out.push(toMessage(r.rows[0]))
+    const keepRun = active.rows[0]?.id ?? null
+    // 注意不能写成 run_id IS DISTINCT FROM $3：keepRun 为 null 时 null 和 null 不算不同，历史消息就删不掉了
+    if (keepRun) await client.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2 AND run_id IS DISTINCT FROM $3', [userId, sessionId, keepRun])
+    else await client.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, sessionId])
+    const base = await client.query<{ t: Date }>(
+      'SELECT COALESCE(min(created_at), now()) AS t FROM messages WHERE user_id = $1 AND session_id = $2',
+      [userId, sessionId],
+    )
+    const n = snapshot.length
+    for (let i = 0; i < n; i++) {
+      await client.query(
+        `INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
+         VALUES ($1, $2, null, $3, $4, $5::timestamptz - ($6 * interval '1 millisecond'))`,
+        [userId, sessionId, snapshot[i].role, snapshot[i].text, base.rows[0].t, n - i],
+      )
+    }
+    await client.query('COMMIT')
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
   }
   await trimMessages(pool, userId, sessionId)
-  return out
+  return listMessages(pool, userId, sessionId, KEEP_MESSAGES)
 }
 
 export async function listMessages(pool: pg.Pool, userId: number, sessionId: string, limit: number): Promise<Message[]> {

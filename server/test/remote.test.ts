@@ -298,19 +298,36 @@ describe('远程控制', () => {
     })
     const r = await pending
     assert.equal(r.status, 200)
+    // 快照原样保存（重复的消息也是真实对话的一部分，不去重）
     assert.deepEqual(
       r.body.messages.map((m: any) => [m.role, m.text, m.runId]),
       [
         ['user', '以前的问题', null],
         ['assistant', '以前的回答', null],
+        ['user', '以前的问题', null],
       ],
     )
-    // 再请求一次：完全重复的跳过
+    // 再请求一次：用新快照整体替换，最新内容在最后
     ex.msgs.length = 0
     const again = call('POST', url, {})
     const req2 = await waitFor(() => find(ex, 'history.request'))
-    sendJson(ex, { type: 'history.result', requestId: req2.requestId, messages: [{ role: 'user', text: '以前的问题' }, { role: 'user', text: '新的一条' }] })
-    assert.deepEqual((await again).body.messages.map((m: any) => m.text), ['新的一条'])
+    sendJson(ex, { type: 'history.result', requestId: req2.requestId, messages: [{ role: 'user', text: '以前的问题' }, { role: 'assistant', text: '以前的回答' }, { role: 'user', text: '新的一条' }] })
+    assert.deepEqual((await again).body.messages.map((m: any) => m.text), ['以前的问题', '以前的回答', '新的一条'])
+    const listed = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)
+    assert.deepEqual(listed.body.messages.map((m: any) => m.text), ['以前的问题', '以前的回答', '新的一条'])
+
+    // 进行中的 run 的消息保留，排在快照之后
+    ex.msgs.length = 0
+    assert.equal((await call('POST', `/sessions/${encodeURIComponent(id)}/messages`, { text: '正在跑的问题' })).status, 200)
+    const start = await waitFor(() => find(ex, 'run.start'))
+    sendJson(ex, { type: 'run.status', runId: start.runId, status: 'running' })
+    await sleep(200)
+    const third = call('POST', url, {})
+    const reqRun = await waitFor(() => find(ex, 'history.request'))
+    sendJson(ex, { type: 'history.result', requestId: reqRun.requestId, messages: [{ role: 'user', text: '快照里的' }] })
+    assert.deepEqual((await third).body.messages.map((m: any) => m.text), ['快照里的', '正在跑的问题'])
+    sendJson(ex, { type: 'run.status', runId: start.runId, status: 'done' })
+    await sleep(200)
 
     // 超时
     ex.msgs.length = 0

@@ -21,7 +21,7 @@ import {
   getApproval,
   getRun,
   getSession,
-  insertHistory,
+  replaceHistory,
   insertMessage,
   isPendingId,
   latestRun,
@@ -392,7 +392,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const items = result.messages
       .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
       .map(m => ({ role: m.role, text: m.text }))
-    const messages = await serial(() => insertHistory(pool, userId, id, items))
+    const messages = await serial(() => replaceHistory(pool, userId, id, items))
     return { messages }
   })
 
