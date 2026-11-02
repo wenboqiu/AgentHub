@@ -10,9 +10,16 @@ pub struct HistoryMessage {
     pub text: String,
     pub source_id: Option<String>,
     pub branch_point: Option<String>,
+    /// 原生日志里的真实时间（Claude/Codex 的 transcript 每行都带 timestamp）。
+    /// 没有它，整段历史会被挤到同一瞬间，日历里每个会话的时长就都变成 5 分钟。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
 }
 
 fn key(v: &Value) -> Option<String> { v.as_str().filter(|s| valid_key(s)).map(String::from) }
+fn at(v: &Value) -> Option<String> {
+    v["timestamp"].as_str().filter(|s| !s.trim().is_empty()).map(String::from)
+}
 fn text(v: &Value) -> String {
     if let Some(s) = v.as_str() { return s.to_owned(); }
     v.as_array().into_iter().flatten().filter(|p| matches!(p["type"].as_str(), Some("text" | "input_text" | "output_text")))
@@ -54,7 +61,7 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
         if agent == "codex" && role == "assistant" && v["payload"]["phase"] == "final_answer" && turn.is_some() {
             final_index = Some(messages.len());
         }
-        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: source, branch_point: branch });
+        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: source, branch_point: branch, at: at(&v) });
     }
     let n = messages.len().saturating_sub(limit);
     messages.drain(..n);
@@ -79,6 +86,16 @@ mod tests {
         assert_eq!(messages[0].source_id.as_deref(),Some("first"));
         assert!(messages[0].branch_point.is_none());
         assert_eq!(messages[1].branch_point.as_deref(),Some("second"));
+    }
+    #[test]
+    fn keeps_native_timestamps() {
+        let data = r#"{"type":"user","uuid":"u1","timestamp":"2026-11-02T01:10:00.000Z","message":{"content":"hi"}}
+{"type":"assistant","uuid":"a1","timestamp":"2026-11-02T01:12:30.000Z","message":{"content":[{"type":"text","text":"hello"}],"stop_reason":"end_turn"}}"#;
+        let messages = parse("claude", data, 50);
+        assert_eq!(messages[0].at.as_deref(), Some("2026-11-02T01:10:00.000Z"));
+        assert_eq!(messages[1].at.as_deref(), Some("2026-11-02T01:12:30.000Z"));
+        let codex = r#"{"timestamp":"2026-11-02T02:00:00.000Z","type":"response_item","payload":{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"hi"}]}}"#;
+        assert_eq!(parse("codex", codex, 50)[0].at.as_deref(), Some("2026-11-02T02:00:00.000Z"));
     }
     #[test]
     fn codex_requires_completed_turn_and_keeps_earlier_boundary() {

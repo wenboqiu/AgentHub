@@ -65,7 +65,7 @@ export type RouteOptions = {
   reminderIntervalMs?: number
 }
 
-type HistoryResult = { messages: ({ role: string; text: string } & MessageMeta)[]; error?: string }
+type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
 
 function bearer(req: FastifyRequest) {
   const h = req.headers.authorization ?? ''
@@ -549,7 +549,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (result.error) return reply.code(502).send({ error: result.error })
     const items = result.messages
       .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
-      .map(m => ({ role: m.role, text: m.text, sourceId:nativeKey(m.sourceId) ?? undefined, branchPoint:nativeKey(m.branchPoint) ?? undefined }))
+      .map(m => ({
+        role: m.role,
+        text: m.text,
+        sourceId: nativeKey(m.sourceId) ?? undefined,
+        branchPoint: nativeKey(m.branchPoint) ?? undefined,
+        // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
+        at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
+      }))
     const messages = await serial(() => replaceHistory(pool, userId, id, items))
     return { messages }
   })

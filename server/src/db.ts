@@ -549,11 +549,57 @@ export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number
 // 历史记录：电脑上的会话记录才是准的（AgentHub 发起的对话也写在里面），
 // 所以用快照整体替换这个会话已存的消息，只保留进行中的 run 的消息（快照里可能还没有）。
 // 快照按原顺序插入，时间排在保留消息之前。
-export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string } & MessageMeta)[]): Promise<Message[]> {
-  const snapshot = items.map(it => ({ role: it.role, text: cleanText(it.text, 4000), sourceId:nativeKey(it.sourceId), branchPoint:nativeKey(it.branchPoint) })).filter(it => it.text).slice(-KEEP_MESSAGES)
+const MINUTE = 60_000
+/**
+ * 给一次历史快照排时间。三层兜底：
+ * 1. 原生日志自带的时间（Claude/Codex transcript 的 timestamp）最准；
+ * 2. 老电脑端不带时间，就沿用库里同一条消息（按 source_id 认）上次存的时间；
+ * 3. 两边都没有的，按前后已知点等距插值，两端各按 1 分钟顺延。
+ * 早先统一写成 base - i 毫秒，整段历史会挤进同一个 5 分钟桶，
+ * 结果日历里每个会话的"持续时间"都一模一样。
+ */
+export function historyTimes(items: { at: number | null; sourceId: string | null }[], prev: Map<string, number>, fallback: number): number[] {
+  const n = items.length
+  const times: (number | null)[] = items.map(it => it.at ?? (it.sourceId ? prev.get(it.sourceId) ?? null : null))
+  const marks: number[] = []
+  times.forEach((t, i) => { if (t !== null) marks.push(i) })
+  if (!marks.length) {
+    return times.map((_, i) => fallback - (n - i))
+  }
+  const first = marks[0], last = marks[marks.length - 1]
+  for (let i = first - 1; i >= 0; i--) times[i] = times[i + 1]! - MINUTE
+  for (let i = last + 1; i < n; i++) times[i] = times[i - 1]! + MINUTE
+  for (let m = 1; m < marks.length; m++) {
+    const a = marks[m - 1], b = marks[m]
+    // 时间倒挂（时钟回拨或同一秒）时至少保证每条相差 1 毫秒，顺序不乱
+    if (times[b]! <= times[a]!) times[b] = times[a]! + (b - a)
+    for (let i = a + 1; i < b; i++) times[i] = Math.round(times[a]! + (times[b]! - times[a]!) * ((i - a) / (b - a)))
+  }
+  const now = Date.now()
+  const out: number[] = []
+  for (let i = 0; i < n; i++) {
+    let t = Math.min(times[i]!, now)
+    if (i && t <= out[i - 1]) t = out[i - 1] + 1
+    out.push(t)
+  }
+  return out
+}
+
+export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string; at?: string } & MessageMeta)[]): Promise<Message[]> {
+  const snapshot = items
+    .map(it => ({ role: it.role, text: cleanText(it.text, 4000), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null }))
+    .filter(it => it.text)
+    .slice(-KEEP_MESSAGES)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
+    // 必须先查再删：老电脑端不发时间戳，全靠这里把原来的时间捡回来
+    const prev = await client.query<{ source_id: string; t: Date }>(
+      `SELECT source_id, max(created_at) AS t FROM messages
+       WHERE user_id = $1 AND session_id = $2 AND source_id IS NOT NULL GROUP BY source_id`,
+      [userId, sessionId],
+    )
+    const prevTimes = new Map(prev.rows.map(r => [r.source_id, r.t.getTime()]))
     const active = await client.query<{ id: string }>(
       "SELECT id FROM runs WHERE user_id = $1 AND session_id = $2 AND status IN ('queued', 'running') LIMIT 1",
       [userId, sessionId],
@@ -566,12 +612,12 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
       'SELECT COALESCE(min(created_at), now()) AS t FROM messages WHERE user_id = $1 AND session_id = $2',
       [userId, sessionId],
     )
-    const n = snapshot.length
-    for (let i = 0; i < n; i++) {
+    const times = historyTimes(snapshot, prevTimes, base.rows[0].t.getTime())
+    for (let i = 0; i < snapshot.length; i++) {
       await client.query(
         `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
-         VALUES ($1, $2, null, $3, $4, $7, $8, $5::timestamptz - ($6 * interval '1 millisecond'))`,
-        [userId, sessionId, snapshot[i].role, snapshot[i].text, base.rows[0].t, n - i, snapshot[i].sourceId, snapshot[i].branchPoint],
+         VALUES ($1, $2, null, $3, $4, $6, $7, $5::timestamptz)`,
+        [userId, sessionId, snapshot[i].role, snapshot[i].text, new Date(times[i]), snapshot[i].sourceId, snapshot[i].branchPoint],
       )
     }
     await client.query('COMMIT')
