@@ -155,17 +155,27 @@ mod win {
             }
             return Err("没找到该会话所在的窗口（可能已经关闭）".into());
         }
-        if agent == "codex" || agent == "doubao" {
+        if agent == "codex" || agent == "doubao" || agent == "workbuddy" {
             // Codex Desktop 的窗口进程是 ChatGPT.exe（实测），名字里没有 codex；
             // 其它形态按可执行名包含 codex 兜底。都要求有可见主窗口
             for (pid, p) in &procs {
-                if (agent == "codex" && is_codex_exe(&p.exe)) || (agent == "doubao" && p.exe.eq_ignore_ascii_case("Doubao.exe")) {
+                let matched = match agent {
+                    "codex" => is_codex_exe(&p.exe),
+                    "doubao" => p.exe.eq_ignore_ascii_case("Doubao.exe"),
+                    _ => p.exe.eq_ignore_ascii_case("WorkBuddy.exe"),
+                };
+                if matched {
                     if let Some(w) = window_of(*pid) {
                         return bring_to_front(w);
                     }
                 }
             }
-            return Err(format!("没找到 {} 窗口", if agent == "doubao" { "豆包" } else { "Codex" }));
+            let name = match agent {
+                "codex" => "Codex",
+                "doubao" => "豆包",
+                _ => "WorkBuddy",
+            };
+            return Err(format!("没找到 {name} 窗口"));
         }
         Err("这个会话没有记录进程号，无法跳转".into())
     }

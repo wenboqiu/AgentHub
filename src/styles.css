@@ -113,6 +113,7 @@ progress::-moz-progress-bar { background: var(--ok); border-radius: 99px; }
 .tag.claude { background: var(--alert-bg); color: var(--claude); }
 .tag.codex { background: var(--ok-bg); color: var(--codex); }
 .tag.doubao { background: var(--ok-bg); color: var(--codex); }
+.tag.workbuddy { background: var(--ok-bg); color: var(--codex); }
 .machine { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
 .badge { margin-left: auto; font-size: 12px; color: var(--alert); font-weight: 600; }
 .title { margin-top: 8px; color: var(--dim); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

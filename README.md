@@ -31,8 +31,21 @@
 - Claude Code：hook（`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）。`idle_prompt` 不接。
 - Codex：只读 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`（`task_started` / `task_complete` / `turn_aborted`），不碰 `config.toml`（`notify` 已被 Codex Desktop 占用）。第一版没有 Codex 的「等待授权」状态。
 - 豆包 Windows 客户端（实验性，已对照 2.32.6 本机日志）：只读 `%USERPROFILE%\AppData\Local\Doubao\User Data\sdk_storage\log\saman_YYYY.MMDD.N.log` 中的结构化生命周期事件，每 2 秒增量检查。按会话 ID 展示标题、回复中、完成和中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到豆包窗口，不能定位到指定聊天。没有该目录时自动等待，不需要 API Key。
+- WorkBuddy：只读 `%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`（`message` / `function_call` / `ai-title` / `custom-title`），每 2 秒增量检查。展示标题、项目目录、运行中／完成／中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到 WorkBuddy 窗口，不能定位到指定会话。
 
 豆包接入仅提供**会话状态监听**，暂不提供完整对话正文、等待授权、远程发消息、新建或分支。完成状态必须有会话结束成功事件，不通过日志停止增长猜测；初次加载今天和昨天每个日志末尾最多 8 MiB，静默登记已有状态，历史中未结束的运行显示为未知。日志轮换后继续读取新文件。豆包升级改变日志格式时可能无法采集，需要重新适配；此功能需同时更新服务端、桌面端与手机端。
+
+## WorkBuddy 会话监听
+
+WorkBuddy 没有 hook，也没有可调用的 CLI/IPC 通道，因此同样只做**状态与消息元数据监听**：能展示标题、所属项目目录、运行中／完成／中断状态，跳转只能切到 WorkBuddy 窗口，不能定位到指定会话；不提供完整对话正文、等待授权、远程发消息、新建或分支。
+
+完成判定不看「日志停止增长」本身，而是三个条件同时满足：
+
+1. transcript 尾部是已完成（`status: completed`）的助手回复，或已归的工具结果；被中断的回复（`incomplete`）判为已中断；
+2. 没有未归的 `function_call`（工具还在执行时不会结束）；
+3. 文件静默达到确认窗口（回复结束后 20 秒，工具结果后 60 秒）。
+
+首轮启动只登记历史会话的最终状态（静默、不触发提醒），跳过 7 天前和 3 天内未改动过的文件；会话被继续写入时自动恢复跟踪。实现见 `src-tauri/src/workbuddy.rs`，服务端把 workbuddy 当作只读 agent，发消息／新开／分支／读历史都返回 409。
 
 ## 逐条回复操作
 
@@ -171,4 +184,6 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 - 本机 AgentHub 没运行时，hook 脚本每次会等 curl 超时（Windows 上连接被拒绝约 2 秒），上限 2 秒。
 - Android 端只有重连后「新发生」的变化会弹通知，断线期间错过的提醒不会补弹（列表里仍能看到待处理）。
 - Codex 的 `waiting` 状态尚未接入本地采集；标题优先读取 Codex 名称索引，缺失时取首条用户文本。
+- WorkBuddy 的完成提醒依赖静默确认窗口：模型长时间思考或工具执行期间不判结束，正常结束会比实际晚 20 秒（工具结果后 60 秒）才提醒；拿不到等待授权状态，因此不能在 AgentHub 里批授权。
+- WorkBuddy 的 transcript 结构没有对外承诺，升级后可能改变字段或目录，届时采集会失效需要重新适配。
 - 仅 Windows + Android，不做 iOS / macOS，多账号隔离（管理员建账号）。任务管理暂不包含到期提醒、重复任务、子任务和离线编辑。

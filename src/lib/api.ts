@@ -8,7 +8,7 @@ export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent
 
 export type Session = {
   id: string;
-  agent: "claude" | "codex" | "doubao";
+  agent: "claude" | "codex" | "doubao" | "workbuddy";
   machine: string;
   cwd: string;
   project: string;
@@ -25,7 +25,7 @@ export type Session = {
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
 /** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
-export type Execution = Run & { agent: "claude" | "codex" | "doubao" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
+export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
 export type ActivityBucket = { sessionId: string; at: string; count: number };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";

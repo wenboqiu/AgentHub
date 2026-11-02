@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ActivityBucket, Api, Execution, Goal, Session, Task } from "./lib/api";
+import { AGENT_LABEL } from "./lib/agents";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const DAY = 86_400_000;
@@ -11,7 +12,6 @@ const dateKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.
 const hm = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 /** 本周周一 0 点 */
 const weekStart = (d: Date) => { const s = new Date(d.getFullYear(), d.getMonth(), d.getDate() - (d.getDay() + 6) % 7); return s; };
-const AGENT_LABEL = { claude: "Claude", codex: "Codex", doubao: "豆包" } as const;
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
 /** 日历条目：API 的执行记录，或由会话合成的"会话活动"（sessionState 有值） */

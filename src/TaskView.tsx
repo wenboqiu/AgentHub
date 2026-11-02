@@ -4,9 +4,9 @@ import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
 import ScheduleFields, { scheduleOf } from "./ScheduleFields";
 import Checklist from "./Checklist";
+import { AGENT_LABEL } from "./lib/agents";
 const formOf=(t:Task)=>({...scheduleOf(t),checklist:t.checklist ?? [],title:t.title,notes:t.notes,status:t.status,goalId:t.goalId,agent:t.agent,machine:t.machine,cwd:t.cwd});
 const fmt=(iso:string|null|undefined)=>iso ? new Date(iso).toLocaleString() : "未设置";
-const AGENT_LABEL:Record<string,string>={claude:"Claude",codex:"Codex",doubao:"豆包"};
 const STATE_LABEL:Record<string,string>={idle:"空闲",running:"运行中",waiting:"等待授权",done:"已完成",aborted:"已中断",ended:"已结束",unknown:"状态未知"};
 const STATUSES=Object.keys(TASK_LABEL) as Task["status"][];
 export default function TaskView({task,goals,sessions,agents,api,onBack,onSession,onSaved,onDeleted}: {task:Task; goals:Goal[]; sessions:Session[]; agents:string[];api:Api;onBack():void;onSession(id:string):void;onSaved(t:Task):void;onDeleted():void}) {

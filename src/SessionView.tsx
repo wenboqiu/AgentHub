@@ -6,8 +6,8 @@ import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
 import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
+import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 
-const AGENT_LABEL = { claude: "Claude", codex: "Codex", doubao: "豆包" } as const;
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
   unknown: "状态未知",
@@ -42,7 +42,7 @@ type Props = {
 export const isPendingSession = (id: string) => id.includes(":pending-");
 
 export function sendBlockReason(p: { session: Session; agents: string[]; running: boolean }): string | null {
-  if (p.session.agent === "doubao") return "豆包目前支持状态监听，请在豆包客户端中继续对话";
+  if (isListenOnly(p.session.agent)) return `${agentName(p.session.agent)} 目前支持状态监听，请在 ${agentName(p.session.agent)} 中继续对话`;
   if (isPendingSession(p.session.id)) return p.session.state === "running" ? "新会话正在启动…" : "这个新会话没能启动";
   if (!p.agents.includes(p.session.machine)) return "电脑端不在线";
   if (p.running) return "这个会话正在运行";
@@ -93,7 +93,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [syncing, setSyncing] = useState(false);
   const autoLoaded = useRef("");
   useEffect(() => {
-    if (!id || !online || session?.agent === "doubao" || isPendingSession(id) || autoLoaded.current === id) return;
+    if (!id || !online || isListenOnly(session?.agent) || isPendingSession(id) || autoLoaded.current === id) return;
     autoLoaded.current = id;
     let gone = false;
     setSyncing(true);
@@ -180,7 +180,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   };
   const sessionKey = id.slice(id.indexOf(":") + 1);
   const pendingSession = isPendingSession(id);
-  const canOpenInTerminal = isDesktop && session.machine === localMachine && !pendingSession && session.agent !== "doubao";
+  const canOpenInTerminal = isDesktop && session.machine === localMachine && !pendingSession && !isListenOnly(session.agent);
   const openInTerminal = () =>
     void guard(async () => {
       const msg = await desktop.openInTerminal(session.agent, sessionKey, session.cwd);
@@ -217,10 +217,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         </span>
       </header>
       {session.title && <div className="title wrap">{session.title}</div>}
-      {isDesktop && session.agent === "doubao" && session.machine === localMachine && <div className="btns"><button onClick={() => void guard(() => desktop.focus(null, "doubao"))}>打开豆包客户端</button></div>}
+      {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => void guard(() => desktop.focus(null, session.agent))}>打开 {agentName(session.agent)} 客户端</button></div>}
       <div className="task-links">{tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}<button onClick={()=>setLinkingTask(!linkingTask)}>关联到任务</button></div>
       {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={busy} onClick={()=>void guard(async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}>{t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/></div>}
-      {!pendingSession && session.agent !== "doubao" && (
+      {!pendingSession && !isListenOnly(session.agent) && (
         <div className="btns">
           <button onClick={() => {setBranchMessage(null);setSpawnText("");setSpawnOpen((o) => !o);}} disabled={busy || !agents.includes(session.machine)} title={agents.includes(session.machine) ? "" : "电脑端不在线"}>
             同目录新建会话
@@ -250,12 +250,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       <main className="chat">
         <div className="btns">
-          <button onClick={loadHistory} disabled={session.agent === "doubao" || busy || syncing || !agents.includes(session.machine)}>
+          <button onClick={loadHistory} disabled={isListenOnly(session.agent) || busy || syncing || !agents.includes(session.machine)}>
             {syncing ? "正在同步电脑上的记录…" : "刷新电脑上的记录"}
           </button>
         </div>
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && !syncing && <p className="empty">{session.agent === "doubao" ? "正在监听豆包会话状态，暂不提供完整对话记录。请在豆包客户端中查看和继续对话。" : "还没有消息。可以发一条，或者刷新电脑上的记录。"}</p>}
+        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `正在监听 ${agentName(session.agent)} 会话状态，暂不提供完整对话记录。请在 ${agentName(session.agent)} 中查看和继续对话。` : "还没有消息。可以发一条，或者刷新电脑上的记录。"}</p>}
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>

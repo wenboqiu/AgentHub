@@ -176,6 +176,26 @@ describe('AgentHub 服务端', () => {
     }
   })
 
+  it('WorkBuddy 事件支持状态与标题，拒绝远程执行和历史读取', async () => {
+    const key = sid(), id = `workbuddy:${key}`
+    const first = await send([ev(key, 'running', { agent: 'workbuddy', cwd: 'D:\\Work2\\AgentHub', title: '分析 agenthub 能否支持 workbuddy 的消息' })])
+    assert.equal(first.status, 200)
+    const running = await get(id)
+    assert.equal(running.state, 'running')
+    assert.equal(running.title, '分析 agenthub 能否支持 workbuddy 的消息')
+    assert.equal(running.project, 'AgentHub')
+    await send([ev(key, 'done', { agent: 'workbuddy', cwd: 'D:\\Work2\\AgentHub', summary: '结论：可以，走只读轮询' })])
+    const done = await get(id)
+    assert.equal(done.state, 'done')
+    assert.equal(done.acked, false, '非静默的完成要留待处理')
+    assert.equal(done.summary, '结论：可以，走只读轮询')
+    for (const [action, body] of [['messages', { text: 'hello' }], ['spawn', { mode: 'fresh', text: 'hello' }], ['history', {}]] as const) {
+      const response = await call('POST', `/sessions/${id}/${action}`, body)
+      assert.equal(response.status, 409, JSON.stringify(response.body))
+      assert.match(response.body.error, /WorkBuddy/)
+    }
+  })
+
   it('非法事件返回 400', async () => {
     assert.equal((await send([{ agent: 'x' }])).status, 400)
     assert.equal((await call('POST', '/events', { events: new Array(101).fill(ev(sid(), 'idle')) })).status, 400)
