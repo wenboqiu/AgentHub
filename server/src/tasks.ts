@@ -4,7 +4,7 @@ import type { State } from './db.ts'
 type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
-export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string }
+export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
 export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null }
 export class TaskError extends Error {
   statusCode: number
@@ -28,7 +28,7 @@ export function id(raw: unknown): number {
 }
 const iso = (v: Date) => v.toISOString()
 const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
-const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority })
+const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority, doneAt: r.done_at ? iso(r.done_at) : null })
 const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null })
 
 export async function migrateTasks(db: DB) {
@@ -37,6 +37,7 @@ export async function migrateTasks(db: DB) {
     title text NOT NULL, notes text NOT NULL DEFAULT '', status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','done','archived')),
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,id))`)
   await db.query(`ALTER TABLE goals ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low'))`)
+  await db.query(`ALTER TABLE goals ADD COLUMN IF NOT EXISTS done_at timestamptz`)
   await db.query(`CREATE TABLE IF NOT EXISTS tasks (
     id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     goal_id bigint REFERENCES goals(id) ON DELETE SET NULL, title text NOT NULL, notes text NOT NULL DEFAULT '',
@@ -135,9 +136,10 @@ export async function saveGoal(db: DB, user: number, raw: unknown, goalId?: numb
   const f = await fields(db,user,raw,false,goalId === undefined)
   await validateSchedule(db,user,'goals',goalId,f)
   const keys = Object.keys(f), values = Object.values(f)
+  const done = 'status' in f ? ",done_at=CASE WHEN $" + (keys.indexOf('status')+3) + "='done' THEN COALESCE(done_at,now()) ELSE NULL END" : ''
   const r = goalId === undefined
     ? await db.query(`INSERT INTO goals(user_id,${keys.join(',')}) VALUES($1,${keys.map((_,i) => `$${i+2}`).join(',')}) RETURNING *`, [user,...values])
-    : await db.query(`UPDATE goals SET updated_at=now()${keys.map((k,i) => `,${k}=$${i+3}`).join('')} WHERE user_id=$1 AND id=$2 RETURNING *`, [user,goalId,...values])
+    : await db.query(`UPDATE goals SET updated_at=now()${keys.map((k,i) => `,${k}=$${i+3}`).join('')}${done} WHERE user_id=$1 AND id=$2 RETURNING *`, [user,goalId,...values])
   if (!r.rows[0]) throw missing()
   return goal(r.rows[0])
 }

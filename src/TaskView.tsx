@@ -18,6 +18,7 @@ export default function TaskView({task,goals,sessions,agents,api,onBack,onSessio
       <label>标题<input value={draft.title} maxLength={200} onChange={e=>change({title:e.target.value})} required/></label>
       <label>备注<textarea value={draft.notes} maxLength={4000} onChange={e=>change({notes:e.target.value})}/></label>
       <ScheduleFields value={draft} onChange={change}/>
+      {task.doneAt && <p className="dim">完成于：{new Date(task.doneAt).toLocaleString()}</p>}
       <Checklist items={draft.checklist} onChange={checklist=>change({checklist})}/>
       <div className="form-grid"><label>状态<select value={draft.status} onChange={e=>change({status:e.target.value as Task["status"]})}>{Object.entries(TASK_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
       <label>所属目标<select value={draft.goalId ?? ""} onChange={e=>change({goalId:e.target.value ? Number(e.target.value) : null})}><option value="">无</option>{goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></label>

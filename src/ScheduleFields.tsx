@@ -7,8 +7,8 @@ export function localDateTime(iso: string | null): string {
   const d = new Date(iso);
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
-export function ScheduleSummary({value}:{value:Schedule}) {
-  return <>{value.startAt && <span className="dim">开始：{new Date(value.startAt).toLocaleString()}</span>}{value.dueAt && <span className="dim">截止：{new Date(value.dueAt).toLocaleString()}</span>}</>;
+export function ScheduleSummary({value}:{value:Schedule & {doneAt?: string | null}}) {
+  return <>{value.startAt && <span className="dim">开始：{new Date(value.startAt).toLocaleString()}</span>}{value.dueAt && <span className="dim">截止：{new Date(value.dueAt).toLocaleString()}</span>}{value.doneAt && <span className="dim">完成：{new Date(value.doneAt).toLocaleString()}</span>}</>;
 }
 export default function ScheduleFields({value,onChange}:{value:Schedule;onChange(value:Partial<Schedule>):void}) {
   return <fieldset className="schedule-fields"><legend>时间与提醒</legend><div className="form-grid">

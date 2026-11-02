@@ -14,6 +14,7 @@ export default function GoalView({goal,tasks,api,onBack,onTask,onSaved,onTaskSav
       <label>标题<input value={draft.title} maxLength={200} onChange={e=>change({title:e.target.value})} required/></label>
       <label>备注<textarea value={draft.notes} maxLength={4000} onChange={e=>change({notes:e.target.value})}/></label>
       <ScheduleFields value={draft} onChange={change}/>
+      {goal.doneAt && <p className="dim">完成于：{new Date(goal.doneAt).toLocaleString()}</p>}
       <label>优先级<GoalPrioritySelect value={draft.priority} onChange={priority=>change({priority})}/><GoalPriorityBadge priority={draft.priority}/></label>
       <label>状态<select value={draft.status} onChange={e=>change({status:e.target.value as Goal["status"]})}><option value="active">进行中</option><option value="done">已完成</option><option value="archived">已归档</option></select></label>
       <button className="primary" disabled={busy || !dirty}>保存</button>{saved&&<span role="status">已保存</span>}
