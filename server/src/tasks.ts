@@ -2,7 +2,7 @@ import type pg from 'pg'
 import type { State } from './db.ts'
 
 type DB = Pick<pg.Pool, 'query'>
-export type Goal = { id: number; title: string; notes: string; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string }
+export type Goal = { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string }
 export type Task = { id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null }
 export class TaskError extends Error {
   statusCode: number
@@ -25,14 +25,16 @@ export function id(raw: unknown): number {
   return n
 }
 const iso = (v: Date) => v.toISOString()
-const goal = (r: any): Goal => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at) })
-const task = (r: any): Task => ({ ...goal(r), goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null })
+const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at) })
+const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority })
+const task = (r: any): Task => ({ ...entity(r), goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null })
 
 export async function migrateTasks(db: DB) {
   await db.query(`CREATE TABLE IF NOT EXISTS goals (
     id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     title text NOT NULL, notes text NOT NULL DEFAULT '', status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','done','archived')),
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), UNIQUE(user_id,id))`)
+  await db.query(`ALTER TABLE goals ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low'))`)
   await db.query(`CREATE TABLE IF NOT EXISTS tasks (
     id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     goal_id bigint REFERENCES goals(id) ON DELETE SET NULL, title text NOT NULL, notes text NOT NULL DEFAULT '',
@@ -65,6 +67,10 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
   const b = object(raw), out: Record<string, unknown> = {}
   if (create || 'title' in b) out.title = text(b.title, '标题', 200)
   if ('notes' in b) out.notes = text(b.notes, '备注', 4000, true)
+  if (!isTask && 'priority' in b) {
+    if (!['high','medium','low'].includes(b.priority as string)) throw new TaskError('优先级不合法')
+    out.priority = b.priority
+  }
   if (!create && 'status' in b) {
     const valid = isTask ? ['todo','doing','review','done'] : ['active','done','archived']
     if (!valid.includes(b.status as string)) throw new TaskError('状态不合法')

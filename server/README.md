@@ -61,8 +61,8 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | 方法 | 路径 | 请求与返回 |
 |---|---|---|
 | GET | `/goals`、`/tasks` | `{goals}`、`{tasks}`，任务包含 `sessionIds` |
-| POST | `/goals` | `{title, notes?}` → `{goal}` |
-| PATCH | `/goals/:id` | `{title?, notes?, status?}` → `{goal}`；状态 active/done/archived |
+| POST | `/goals` | `{title, notes?, priority?}` → `{goal}`；优先级 high/medium/low，默认 medium |
+| PATCH | `/goals/:id` | `{title?, notes?, status?, priority?}` → `{goal}`；状态 active/done/archived；优先级 high/medium/low |
 | DELETE | `/goals/:id` | `{ok:true}`；任务保留，goalId 清空并广播 |
 | POST | `/tasks` | `{title, notes?, goalId?, agent?, machine?, cwd?}` → `{task}` |
 | PATCH | `/tasks/:id` | 上述字段及 `status?` → `{task}`；状态 todo/doing/review/done，doneAt 随状态写入/清空 |

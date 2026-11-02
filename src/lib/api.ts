@@ -1,5 +1,5 @@
 export type State = "idle" | "running" | "waiting" | "done" | "aborted" | "ended" | "unknown";
-export type Goal = { id: number; title: string; notes: string; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string };
+export type Goal = { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string };
 export type Task = { id: number; goalId: number | null; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent" | "machine" | "cwd" | "status">>;
 
@@ -103,8 +103,8 @@ export class Api {
   sessions = async () => (await this.call<{ sessions: Session[] }>("GET", "/sessions")).sessions;
   goals = async () => (await this.call<{goals: Goal[]}>("GET", "/goals")).goals;
   tasks = async () => (await this.call<{tasks: Task[]}>("GET", "/tasks")).tasks;
-  createGoal = async (input: {title: string; notes?: string}) => (await this.call<{goal: Goal}>("POST", "/goals", input)).goal;
-  updateGoal = async (id: number, input: Partial<Pick<Goal,"title"|"notes"|"status">>) => (await this.call<{goal: Goal}>("PATCH", `/goals/${id}`, input)).goal;
+  createGoal = async (input: {title: string; notes?: string; priority?: Goal["priority"]}) => (await this.call<{goal: Goal}>("POST", "/goals", input)).goal;
+  updateGoal = async (id: number, input: Partial<Pick<Goal,"title"|"notes"|"status"|"priority">>) => (await this.call<{goal: Goal}>("PATCH", `/goals/${id}`, input)).goal;
   deleteGoal = (id: number) => this.call("DELETE", `/goals/${id}`);
   createTask = async (input: TaskInput & {title: string}) => (await this.call<{task: Task}>("POST", "/tasks", input)).task;
   updateTask = async (id: number, input: TaskInput) => (await this.call<{task: Task}>("PATCH", `/tasks/${id}`, input)).task;

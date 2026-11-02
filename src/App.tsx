@@ -406,7 +406,7 @@ export default function App() {
       {toast && <div className="toast" role="status">{toast}</div>}
       <main>
         <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
-        <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async title=>saveGoal(await api.createGoal({title}))}/>}</div>
+        <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="sessions"}>
         <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
         <section>

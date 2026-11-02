@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { Goal, Task } from "./lib/api";
 import Icon from "./Icon";
 export const TASK_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行中", review: "待验收", done: "已完成" };
-export function QuickCreate({ placeholder, create }: {placeholder: string; create(title: string): Promise<unknown>}) {
+export function QuickCreate({ placeholder, create, children }: {placeholder: string; create(title: string): Promise<unknown>; children?: ReactNode}) {
   const [title,setTitle] = useState(""), [error,setError] = useState(""), [busy,setBusy] = useState(false);
   return <form className="quick-create" onSubmit={async e => { e.preventDefault(); if (!title.trim() || busy) return; setBusy(true); setError(""); try { await create(title.trim()); setTitle(""); } catch(e) {setError(e instanceof Error ? e.message : String(e));} finally {setBusy(false);} }}>
-    <label className="sr-only" htmlFor={`quick-${placeholder}`}>{placeholder}</label><input id={`quick-${placeholder}`} placeholder={placeholder} maxLength={200} value={title} onChange={e=>setTitle(e.target.value)} disabled={busy}/><button className="primary" disabled={busy || !title.trim()}><Icon name="plus"/>{busy ? "创建中…" : "新建"}</button>{error && <p className="form-error" role="alert">{error}</p>}
+    <label className="sr-only" htmlFor={`quick-${placeholder}`}>{placeholder}</label><input id={`quick-${placeholder}`} placeholder={placeholder} maxLength={200} value={title} onChange={e=>setTitle(e.target.value)} disabled={busy}/>{children}<button className="primary" disabled={busy || !title.trim()}><Icon name="plus"/>{busy ? "创建中…" : "新建"}</button>{error && <p className="form-error" role="alert">{error}</p>}
   </form>;
 }
 export function TaskRows({tasks,goals,onOpen}: {tasks: Task[]; goals: Goal[]; onOpen(id:number): void}) {

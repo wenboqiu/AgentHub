@@ -60,6 +60,24 @@ describe('目标与任务', () => {
     assert.equal((await call('GET','/goals',undefined,b.token)).body.goals.length,0)
     assert.equal((await call('POST',`/tasks/${t.id}/start`,{},b.token)).status,404)
   })
+  it('目标优先级默认中，创建、修改与重新读取保留设置，拒绝非法值',async()=>{
+    const g=(await call('POST','/goals',{title:'默认优先级'})).body.goal
+    assert.equal(g.priority,'medium')
+    for(const priority of ['high','medium','low']) {
+      const created=await call('POST','/goals',{title:`优先级 ${priority}`,priority})
+      assert.equal(created.status,200);assert.equal(created.body.goal.priority,priority)
+      const updated=await call('PATCH',`/goals/${g.id}`,{priority})
+      assert.equal(updated.status,200);assert.equal(updated.body.goal.priority,priority)
+      assert.equal((await call('PATCH',`/goals/${g.id}`,{notes:'保留优先级'})).body.goal.priority,priority)
+      assert.equal((await call('GET','/goals')).body.goals.find((row:any)=>row.id===g.id).priority,priority)
+    }
+    for(const priority of ['urgent','',null,1,[],{}]) {
+      assert.equal((await call('POST','/goals',{title:'非法优先级',priority})).status,400)
+      assert.equal((await call('PATCH',`/goals/${g.id}`,{priority})).status,400)
+    }
+    assert.equal((await call('PATCH',`/goals/${g.id}`,{priority:'high'},b.token)).status,404)
+    assert.equal((await call('GET','/goals')).body.goals.find((row:any)=>row.id===g.id).priority,'low')
+  })
   it('挂接幂等、清理会话后保留关系、取消挂接不删除会话',async()=>{
     const t=await newTask(),sid=await session()
     for(let i=0;i<2;i++)assert.deepEqual((await call('POST',`/tasks/${t.id}/sessions`,{sessionId:sid})).body.task.sessionIds,[sid])
@@ -128,9 +146,11 @@ describe('目标与任务', () => {
     const snap=va.msgs.find(m=>m.type==='snapshot');assert.ok(snap.tasks.length);assert.ok(snap.goals.length)
     assert.deepEqual(vb.msgs.find(m=>m.type==='snapshot').tasks,[])
     const g=(await call('POST','/goals',{title:'广播目标'})).body.goal,t=await newTask({goalId:g.id})
+    await call('PATCH',`/goals/${g.id}`,{priority:'high'})
     await call('DELETE',`/goals/${g.id}`);await call('DELETE',`/tasks/${t.id}`)
     await wait(()=>va.msgs.find(m=>m.type==='task.removed'&&m.id===t.id))
-    assert.ok(va.msgs.find(m=>m.type==='goal'&&m.goal.id===g.id))
+    assert.ok(va.msgs.find(m=>m.type==='goal'&&m.goal.id===g.id&&m.goal.priority==='medium'))
+    assert.ok(va.msgs.find(m=>m.type==='goal'&&m.goal.id===g.id&&m.goal.priority==='high'))
     assert.ok(va.msgs.find(m=>m.type==='goal.removed'&&m.id===g.id))
     assert.ok(va.msgs.find(m=>m.type==='task'&&m.task.id===t.id&&m.task.goalId===null))
     assert.equal(vb.msgs.filter(m=>m.type!=='snapshot').length,0)
@@ -163,7 +183,22 @@ describe('目标与任务', () => {
       // 先以当前迁移建立旧状态表，再删除本次新增的空表，模拟 0.4 数据库。
       const url=new URL(DATABASE_URL);url.searchParams.set('options',`-c search_path=${schema}`)
       const old=createPool(url.toString())
-      try {await migrate(old);await old.query('DROP TABLE task_sessions,tasks,goals');await old.query("INSERT INTO sessions(user_id,id,agent,machine,cwd,project,title,state,summary,state_since,acked,event_at,updated_at) VALUES(1,'claude:keep','claude','pc','','','','done','',now(),true,now(),now())");await migrate(old);await migrate(old);assert.equal((await old.query('SELECT * FROM sessions')).rows[0].id,'claude:keep');assert.equal((await old.query('SELECT * FROM users')).rows[0].email,'keep@test');assert.equal((await old.query('SELECT * FROM tasks')).rowCount,0);}finally{await old.end();}
+      try {
+        await migrate(old);await old.query('DROP TABLE task_sessions,tasks,goals')
+        await old.query("INSERT INTO sessions(user_id,id,agent,machine,cwd,project,title,state,summary,state_since,acked,event_at,updated_at) VALUES(1,'claude:keep','claude','pc','','','','done','',now(),true,now(),now())")
+        await migrate(old);await migrate(old)
+        assert.equal((await old.query('SELECT * FROM sessions')).rows[0].id,'claude:keep')
+        assert.equal((await old.query('SELECT * FROM users')).rows[0].email,'keep@test')
+        assert.equal((await old.query('SELECT * FROM tasks')).rowCount,0)
+        // 模拟已有目标但还没有优先级字段的版本，验证补默认值和重复迁移。
+        await old.query('ALTER TABLE goals DROP COLUMN priority')
+        await old.query("INSERT INTO goals(user_id,title,notes) VALUES(1,'保留目标','保留备注')")
+        await migrate(old);await migrate(old)
+        const kept=(await old.query('SELECT * FROM goals')).rows[0]
+        assert.equal(kept.title,'保留目标');assert.equal(kept.notes,'保留备注');assert.equal(kept.priority,'medium')
+        await old.query("UPDATE goals SET priority='high'");await migrate(old)
+        assert.equal((await old.query('SELECT priority FROM goals')).rows[0].priority,'high')
+      }finally{await old.end();}
     }finally{await db.query('RESET search_path');await db.query(`DROP SCHEMA ${schema} CASCADE`);db.release();}
   })
 })
