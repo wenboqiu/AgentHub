@@ -63,8 +63,10 @@ h3 { font-size: 16px; margin: 24px 0 12px; }
 .conn i { width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: var(--dim); }
 .conn.open i { background: var(--ok); }
 .conn.connecting i { background: #c88a00; }
-.tabs { display: flex; gap: 4px; width: fit-content; padding: 5px; margin: 24px 0 0; border: 1px solid var(--glass-edge); border-radius: 999px; background: var(--glass); box-shadow: var(--shadow); backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%); }
-.tabs button { display: flex; align-items: center; justify-content: center; gap: 9px; min-width: 116px; border-color: transparent; background: transparent; color: var(--dim); }
+/* 标签作为顶部栏的一部分：一级导航常驻可见，滚动时随 sticky 栏一起停在顶部。
+   宽度随视口伸缩（占一半宽度、440–640 之间），既居中又不让两侧留出大片空白。 */
+.tabs { display: flex; flex-shrink: 0; gap: 2px; width: clamp(440px, 50vw, 640px); padding: 4px; margin: 0; border: 1px solid var(--line); border-radius: 999px; background: var(--field); }
+.tabs button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; min-height: 38px; padding: 7px 10px; border-color: transparent; background: transparent; color: var(--dim); font-size: 14px; white-space: nowrap; }
 .tabs button.active { background: var(--accent-soft); color: var(--accent); }
 .tabs .count { min-width: 20px; font-size: 11px; padding: 1px 5px; }
 .page-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin: 30px 0 24px; }
@@ -201,14 +203,23 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
   .home main .list { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); }
   .home main .entity-row { height: 100%; }
 }
+/* 顶部栏恒为一行：极窄时用 nowrap + 逐级减负，避免标签换到第二行 */
+.app > header { flex-wrap: nowrap; }
+header h1 { white-space: nowrap; }
+/* 宽窗口下按视口真正居中（flex 居中会被左侧更宽的标题区推偏），窄窗口回到流内紧凑排列 */
+@media (min-width: 901px) {
+  .tabs { position: absolute; left: 50%; transform: translateX(-50%); }
+}
+@media (max-width: 900px) {
+  /* 窄窗口不再按视口比例撑宽，改为按内容紧凑排列，避免挤掉标题 */
+  .tabs { width: auto; }
+  .tabs button { flex: 0 0 auto; gap: 6px; padding: 7px 12px; font-size: 14px; }
+}
 @media (max-width: 600px) {
   :root { font-size: 16px; }
-  .home { padding-bottom: calc(env(safe-area-inset-bottom) + 108px); }
   .app > header { min-height: 70px; gap: 9px; }
   header h1 { font-size: 18px; }
   .conn { font-size: 11px; }
-  .tabs { position: fixed; z-index: 10; bottom: calc(env(safe-area-inset-bottom) + 12px); left: max(16px,env(safe-area-inset-left)); right: max(16px,env(safe-area-inset-right)); width: auto; margin: 0; padding: 6px; }
-  .tabs button { flex: 1; min-width: 0; gap: 6px; padding: 12px 8px; font-size: 14px; }
   .page-heading { margin: 24px 0; align-items: flex-end; }
   .page-heading > button { font-size: 12px; padding-inline: 12px; }
   .form-grid { grid-template-columns: minmax(0,1fr); }
@@ -229,12 +240,28 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
   .linked-row { align-items: stretch; flex-direction: column; padding: 12px; border-radius: var(--radius); background: var(--card); gap: 0; }
   .linked-row > button:last-child { align-self: flex-end; color: var(--dim); border-color: transparent; font-size: 13px; }
 }
+/* 更窄：先缩图标与内间距，再只留文字（图标在最窄处隐去），最后连状态文案一起让位 */
+@media (max-width: 640px) {
+  .tabs button { padding: 7px 9px; font-size: 13px; }
+  .tabs button .icon { width: 18px; height: 18px; }
+}
+@media (max-width: 560px) {
+  .tabs button .icon { display: none; }
+  .tabs button { padding: 7px 8px; }
+}
+@media (max-width: 420px) {
+  .app > header { gap: 7px; }
+  header h1 { font-size: 17px; }
+  .conn { font-size: 0; gap: 0; }
+  .tabs { padding: 3px; }
+  .tabs button { padding: 7px; font-size: 12px; }
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   :root { --glass: var(--card); --glass-edge: var(--line); }
-  .app > header, .tabs, .composer { backdrop-filter: none; -webkit-backdrop-filter: none; }
+  .app > header, .composer { backdrop-filter: none; -webkit-backdrop-filter: none; }
   .entity-row, .row, .empty, .entity-form, .box { border: 1px solid var(--line); }
 }
 @media (prefers-contrast: more) { :root { --dim: var(--fg); --line: var(--fg); } }
