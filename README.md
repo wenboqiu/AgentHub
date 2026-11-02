@@ -2,6 +2,8 @@
 
 集中监控多个 Claude Code / Codex 会话的状态：任何会话「完成」或「等待授权」时，电脑托盘和 Android 手机都会提醒；能看到所有会话的列表，在电脑上点一下跳回对应窗口，处理过的提醒自动或手动消掉。
 
+最新合并版本为 **0.5.1**，包含逐条回复操作、Codex 已读同步、Claude 原终端续聊和实验性豆包状态监听。验证与更新要求见 [0.5.1 发布说明](docs/releases/0.5.1.md)。
+
 ## 组件
 
 | 组件 | 位置 | 说明 |
@@ -24,6 +26,15 @@
 
 - Claude Code：hook（`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）。`idle_prompt` 不接。
 - Codex：只读 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`（`task_started` / `task_complete` / `turn_aborted`），不碰 `config.toml`（`notify` 已被 Codex Desktop 占用）。第一版没有 Codex 的「等待授权」状态。
+- 豆包 Windows 客户端（实验性，已对照 2.32.6 本机日志）：只读 `%USERPROFILE%\AppData\Local\Doubao\User Data\sdk_storage\log\saman_YYYY.MMDD.N.log` 中的结构化生命周期事件，每 2 秒增量检查。按会话 ID 展示标题、回复中、完成和中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到豆包窗口，不能定位到指定聊天。没有该目录时自动等待，不需要 API Key。
+
+豆包接入仅提供**会话状态监听**，暂不提供完整对话正文、等待授权、远程发消息、新建或分支。完成状态必须有会话结束成功事件，不通过日志停止增长猜测；初次加载今天和昨天每个日志末尾最多 8 MiB，静默登记已有状态，历史中未结束的运行显示为未知。日志轮换后继续读取新文件。豆包升级改变日志格式时可能无法采集，需要重新适配；此功能需同时更新服务端、桌面端与手机端。
+
+## 逐条回复操作
+
+每条助手回复下提供复制、点赞／点踩、朗读／停止和“从此处分支到新聊天”。评价保存在 AgentHub 账号内并跨设备同步；朗读使用设备语音。分支保留截至所选完整回复的原生上下文，不带后续消息。Claude Code 使用消息 UUID，Codex 使用完成轮次的 turn ID；旧记录请先刷新电脑历史。顶端保留“同目录新建会话”，从零开始聊天。分支与原会话仍使用同一项目目录，不回滚代码文件。
+
+需要同时更新服务端、桌面执行器和客户端。旧执行器缺少指定节点能力时明确报错，不降级为整会话分叉。支持与验证记录见 [回复操作](docs/reply-actions/README.md)。
 
 ## 本地开发
 
@@ -59,9 +70,9 @@ npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHu
 
 **规则**
 
-- Claude：用 `claude -p --resume <sid> --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --permission-mode default` 在会话原来的 cwd 接着跑；只接着跑终端里已经关掉或已经完成的会话（`claude agents --json` 里还列着的会话一律拒绝）。
+- Claude：原终端仍打开时，通过该会话的认证命名管道投递消息，回复进入原终端与 AgentHub；原终端关闭后，用 `claude -p --resume <sid> --input-format stream-json --output-format stream-json --verbose --permission-prompt-tool stdio --permission-mode default` 在原目录继续。原终端模式的权限确认与中断在终端处理，AgentHub 的“停止跟踪”只结束回复跟踪。详见 [原终端续聊](docs/claude-terminal-chat.md)。
 - Codex：用 Codex Desktop 自带的 `codex.exe`（`%LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe`，取最新的）起一个自己的 `app-server`，`thread/resume` + `turn/start`，`approvalPolicy: on-request`。会话状态是 `running`（Desktop 正在跑）时不允许发消息。
-- 同一个会话同一时间只允许一个 AgentHub 发起的运行；授权 30 分钟没决定按拒绝处理；单次运行 2 小时强制停止。
+- 同一个会话同一时间只允许一个 AgentHub 发起的运行；由 AgentHub 启动的进程，授权 30 分钟没决定按拒绝处理，单次运行 2 小时停止。接入原终端时，超时或停止只结束回复跟踪，原终端自行控制授权与中断。
 - 详情页断线重连后自动补拉最近 200 条消息及运行状态；补拉期间的新消息不会被旧响应覆盖。授权超时立即同步为过期并清除待授权提醒（需同时更新服务端和桌面端）。
 - 不用 `bypassPermissions` / `approvalPolicy: never`：所有需要授权的操作都要回到手机上确认。
 
@@ -78,7 +89,7 @@ npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHu
 - **分叉（带上下文）**：复制原会话的全部对话，从那里接着聊，原会话不受影响。Claude 用 `claude -p --resume <id> --fork-session ...`，Codex 用 app-server 的 `thread/fork`。
 - **同目录新开（不带上下文）**：沿用原会话的目录和 agent 类型，对话从零开始。Claude 不带 `--resume`，Codex 用 `thread/start`。
 
-安全规则不变：电脑端要开「允许手机远程执行」、目录在白名单内、授权在手机上确认。分叉和新开不写原会话，所以不受「Claude 会话在终端里还开着就拒绝」的限制。
+电脑端要开「允许手机远程执行」、目录在白名单内；AgentHub 自行启动的分叉和新会话在手机上确认授权。分叉和新开保留原终端会话。
 
 新会话的真实 id 要等 CLI 启动后才知道：服务端先建一个临时会话（id 形如 `claude:pending-<runId>`），界面立刻跳过去；执行器拿到真实 id 后上报 `run.session`，服务端把临时会话改名（真实 id 已被 hook / 轮询抢先登记时合并）。拿到真实 id 之前就失败，临时会话标为「已中断」并显示错误，可手动删除。
 
@@ -150,10 +161,10 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 - Codex 窗口跳转：没有进程号时匹配可执行名为 `ChatGPT.exe`（Codex Desktop 的窗口进程，实测）或包含 `codex` 且有可见主窗口的进程；找不到会提示「没找到 Codex 窗口」。
 - 手机上发给 Codex 的消息，Codex Desktop 界面**不会实时显示**（重新打开那个会话才能看到）；Desktop 自己的 app-server 是私有的，外部连不进去。
 - 远程控制的 Claude 会话只能是终端里已关闭/已完成的；Codex 会话 `running` 时不能发。电脑端断线时，进行中的运行会被结束并标为失败。
-- 「加载电脑上的历史记录」按角色 + 文本去重，只取最近 30 条；服务端每个会话只保留最近 200 条消息。
+- 「刷新电脑上的记录」读取最近 50 条可见消息并保留原始消息标识；服务端每个会话只保留最近 200 条消息。
 - 通知里没有「允许 / 拒绝」按钮，要点开 App 操作。
 - Claude 跳转依赖 Windows 进程链（hook 的 bash → claude.exe → 终端）；Windows Terminal 是多标签单窗口，只能切到窗口，切不到具体标签。
 - 本机 AgentHub 没运行时，hook 脚本每次会等 curl 超时（Windows 上连接被拒绝约 2 秒），上限 2 秒。
 - Android 端只有重连后「新发生」的变化会弹通知，断线期间错过的提醒不会补弹（列表里仍能看到待处理）。
-- Codex 第一版没有 `waiting` 状态；title 取第一条不以 `<` 开头的用户文本，可能是注入的上下文。
+- Codex 的 `waiting` 状态尚未接入本地采集；标题优先读取 Codex 名称索引，缺失时取首条用户文本。
 - 仅 Windows + Android，不做 iOS / macOS，多账号隔离（管理员建账号）。任务管理暂不包含到期提醒、重复任务、子任务和离线编辑。

@@ -3,11 +3,12 @@ import { migrateTasks } from './tasks.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
-export const AGENTS = ['claude', 'codex'] as const
+export const AGENTS = ['claude', 'codex', 'doubao'] as const
 export type Agent = (typeof AGENTS)[number]
 
 export type EventIn = {
   expectedAt?: string
+  readAt?: string
   agent: Agent
   sessionId: string
   machine: string
@@ -117,6 +118,12 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     text text not null,
     created_at timestamptz not null default now()
   )`)
+  await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS source_id text, ADD COLUMN IF NOT EXISTS branch_point text')
+  await pool.query(`CREATE TABLE IF NOT EXISTS message_feedback (
+    user_id bigint not null references users(id) on delete cascade,
+    session_id text not null, source_id text not null, rating text not null,
+    primary key (user_id,session_id,source_id)
+  )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(user_id, session_id, id)')
   await pool.query(`CREATE TABLE IF NOT EXISTS approvals (
     id text primary key,
@@ -196,6 +203,14 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   if (ev.expectedAt !== undefined && (!cur || cur.event_at.getTime() !== Date.parse(ev.expectedAt))) return null
   if (cur && at.getTime() < cur.event_at.getTime()) return null
 
+  // Native read receipts acknowledge one exact completed turn only. Never clear an
+  // approval or overwrite a newer completion that arrived during the local read.
+  if (ev.readAt !== undefined) {
+    if (!cur || ev.agent !== 'codex' || !ev.quiet || ev.expectedAt === undefined ||
+        cur.machine !== ev.machine || cur.state !== ev.state || !['done', 'aborted'].includes(cur.state) ||
+        at.getTime() !== cur.event_at.getTime() || !Number.isFinite(Date.parse(ev.readAt)) || Date.parse(ev.readAt) < at.getTime()) return null
+  }
+
   const quiet = ev.quiet === true
   const alert = ALERT_STATES.includes(ev.state)
   let acked: boolean
@@ -207,10 +222,13 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
       else acked = ev.state !== 'waiting'
     } else acked = false
   } else acked = cur ? cur.acked : true
-  const notify = alert && !quiet
+  if (ev.readAt !== undefined) acked = true
+  const duplicate = !!cur && cur.state === ev.state && cur.event_at.getTime() === at.getTime()
+  if (duplicate && cur.acked) acked = true
+  const notify = alert && !quiet && !duplicate
   const stateSince = !cur || cur.state !== ev.state || notify ? at : cur.state_since
   const cwd = ev.cwd || cur?.cwd || ''
-  const title = (ev.agent === 'codex' ? ev.title : undefined) || cur?.title || ev.title || ''
+  const title = (ev.agent === 'codex' || ev.agent === 'doubao' ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
   const row = (
@@ -245,6 +263,7 @@ export async function ackAll(pool: pg.Pool, userId: number): Promise<Session[]> 
 export async function removeSession(pool: pg.Pool, userId: number, id: string): Promise<boolean> {
   const r = await pool.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])
   await pool.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, id])
+  await pool.query('DELETE FROM message_feedback WHERE user_id = $1 AND session_id = $2', [userId, id])
   await pool.query('DELETE FROM approvals WHERE user_id = $1 AND session_id = $2', [userId, id])
   await pool.query('DELETE FROM runs WHERE user_id = $1 AND session_id = $2', [userId, id])
   return (r.rowCount ?? 0) > 0
@@ -298,6 +317,9 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
     for (const t of ['runs', 'messages', 'approvals']) {
       await client.query(`UPDATE ${t} SET session_id = $3 WHERE user_id = $1 AND session_id = $2`, [userId, from, to])
     }
+    await client.query(`INSERT INTO message_feedback(user_id,session_id,source_id,rating)
+      SELECT user_id,$3,source_id,rating FROM message_feedback WHERE user_id=$1 AND session_id=$2 ON CONFLICT DO NOTHING`,[userId,from,to])
+    await client.query('DELETE FROM message_feedback WHERE user_id=$1 AND session_id=$2',[userId,from])
     await client.query(`INSERT INTO task_sessions(user_id,task_id,session_id,created_at)
       SELECT user_id,task_id,$3,created_at FROM task_sessions WHERE user_id=$1 AND session_id=$2 ON CONFLICT DO NOTHING`, [userId,from,to])
     await client.query('DELETE FROM task_sessions WHERE user_id=$1 AND session_id=$2', [userId,from])
@@ -333,7 +355,8 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number]
 export const KEEP_MESSAGES = 200
 
 export type Run = { id: string; sessionId: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string }
-export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string }
+export type MessageMeta = { sourceId?: string; branchPoint?: string }
+export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string }
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired'
 export type Approval = {
   id: string
@@ -347,7 +370,7 @@ export type Approval = {
 }
 
 type RunRow = { id: string; session_id: string; machine: string; status: RunStatus; error: string; created_at: Date; updated_at: Date }
-type MessageRow = { id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
+type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
 type ApprovalRow = {
   id: string
   run_id: string
@@ -369,6 +392,8 @@ const toRun = (r: RunRow): Run => ({
   updatedAt: r.updated_at.toISOString(),
 })
 const toMessage = (r: MessageRow): Message => ({
+  ...(r.source_id ? {sourceId:r.source_id,rating:r.rating ?? null} : {}),
+  ...(r.branch_point ? {branchPoint:r.branch_point} : {}),
   id: Number(r.id),
   sessionId: r.session_id,
   runId: r.run_id,
@@ -435,15 +460,17 @@ async function trimMessages(pool: Pick<pg.Pool, 'query'>, userId: number, sessio
   )
 }
 
-export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string): Promise<Message> {
+export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string, meta: MessageMeta = {}): Promise<Message> {
   // 数据库主机校时时可能回拨；新消息不能排到已有消息之前（同时间用 id 排序）。
-  const r = await pool.query<MessageRow>(`INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
-    VALUES ($5,$1,$2,$3,$4,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE user_id = $5 AND session_id = $1))) RETURNING *`, [
+  const r = await pool.query<MessageRow>(`INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
+    VALUES ($5,$1,$2,$3,$4,$6,$7,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE user_id = $5 AND session_id = $1))) RETURNING *`, [
     sessionId,
     runId,
     role,
     cleanText(text, 4000),
     userId,
+    nativeKey(meta.sourceId),
+    nativeKey(meta.branchPoint),
   ])
   await trimMessages(pool, userId, sessionId)
   return toMessage(r.rows[0])
@@ -452,8 +479,8 @@ export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number
 // 历史记录：电脑上的会话记录才是准的（AgentHub 发起的对话也写在里面），
 // 所以用快照整体替换这个会话已存的消息，只保留进行中的 run 的消息（快照里可能还没有）。
 // 快照按原顺序插入，时间排在保留消息之前。
-export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: { role: string; text: string }[]): Promise<Message[]> {
-  const snapshot = items.map(it => ({ role: it.role, text: cleanText(it.text, 4000) })).filter(it => it.text).slice(-KEEP_MESSAGES)
+export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string } & MessageMeta)[]): Promise<Message[]> {
+  const snapshot = items.map(it => ({ role: it.role, text: cleanText(it.text, 4000), sourceId:nativeKey(it.sourceId), branchPoint:nativeKey(it.branchPoint) })).filter(it => it.text).slice(-KEEP_MESSAGES)
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
@@ -472,9 +499,9 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
     const n = snapshot.length
     for (let i = 0; i < n; i++) {
       await client.query(
-        `INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
-         VALUES ($1, $2, null, $3, $4, $5::timestamptz - ($6 * interval '1 millisecond'))`,
-        [userId, sessionId, snapshot[i].role, snapshot[i].text, base.rows[0].t, n - i],
+        `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
+         VALUES ($1, $2, null, $3, $4, $7, $8, $5::timestamptz - ($6 * interval '1 millisecond'))`,
+        [userId, sessionId, snapshot[i].role, snapshot[i].text, base.rows[0].t, n - i, snapshot[i].sourceId, snapshot[i].branchPoint],
       )
     }
     await client.query('COMMIT')
@@ -488,9 +515,23 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
   return listMessages(pool, userId, sessionId, KEEP_MESSAGES)
 }
 
+export function nativeKey(value: unknown): string | null {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null
+}
+
+export async function getMessage(pool: pg.Pool,userId:number,sessionId:string,id:number):Promise<Message|null> {
+  const r=await pool.query<MessageRow>('SELECT m.*,f.rating FROM messages m LEFT JOIN message_feedback f ON f.user_id=m.user_id AND f.session_id=m.session_id AND f.source_id=m.source_id WHERE m.user_id=$1 AND m.session_id=$2 AND m.id=$3',[userId,sessionId,id])
+  return r.rows[0] ? toMessage(r.rows[0]) : null
+}
+
+export async function rateMessage(pool:pg.Pool,userId:number,sessionId:string,sourceId:string,rating:'up'|'down'|null) {
+  if(rating===null) await pool.query('DELETE FROM message_feedback WHERE user_id=$1 AND session_id=$2 AND source_id=$3',[userId,sessionId,sourceId])
+  else await pool.query('INSERT INTO message_feedback(user_id,session_id,source_id,rating) VALUES ($1,$2,$3,$4) ON CONFLICT(user_id,session_id,source_id) DO UPDATE SET rating=excluded.rating',[userId,sessionId,sourceId,rating])
+}
+
 export async function listMessages(pool: pg.Pool, userId: number, sessionId: string, limit: number): Promise<Message[]> {
   const r = await pool.query<MessageRow>(
-    'SELECT * FROM (SELECT * FROM messages WHERE user_id = $3 AND session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) t ORDER BY created_at ASC, id ASC',
+    `SELECT t.*, f.rating FROM (SELECT * FROM messages WHERE user_id = $3 AND session_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) t LEFT JOIN message_feedback f ON f.user_id=t.user_id AND f.session_id=t.session_id AND f.source_id=t.source_id ORDER BY t.created_at ASC, t.id ASC`,
     [sessionId, limit, userId],
   )
   return r.rows.map(toMessage)

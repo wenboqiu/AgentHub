@@ -8,6 +8,15 @@ const message = (id: number): Message => ({ id, sessionId: 's', runId: 'r', role
 const run = (status: Run['status']): Run => ({ id: 'r', sessionId: 's', machine: 'pc', status, error: '', createdAt: time, updatedAt: time });
 const snapshot = (ids: number[], status: Run['status']) => ({ messages: ids.map(message), run: run(status), approvals: [] });
 const tick = () => new Promise<void>(resolve => setImmediate(resolve));
+test('评价广播更新已有回复，慢快照不能覆盖新评价', async()=>{
+  const s=setup();const initial=s.sync.reload();
+  s.pending.shift()!(snapshot([1],'done'));await initial;
+  const reload=s.sync.reload();
+  s.bus.emit({kind:'message',m:{...message(1),sourceId:'native-message',rating:'up'}});
+  s.pending.shift()!(snapshot([1],'done'));await reload;
+  assert.equal(s.states.at(-1)?.messages.length,1);
+  assert.equal(s.states.at(-1)?.messages[0].rating,'up');s.sync.dispose();
+});
 function snapshotData(ids: number[], status: Run['status']) {
   const { messages, run } = snapshot(ids, status);
   return { messages, run };

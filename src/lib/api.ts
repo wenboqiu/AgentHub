@@ -5,7 +5,7 @@ export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent
 
 export type Session = {
   id: string;
-  agent: "claude" | "codex";
+  agent: "claude" | "codex" | "doubao";
   machine: string;
   cwd: string;
   project: string;
@@ -22,7 +22,7 @@ export type Session = {
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 export type Run = { id: string; sessionId: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";
-export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string };
+export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null };
 export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
 export type Approval = {
   id: string;
@@ -127,8 +127,10 @@ export class Api {
   messages = (sessionId: string) =>
     this.call<{ messages: Message[]; approvals: Approval[]; run: Run | null }>("GET", `/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`);
   /** 基于已有会话新开：fork = 带上下文分叉，fresh = 同目录从零开始。返回临时会话 id */
-  spawn = (sessionId: string, mode: "fork" | "fresh", text: string) =>
-    this.call<{ runId: string; sessionId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/spawn`, { mode, text });
+  spawn = (sessionId: string, mode: "fork" | "fresh", text: string, messageId?: number) =>
+    this.call<{ runId: string; sessionId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/spawn`, { mode, text, ...(messageId === undefined ? {} : {messageId}) });
+  rateMessage = async (sessionId:string,messageId:number,rating:"up"|"down"|null) =>
+    (await this.call<{message:Message}>("PATCH",`/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}/feedback`,{rating})).message;
   send = (sessionId: string, text: string) => this.call<{ runId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/messages`, { text });
   stop = (runId: string) => this.call("POST", `/runs/${encodeURIComponent(runId)}/stop`, {});
   decide = (approvalId: string, decision: "allow" | "deny") => this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision });

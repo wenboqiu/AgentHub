@@ -18,7 +18,7 @@ type Update = Exclude<BusEvent, { kind: "resync" }>;
 
 function apply(data: Data, e: Update): Data {
   if (e.kind === "message") {
-    if (data.messages.some((m) => m.id === e.m.id)) return data;
+    if (data.messages.some((m) => m.id === e.m.id)) return { ...data, messages: data.messages.map(m=>m.id===e.m.id ? e.m : m) };
     return { ...data, messages: [...data.messages, e.m].sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.id - b.id).slice(-200) };
   }
   const cur = data.run;

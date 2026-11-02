@@ -357,6 +357,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             <p className="kv">
               上报队列：{info?.forward.queued ?? 0} 条待发{info?.forward.lastError ? `（${info.forward.lastError}）` : ""}
             </p>
+            <p className="hint">豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。</p>
           </section>
         )}
 

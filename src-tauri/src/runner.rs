@@ -86,7 +86,7 @@ impl Mode {
         self != Mode::Fresh
     }
 
-    /// 只有 Resume 会写原会话，才需要确认它没在终端里开着
+    /// Resume 检查原会话是否仍在终端打开：打开时走本机收件通道，关闭时恢复会话。
     pub fn checks_open(self) -> bool {
         self == Mode::Resume
     }
@@ -157,6 +157,18 @@ pub fn codex_thread_request(id: i64, mode: Mode, key: &str, cwd: &str) -> String
 }
 
 /// 从 thread/fork、thread/start 的响应里取新线程 id
+pub fn claude_branch_args(mode: Mode, key: &str, point: &str) -> Vec<String> {
+    let mut args = claude_args(mode, key);
+    if mode == Mode::Fork && !point.is_empty() { args.extend(["--resume-session-at".into(), point.into()]); }
+    args
+}
+
+pub fn codex_branch_request(id: i64, mode: Mode, key: &str, cwd: &str, point: &str) -> String {
+    if mode == Mode::Fork && !point.is_empty() {
+        rpc_request(id,"thread/fork",json!({"threadId":key,"lastTurnId":point}))
+    } else { codex_thread_request(id, mode, key, cwd) }
+}
+
 pub fn codex_thread_id(result: &Value) -> Option<String> {
     result.pointer("/thread/id").and_then(|i| i.as_str()).filter(|s| !s.is_empty()).map(String::from)
 }
@@ -172,6 +184,10 @@ pub fn parse_claude_agent_entries(text: &str) -> Result<Vec<(String, Option<u32>
             Some((id.to_string(), a.get("pid").and_then(|p| p.as_u64()).and_then(|p| u32::try_from(p).ok())))
         })
         .collect())
+}
+
+pub fn truncate_history_text(s: &str) -> String {
+    clip(s)
 }
 
 fn clip(s: &str) -> String {
@@ -526,18 +542,18 @@ fn default_codex_bin_dir() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("OpenAI").join("Codex").join("bin"))
 }
 
-pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<(String, String)>, String> {
+pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<crate::message_history::HistoryMessage>, String> {
     let home = home_dir().ok_or("找不到用户目录")?;
     match agent {
         "claude" => {
             let p = find_claude_transcript(&home.join(".claude").join("projects"), cwd, key).ok_or("没找到这个会话的本地记录")?;
             let text = read_tail(&p, 512 * 1024).map_err(|e| format!("读取失败：{e}"))?;
-            Ok(parse_claude_transcript(&text, HISTORY_COUNT))
+            Ok(crate::message_history::parse("claude", &text, HISTORY_COUNT))
         }
         "codex" => {
             let p = find_codex_rollout(&home.join(".codex").join("sessions"), key).ok_or("没找到这个会话的本地记录")?;
             let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
-            Ok(parse_codex_rollout(&text, HISTORY_COUNT))
+            Ok(crate::message_history::parse("codex", &text, HISTORY_COUNT))
         }
         _ => Err("不认识的 agent".into()),
     }
@@ -732,6 +748,10 @@ impl Run {
         let _ = self.out.send(json!({"type":"run.message","runId":self.run_id,"role":role,"text":clip(text)}));
     }
 
+    fn message_at(&self, text: &str, source: Option<&str>, point: Option<&str>) {
+        let _ = self.out.send(json!({"type":"run.message","runId":self.run_id,"role":"assistant","text":clip(text),"sourceId":source,"branchPoint":point}));
+    }
+
     fn fail(&self, error: &str) {
         self.status("failed", error);
     }
@@ -794,9 +814,9 @@ fn report(run: &Run, f: Finish) {
     }
 }
 
-fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str) {
+fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, branch_point: &str) {
     let mut cmd = Command::new("claude");
-    cmd.args(claude_args(mode, key))
+    cmd.args(claude_branch_args(mode, key, branch_point))
     .current_dir(cwd)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -833,14 +853,25 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str) {
                         }
                         ClaudeInit::Unchanged => {
                             session_reported = true;
-                            run.message("system", "分叉没有生成新会话");
+                            finish = Some(Finish::Failed("分叉没有生成新会话，已停止".into()));
+                            drop(stdin.take());
+                            kill_tree(&mut child);
+                            continue;
                         }
                         ClaudeInit::NotInit => {}
                     }
                 }
-                for m in parse_claude_line(&l) {
+                let parsed = parse_claude_line(&l);
+                let texts: Vec<_> = parsed.iter().filter_map(|m| if let ClaudeMsg::Text(t) = m { Some(t.as_str()) } else { None }).collect();
+                if !texts.is_empty() {
+                    let v: Value = serde_json::from_str(&l).unwrap_or(Value::Null);
+                    let source = v["uuid"].as_str().filter(|s| valid_key(s));
+                    let point = if matches!(v["message"]["stop_reason"].as_str(), Some("end_turn" | "stop_sequence")) { source } else { None };
+                    run.message_at(&texts.join("\n"), source, point);
+                }
+                for m in parsed {
                     match m {
-                        ClaudeMsg::Text(t) => run.message("assistant", &t),
+                        ClaudeMsg::Text(_) => {},
                         ClaudeMsg::Tool { name, summary } => run.message("tool", &format!("{name} {summary}")),
                         ClaudeMsg::Approval { request_id, tool, detail, input } => {
                             approvals.add(&run.out, &run.run_id, &tool, &detail, json!(request_id), "", input)
@@ -893,6 +924,49 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str) {
     }
 }
 
+/// The terminal owns this process. We only deliver and observe; stop/disconnect never kills it.
+fn run_claude_terminal(run: &Run, key: &str, cwd: &str, text: &str) {
+    let prepare = || -> Result<_,String> {
+        let endpoint=crate::claude_live::discover(key,cwd)?;
+        let path=crate::claude_live::transcript(key,cwd)?;
+        let offset=std::fs::metadata(&path).map_err(|_|"无法读取原终端记录")?.len();
+        Ok((endpoint,path,offset))
+    };
+    let (endpoint,path,mut offset)=match prepare(){Ok(v)=>v,Err(e)=>return run.fail(&e)};
+    match run.rx.try_recv() {
+        Ok(RunMsg::Stop)=>{run.status("stopped","");return;},
+        Ok(RunMsg::Shutdown)=>return,
+        _=>{}
+    }
+    if let Err(e)=crate::claude_live::send(&endpoint,key,&run.run_id,text){return run.fail(&e);}
+    run.message("system","已连接原终端，消息已投递；等待终端接收。授权和中断请在原终端处理。");
+    let start=Instant::now();let mut turn=crate::claude_live::ObservedTurn::new(&run.run_id);
+    loop {
+        if !turn.delivered && start.elapsed()>Duration::from_secs(5*60) {
+            return run.fail("尚未确认原终端接收消息，可能正在等待终端批准。请先检查终端，避免重复发送");
+        }
+        if start.elapsed()>RUN_TIMEOUT {return run.fail("原终端回复跟踪已超时，请在终端查看运行结果");}
+        match run.rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(RunMsg::Stop)=>{run.message("system","已停止跟踪，原终端会话仍由终端控制。");run.status("stopped","");return;},
+            Ok(RunMsg::Shutdown)|Err(RecvTimeoutError::Disconnected)=>return,
+            _=>{}
+        }
+        let rows=match crate::claude_live::read_rows(&path,&mut offset){Ok(v)=>v,Err(e)=>return run.fail(&e)};
+        for row in rows {
+            for event in turn.consume(&row) {
+                match event {
+                    crate::claude_live::Observed::Delivered=>run.status("running",""),
+                    crate::claude_live::Observed::Reply{source,text,finished}=>{
+                        run.message_at(&text,source.as_deref(),if finished{source.as_deref()}else{None});
+                        if finished {run.status("done","");return;}
+                    },
+                    crate::claude_live::Observed::OtherInput=>return run.fail("原终端已收到另一条输入，已结束本条消息的回复跟踪，请刷新对话记录"),
+                }
+            }
+        }
+    }
+}
+
 fn answer_claude(stdin: &mut Option<ChildStdin>, p: &Pending, allow: bool) {
     let id = p.key.as_str().unwrap_or("");
     write_line(stdin, &claude_control_response(id, allow, &p.input));
@@ -910,7 +984,7 @@ fn reap(child: &mut Child, wait: Duration) {
     kill_tree(child);
 }
 
-fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str) {
+fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str, branch_point: &str) {
     let mut cmd = Command::new(exe);
     cmd.arg("app-server").current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match no_window(&mut cmd).spawn() {
@@ -953,7 +1027,7 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                         match id {
                             ID_INIT => {
                                 write_line(&mut stdin, &rpc_notify("initialized"));
-                                write_line(&mut stdin, &codex_thread_request(ID_RESUME, mode, key, cwd));
+                                write_line(&mut stdin, &codex_branch_request(ID_RESUME, mode, key, cwd, branch_point));
                             }
                             ID_RESUME => {
                                 if mode != Mode::Resume {
@@ -987,7 +1061,11 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                     }
                 }
                 CodexIn::Notification { method, params } => match codex_event(&method, &params) {
-                    Some(CodexEvent::Agent(t)) => run.message("assistant", &t),
+                    Some(CodexEvent::Agent(t)) => {
+                        let source = params["item"]["id"].as_str().filter(|s| valid_key(s));
+                        let point = if params["item"]["phase"] == "final_answer" { turn_id.as_deref() } else { None };
+                        run.message_at(&t, source, point);
+                    },
                     Some(CodexEvent::Command(c)) => run.message("tool", &format!("命令：{c}")),
                     Some(CodexEvent::TurnStarted(id)) => turn_id = Some(id),
                     Some(CodexEvent::TurnDone { status }) => {
@@ -1089,7 +1167,7 @@ impl Runner {
     pub fn handle(&self, msg: &Value) {
         let s = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         match msg.get("type").and_then(|t| t.as_str()) {
-            Some("run.start") => self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), s("mode")),
+            Some("run.start") => self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), s("mode"), s("branchPoint")),
             Some("run.stop") => {
                 if let Some(e) = self.runs.lock().unwrap().get(&s("runId")) {
                     let _ = e.tx.send(RunMsg::Stop);
@@ -1110,7 +1188,7 @@ impl Runner {
                 let (out, request_id, agent, key, cwd) = (self.out.clone(), s("requestId"), s("agent"), s("sessionKey"), s("cwd"));
                 std::thread::spawn(move || {
                     let m = match read_history(&agent, &key, &cwd) {
-                        Ok(list) => json!({"type":"history.result","requestId":request_id,"messages":list.iter().map(|(r,t)| json!({"role":r,"text":t})).collect::<Vec<_>>()}),
+                        Ok(list) => json!({"type":"history.result","requestId":request_id,"messages":list}),
                         Err(e) => json!({"type":"history.result","requestId":request_id,"messages":[],"error":e}),
                     };
                     let _ = out.send(m);
@@ -1120,7 +1198,7 @@ impl Runner {
         }
     }
 
-    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, mode: String) {
+    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, mode: String, branch_point: String) {
         let (tx, rx) = mpsc::channel();
         let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone() };
         {
@@ -1135,31 +1213,40 @@ impl Runner {
         let roots = self.config.read().unwrap().allowed_roots.clone();
         let runs = self.runs.clone();
         std::thread::spawn(move || {
-            execute(&run, &roots, &agent, &mode, &key, &cwd, &text);
+            execute(&run, &roots, &agent, &mode, &key, &cwd, &text, &branch_point);
             runs.lock().unwrap().remove(&run.run_id);
         });
     }
 }
 
 /// 前置检查 + 按 agent 分派
-fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str) {
+fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, branch_point: &str) {
     let Some(mode) = Mode::parse(mode) else {
         return run.fail(&format!("不支持的模式：{mode}"));
     };
     if let Err(e) = precheck(mode, key, cwd, roots) {
         return run.fail(&e);
     }
+    if !branch_point.is_empty() {
+        if mode != Mode::Fork || !valid_key(branch_point) {
+            return run.fail("分支节点格式或运行模式不正确");
+        }
+        match read_history(agent, key, cwd) {
+            Ok(items) if items.iter().any(|m| m.role == "assistant" && m.branch_point.as_deref() == Some(branch_point)) => {},
+            _ => return run.fail("无法在原会话中确认该回复的分支节点，请刷新记录后重试"),
+        }
+    }
     match agent {
-        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text),
+        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text, branch_point),
         "claude" => match claude_open_sessions() {
             Ok(open) if open.iter().any(|s| s == key) => {
-                run.fail("这个会话在终端里还开着，请先关掉它或直接在终端里继续")
+                run_claude_terminal(run, key, cwd, text)
             }
-            Ok(_) => run_claude(run, mode, key, cwd, text),
+            Ok(_) => run_claude(run, mode, key, cwd, text, branch_point),
             Err(e) => run.fail(&format!("无法确认这个会话是否还开在终端里（claude agents --json：{e}）")),
         },
         "codex" => match default_codex_bin_dir().and_then(|d| find_codex_exe(&d)) {
-            Some(exe) => run_codex(run, mode, &exe, key, cwd, text),
+            Some(exe) => run_codex(run, mode, &exe, key, cwd, text, branch_point),
             None => run.fail("没找到 Codex Desktop 自带的 codex.exe"),
         },
         other => run.fail(&format!("不认识的 agent：{other}")),
@@ -1172,6 +1259,18 @@ mod tests {
 
     fn roots(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn selected_reply_branch_uses_native_boundary() {
+        let args=claude_branch_args(Mode::Fork,"original","reply-uuid");
+        assert!(args.windows(2).any(|p|p==["--resume-session-at","reply-uuid"]));
+        assert!(args.iter().any(|p|p=="--fork-session"));
+        let request:Value=serde_json::from_str(&codex_branch_request(2,Mode::Fork,"original","cwd","turn-one")).unwrap();
+        assert_eq!(request["params"]["threadId"],"original");
+        assert_eq!(request["params"]["lastTurnId"],"turn-one");
+        let latest:Value=serde_json::from_str(&codex_branch_request(2,Mode::Fork,"original","cwd","")).unwrap();
+        assert!(latest["params"].get("lastTurnId").is_none());
     }
 
     #[test]

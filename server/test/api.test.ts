@@ -156,6 +156,26 @@ describe('AgentHub 服务端', () => {
     assert.ok(await get(`claude:${s}`))
   })
 
+  it('豆包事件支持状态、标题更新与提醒，拒绝远程执行和历史读取', async () => {
+    const key = sid(), id = `doubao:${key}`
+    const first = await send([ev(key, 'done', { agent: 'doubao', cwd: '', title: '旧标题', quiet: true })])
+    assert.equal(first.status, 200)
+    assert.equal((await get(id)).acked, true)
+    await send([ev(key, 'running', { agent: 'doubao', cwd: '', title: '新标题' })])
+    await send([ev(key, 'done', { agent: 'doubao', cwd: '' })])
+    assert.equal((await get(id)).acked, false)
+    assert.equal((await get(id)).title, '新标题')
+    await call('POST', `/sessions/${id}/ack`)
+    await send([ev(key, 'done', { agent: 'doubao', cwd: '', title: '修改标题', quiet: true })])
+    assert.equal((await get(id)).acked, true)
+    assert.equal((await get(id)).title, '修改标题')
+    for (const [action, body] of [['messages', {text:'hello'}], ['spawn', {mode:'fresh',text:'hello'}], ['history', {}]] as const) {
+      const response = await call('POST', `/sessions/${id}/${action}`, body)
+      assert.equal(response.status, 409, JSON.stringify(response.body))
+      assert.match(response.body.error, /豆包/)
+    }
+  })
+
   it('非法事件返回 400', async () => {
     assert.equal((await send([{ agent: 'x' }])).status, 400)
     assert.equal((await call('POST', '/events', { events: new Array(101).fill(ev(sid(), 'idle')) })).status, 400)

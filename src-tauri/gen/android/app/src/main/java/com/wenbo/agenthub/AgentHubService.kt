@@ -251,7 +251,7 @@ class AgentHubService : Service() {
       return
     }
     if (!msg.optBoolean("notify", false)) return
-    val agent = if (s.optString("agent") == "codex") "Codex" else "Claude"
+    val agent = when (s.optString("agent")) { "codex" -> "Codex"; "doubao" -> "豆包"; else -> "Claude" }
     val state = when (s.optString("state")) {
       "done" -> "已完成"
       "waiting" -> "等待授权"

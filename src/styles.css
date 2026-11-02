@@ -97,6 +97,7 @@ progress::-moz-progress-bar { background: var(--ok); border-radius: 99px; }
 .tag { display: inline-flex; align-items: center; font-size: 11px; font-weight: 650; padding: 3px 8px; border-radius: 7px; }
 .tag.claude { background: var(--alert-bg); color: var(--claude); }
 .tag.codex { background: var(--ok-bg); color: var(--codex); }
+.tag.doubao { background: var(--ok-bg); color: var(--codex); }
 .machine { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
 .badge { margin-left: auto; font-size: 12px; color: var(--alert); font-weight: 600; }
 .title { margin-top: 8px; color: var(--dim); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -142,6 +143,19 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .session-view { display: flex; flex-direction: column; }
 .session-view .chat { flex: 1; }
 .msgs { list-style: none; margin: 24px 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
+.message-entry { min-width:0; max-width:min(85%,960px); }
+.message-entry.user { align-self:flex-end; }
+.message-entry.assistant { align-self:flex-start; }
+.message-entry.tool,.message-entry.system,.message-entry.approval { max-width:100%; }
+.message-entry > .msg { max-width:100%; }
+.reply-tools { white-space:normal; margin:4px 0 0; }
+.reply-buttons { display:flex; flex-wrap:wrap; gap:2px; align-items:center; }
+.reply-buttons button { display:inline-flex; align-items:center; justify-content:center; gap:5px; padding:10px; min-width:44px; min-height:44px; border:1px solid transparent; background:transparent; color:var(--dim); font-size:12px; }
+.reply-buttons button[aria-pressed="true"] { background:var(--accent-soft); color:var(--accent); }
+.reply-buttons .icon { width:17px; height:17px; }
+.reply-notice { display:block; min-height:0; color:var(--dim); font-size:12px; overflow-wrap:anywhere; }
+.branch-preview { border-left:3px solid var(--accent); margin:12px 0; padding:8px 14px; color:var(--dim); white-space:pre-wrap; overflow-wrap:anywhere; }
+.spawn-panel > h2 { margin-top:0; color:var(--fg); }
 .msg { max-width: min(85%,960px); padding: 16px 20px; border-radius: 22px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); line-height: 1.7; }
 .msg.user { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-bottom-right-radius: 7px; }
 .msg.assistant { align-self: flex-start; border-bottom-left-radius: 7px; }
@@ -184,6 +198,8 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
   .session-view header { flex-wrap: wrap; }
   .session-view header .machine { flex-basis: 100%; padding-left: 4px; }
   .msg { max-width: 94%; padding: 14px 16px; }
+  .message-entry { max-width:94%; }
+  .message-entry > .msg { max-width:100%; }
   .composer { padding: 12px; }
   .linked-row { align-items: stretch; flex-direction: column; padding: 12px; border-radius: var(--radius); background: var(--card); gap: 0; }
   .linked-row > button:last-child { align-self: flex-end; color: var(--dim); border-color: transparent; font-size: 13px; }

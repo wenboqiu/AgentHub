@@ -13,7 +13,7 @@ import Icon from "./Icon";
 type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
 type Tab = "sessions"|"tasks"|"goals";
 
-const AGENT_LABEL = { claude: "Claude", codex: "Codex" } as const;
+const AGENT_LABEL = { claude: "Claude", codex: "Codex", doubao: "豆包" } as const;
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
 function ago(iso: string, now: number): string {
@@ -94,7 +94,7 @@ function Row({
     e.stopPropagation();
     fn();
   };
-  const canFocus = isDesktop && s.machine === machine && (s.pid != null || s.agent === "codex");
+  const canFocus = isDesktop && s.machine === machine && (s.pid != null || s.agent === "codex" || s.agent === "doubao");
   return (
     <li className={`row clickable ${pending ? "pending" : ""} st-${s.state}`} onClick={onOpen}>
       <div className="row-head">

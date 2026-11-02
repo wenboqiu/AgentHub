@@ -3,6 +3,8 @@ package com.wenbo.agenthub
 import android.Manifest
 import android.app.Activity
 import android.content.Context
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -18,6 +20,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 
 class MainActivity : TauriActivity() {
+  private var bridge: NativeBridge? = null
   override fun onCreate(savedInstanceState: Bundle?) {
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
@@ -25,13 +28,29 @@ class MainActivity : TauriActivity() {
 
   // 给前端注入 window.AgentHubNative
   override fun onWebViewCreate(webView: WebView) {
-    webView.addJavascriptInterface(NativeBridge(this), "AgentHubNative")
+    bridge?.close()
+    bridge = NativeBridge(this)
+    webView.addJavascriptInterface(bridge!!, "AgentHubNative")
   }
+  override fun onDestroy() { bridge?.close(); super.onDestroy() }
 }
 
 /** 前端调用的原生桥：开关前台服务、查通知权限、跳电池优化设置 */
 class NativeBridge(private val activity: Activity) {
   private val ctx: Context = activity.applicationContext
+  private val voice = ReplySpeech(activity)
+  fun close() { voice.close() }
+
+  @JavascriptInterface
+  fun copyText(text: String) {
+    activity.runOnUiThread { (ctx.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("AgentHub 回复", text)) }
+  }
+  @JavascriptInterface
+  fun speak(text: String) { voice.speak(text) }
+  @JavascriptInterface
+  fun stopSpeech() { voice.stop() }
+  @JavascriptInterface
+  fun speechStatus(): String = voice.status
 
   @JavascriptInterface
   fun start(url: String, token: String) {

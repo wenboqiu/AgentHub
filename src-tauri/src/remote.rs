@@ -64,7 +64,7 @@ fn build_url(s: &Snapshot) -> Result<String, String> {
     } else {
         return Err("服务端地址必须以 http:// 或 https:// 开头".into());
     };
-    Ok(format!("{ws}/ws?token={}&role=agent&machine={}", urlencode(&s.token), urlencode(&s.machine)))
+    Ok(format!("{ws}/ws?token={}&role=agent&machine={}&capabilities=reply-branch-v1", urlencode(&s.token), urlencode(&s.machine)))
 }
 
 fn set_read_timeout(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, d: Duration) {
@@ -224,9 +224,9 @@ mod tests {
 
     #[test]
     fn builds_ws_url() {
-        assert_eq!(build_url(&snap("https://x.example.com/")).unwrap(), "wss://x.example.com/ws?token=t%20k&role=agent&machine=PC-1");
+        assert_eq!(build_url(&snap("https://x.example.com/")).unwrap(), "wss://x.example.com/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1");
         assert!(!build_url(&snap("https://x")).unwrap().contains("control"));
-        assert_eq!(build_url(&snap("http://127.0.0.1:3000")).unwrap(), "ws://127.0.0.1:3000/ws?token=t%20k&role=agent&machine=PC-1");
+        assert_eq!(build_url(&snap("http://127.0.0.1:3000")).unwrap(), "ws://127.0.0.1:3000/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1");
         assert!(build_url(&snap("ftp://x")).is_err());
         assert_eq!(urlencode("中a"), "%E4%B8%ADa");
     }

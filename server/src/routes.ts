@@ -21,6 +21,10 @@ import {
   getApproval,
   getRun,
   getSession,
+  getMessage,
+  rateMessage,
+  nativeKey,
+  type MessageMeta,
   replaceHistory,
   insertMessage,
   isPendingId,
@@ -53,7 +57,7 @@ export type RouteOptions = {
   historyTimeoutMs?: number
 }
 
-type HistoryResult = { messages: { role: string; text: string }[]; error?: string }
+type HistoryResult = { messages: ({ role: string; text: string } & MessageMeta)[]; error?: string }
 
 function bearer(req: FastifyRequest) {
   const h = req.headers.authorization ?? ''
@@ -62,7 +66,7 @@ function bearer(req: FastifyRequest) {
 
 // 一个 WS 连接：属于哪个账号、哪个设备会话（踢设备时按它们关闭）
 type Conn = { sock: Sock; userId: number; authSessionId: number }
-type Exec = Conn & { machine: string }
+type Exec = Conn & { machine: string; replyBranch: boolean }
 const INVALID_LOGIN = 4401
 
 function parseEvent(raw: unknown): EventIn | null {
@@ -71,6 +75,7 @@ function parseEvent(raw: unknown): EventIn | null {
   if (!AGENTS.includes(e.agent as never) || !STATES.includes(e.state as never)) return null
   if (typeof e.sessionId !== 'string' || !e.sessionId || typeof e.at !== 'string' || Number.isNaN(Date.parse(e.at))) return null
   if (e.expectedAt !== undefined && (typeof e.expectedAt !== 'string' || Number.isNaN(Date.parse(e.expectedAt)))) return null
+  if (e.readAt !== undefined && (typeof e.readAt !== 'string' || Number.isNaN(Date.parse(e.readAt)))) return null
   // Postgres 的 text 不能含 NUL，不去掉会整批 500
   const clean = (v: string) => v.replaceAll('\0', '')
   const str = (v: unknown) => (typeof v === 'string' ? clean(v) : '')
@@ -86,6 +91,7 @@ function parseEvent(raw: unknown): EventIn | null {
     pid: typeof e.pid === 'number' && Number.isInteger(e.pid) && e.pid > 0 ? e.pid : null,
     quiet: e.quiet === true,
     expectedAt: e.expectedAt as string | undefined,
+    readAt: e.readAt as string | undefined,
   }
 }
 
@@ -154,7 +160,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     for (const t of await syncTaskForSession(pool,userId,sessionId,state)) pushTask(userId,t)
   }
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number) {
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string) {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
@@ -171,7 +177,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
     pushSession(userId,pending,false); pushRun(userId,run); pushMessage(userId,message)
     if (task) pushTask(userId,task)
-    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text,mode})) {
+    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text,mode,...(branchPoint ? {branchPoint} : {})})) {
       const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
       if (failed) pushRun(userId,failed)
       await abortPending(userId,pendingId,'电脑端不在线')
@@ -346,6 +352,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const res = await serial(async () => {
       const session = await getSession(pool, userId, id)
       if (!session) return { code: 404, error: '会话不存在' } as const
+      if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，请在豆包客户端中继续对话' } as const
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running') return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
@@ -375,12 +382,29 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { runId: run.id }
   })
 
+  app.patch('/sessions/:id/messages/:messageId/feedback',async(req,reply)=>{
+    const {id,messageId} = req.params as {id:string;messageId:string}
+    const n=Number(messageId), rating=(req.body as {rating?:unknown}|null)?.rating
+    if(!Number.isSafeInteger(n) || n<=0 || !['up','down',null].includes(rating as never)) return reply.code(400).send({error:'评价参数不正确'})
+    return serial(async()=>{
+      const message=await getMessage(pool,req.userId,id,n)
+      if(!message) return reply.code(404).send({error:'回复不存在，请刷新记录'})
+      if(message.role!=='assistant' || !message.sourceId) return reply.code(409).send({error:'请先刷新记录，再评价这条回复'})
+      await rateMessage(pool,req.userId,id,message.sourceId,rating as 'up'|'down'|null)
+      const updated={...message,rating:rating as 'up'|'down'|null}
+      pushMessage(req.userId,updated)
+      return {message:updated}
+    })
+  })
+
   // 基于已有会话新开：fork = 带上下文分叉，fresh = 同目录从零开始
   app.post('/sessions/:id/spawn', async (req, reply) => {
     const userId = req.userId
     const id = (req.params as { id: string }).id
-    const body = req.body as { mode?: unknown; text?: unknown } | null
+    const body = req.body as { mode?: unknown; text?: unknown; messageId?:unknown } | null
     const mode = body?.mode
+    const messageId=body?.messageId
+    if(messageId!==undefined && (mode!=='fork' || typeof messageId!=='number' || !Number.isSafeInteger(messageId) || messageId<=0)) return reply.code(400).send({error:'messageId 必须是分支回复的有效编号'})
     const text = body?.text
     if (mode !== 'fork' && mode !== 'fresh') return reply.code(400).send({ error: "mode 必须是 'fork' 或 'fresh'" })
     if (typeof text !== 'string' || text.trim().length < 1 || text.length > 8000) return reply.code(400).send({ error: 'text 必须是 1–8000 字符' })
@@ -388,8 +412,18 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const res = await serial(async () => {
       const session = await getSession(pool, userId, id)
       if (!session) return { code: 404, error: '会话不存在' } as const
+      let point:string|undefined
+      if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，暂不支持新开或分支会话' } as const
+      if(messageId!==undefined) {
+        const message=await getMessage(pool,userId,id,messageId as number)
+        if(!message) return {code:404,error:'回复不存在，请刷新记录'} as const
+        if(message.role!=='assistant' || !message.branchPoint) return {code:409,error:'该回复尚无可确认的分支节点，请刷新记录或等待回复完成'} as const
+        if(session.state==='running' || await activeRun(pool,userId,id)) return {code:409,error:'请等待当前会话运行结束后再分支'} as const
+        point=message.branchPoint
+        if(executors.get(execKey(userId,session.machine))?.replyBranch!==true) return {code:409,error:'电脑端尚不支持指定回复分支，请更新电脑端'} as const
+      }
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
-      return { code: 200, result: await startSession(userId,session,clean.replace(/\s+/g,' ').trim().slice(0,80),clean,mode,id.slice(id.indexOf(':')+1)) } as const
+      return { code: 200, result: await startSession(userId,session,clean.replace(/\s+/g,' ').trim().slice(0,80),clean,mode,id.slice(id.indexOf(':')+1),undefined,point) } as const
     })
     if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
     return (res as Extract<typeof res, {code:200}>).result
@@ -427,6 +461,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const id = (req.params as { id: string }).id
     const session = await getSession(pool, userId, id)
     if (!session) return reply.code(404).send({ error: '会话不存在' })
+    if (session.agent === 'doubao') return reply.code(409).send({ error: '豆包暂不支持读取完整对话记录' })
     if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     const requestId = randomUUID()
     const waiting = new Promise<HistoryResult | null>(resolve => {
@@ -455,7 +490,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (result.error) return reply.code(502).send({ error: result.error })
     const items = result.messages
       .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
-      .map(m => ({ role: m.role, text: m.text }))
+      .map(m => ({ role: m.role, text: m.text, sourceId:nativeKey(m.sourceId) ?? undefined, branchPoint:nativeKey(m.branchPoint) ?? undefined }))
     const messages = await serial(() => replaceHistory(pool, userId, id, items))
     return { messages }
   })
@@ -505,7 +540,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!MESSAGE_ROLES.includes(role as never) || role === 'user' || role === 'approval') return
         const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine) return
-        pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text)))
+        pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text), {sourceId:nativeKey(m.sourceId) ?? undefined,branchPoint:role==='assistant' ? nativeKey(m.branchPoint) ?? undefined : undefined}))
         return
       }
       case 'run.approval': {
@@ -530,7 +565,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const w = historyWaits.get(str(m.requestId))
         if (!w || w.userId !== userId || w.machine !== machine) return
         historyWaits.delete(str(m.requestId))
-        const list = Array.isArray(m.messages) ? (m.messages as { role: string; text: string }[]) : []
+        const list = Array.isArray(m.messages) ? (m.messages as ({ role: string; text: string } & MessageMeta)[]) : []
         w.resolve({ messages: list, error: typeof m.error === 'string' && m.error ? m.error : undefined })
         return
       }
@@ -547,7 +582,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         return
       }
       const key = execKey(userId, machine)
-      const me: Exec = { sock: socket, userId, authSessionId, machine }
+      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch:q.get('capabilities')==='reply-branch-v1' }
       let registered = false
       const queue: unknown[] = []
       const handle = (data: unknown) => {

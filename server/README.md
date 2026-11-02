@@ -114,6 +114,14 @@ viewer 的 `/ws` 新增广播：`{type:'run', run}`、`{type:'message', message}
 
 `acked` 规则：变成 `running` 自动置 true；变成 `waiting/done/aborted`（非 quiet）置 false 并 `notify=true` 提醒一次；任一端「已处理」置 true。服务端每小时清理 7 天没更新的会话。
 
+## 回复操作协议
+
+- `messages` 新增 `source_id`、`branch_point`；历史同步与实时消息保留原始回复标识。返回的消息可含 `sourceId`、`branchPoint` 和 `rating`（`up/down/null`）。评价存独立 `message_feedback` 表，按账号、会话及原始消息标识隔离，历史重建编号后仍保留。
+- `PATCH /sessions/:id/messages/:messageId/feedback`，body `{rating:'up'|'down'|null}`。只允许评价自己的助手回复；无原始标识时 409，其他账号/会话的消息返回 404。成功返回 `{message}` 并发送同 id 的 `message` 广播，客户端应更新已有行。
+- `POST /sessions/:id/spawn` 在 `mode:'fork'` 时可带 `messageId`。服务端从该回复读取 `branchPoint`，不接受浏览器直接提供的节点；拒绝无节点、非助手回复和运行中会话。旧版不带 `messageId` 的整会话分叉协议保留兼容，界面统一使用逐条回复分支。
+- 执行器 WS 握手增加 `capabilities=reply-branch-v1`。指定回复分支要求该能力，缺少时 409；`run.start` 增加 `branchPoint`。执行器再次从原会话验证节点后，Claude 用 `--resume-session-at <uuid> --fork-session`，Codex 用 `thread/fork.lastTurnId`。
+- 历史记录缺少 UUID、完整轮次信息，或旧 CLI 不支持指定节点时明确提示，不能静默分叉全部上下文。
+
 ## 开发与测试
 
 ```bash

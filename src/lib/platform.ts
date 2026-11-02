@@ -23,6 +23,10 @@ export type CollectorInfo = {
 
 // Android 原生桥（MainActivity 里 addJavascriptInterface 注入）
 type NativeBridge = {
+  copyText?(text:string):void;
+  speak?(text:string):void;
+  stopSpeech?():void;
+  speechStatus?():string;
   start(url: string, token: string): void;
   stop(): void;
   isRunning(): boolean;
