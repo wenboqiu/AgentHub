@@ -11,10 +11,10 @@ const AGENT_LABEL = { claude: "Claude", codex: "Codex", doubao: "豆包" } as co
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
 
 function execTitle(e: Execution) {
-  return e.tasks[0] || (e.project ? `${e.project}` : "") || "会话执行";
+  return e.taskTitle || e.title || e.tasks[0] || e.project || "会话执行";
 }
 function execMeta(e: Execution) {
-  return [e.agent ? AGENT_LABEL[e.agent] : null, e.project, e.machine].filter(Boolean).join(" · ");
+  return [e.agent ? AGENT_LABEL[e.agent] : null, e.project, e.machine || (e.taskId ? "手动计时" : null)].filter(Boolean).join(" · ");
 }
 type StatusInfo = { label: string; cls: string; detail?: string };
 function statusOf(e: Execution, now: number): StatusInfo {
@@ -33,7 +33,7 @@ function statusOf(e: Execution, now: number): StatusInfo {
 /** 结束时间：进行中的用当前时间兜底 */
 const endOf = (e: Execution, now: number) => e.status === "queued" || e.status === "running" ? now : Date.parse(e.updatedAt);
 
-export default function CalendarView({ api, runSignal, onOpenSession }: { api: Api; runSignal: number; onOpenSession(id: string): void }) {
+export default function CalendarView({ api, runSignal, onOpenSession, onOpenTask }: { api: Api; runSignal: number; onOpenSession(id: string): void; onOpenTask(id: number): void }) {
   const today = dateKey(new Date());
   const [cursor, setCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [selected, setSelected] = useState(today);
@@ -89,13 +89,16 @@ export default function CalendarView({ api, runSignal, onOpenSession }: { api: A
     return execs.filter(e => Date.parse(e.createdAt) < dayEnd && endOf(e, now) >= dayStart).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }, [execs, selected, now]);
 
-  // 时间轴：选中日所在一周的执行，按会话分行
+  // 点执行记录：任务计时直接回任务，会话执行回会话
+  const open = (e: Execution) => e.taskId ? onOpenTask(e.taskId) : e.sessionId ? onOpenSession(e.sessionId) : undefined;
+
+  // 时间轴：选中日所在一周的执行，按会话（或任务计时）分行
   const timeline = useMemo(() => {
     const start = weekStart(new Date(selected.replace(/-/g, "/"))).getTime();
     const rows = new Map<string, { label: string; runs: Execution[] }>();
     for (const e of execs) {
       if (Date.parse(e.createdAt) >= start + 7 * DAY || endOf(e, now) < start) continue;
-      const key = e.sessionId;
+      const key = e.taskId ? `task-${e.taskId}` : `session-${e.sessionId ?? e.id}`;
       if (!rows.has(key)) rows.set(key, { label: `${execTitle(e)}${e.agent ? ` · ${AGENT_LABEL[e.agent]}` : ""}`, runs: [] });
       rows.get(key)!.runs.push(e);
     }
@@ -146,7 +149,7 @@ export default function CalendarView({ api, runSignal, onOpenSession }: { api: A
           const s = Date.parse(e.createdAt), end = endOf(e, now);
           const left = Math.max(0, (s - timeline.start) / (7 * DAY) * 100);
           const width = Math.min(100 - left, Math.max(0.8, (Math.min(end, timeline.start + 7 * DAY) - Math.max(s, timeline.start)) / (7 * DAY) * 100));
-          return <button key={e.id} className={`tl-block ${statusOf(e, now).cls}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${timeRange(e)} ${execTitle(e)} · ${statusOf(e, now).label}`} onClick={() => onOpenSession(e.sessionId)} />;
+          return <button key={e.id} className={`tl-block ${statusOf(e, now).cls}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${timeRange(e)} ${execTitle(e)} · ${statusOf(e, now).label}`} onClick={() => open(e)} />;
         })}</div>
       </div>) : <p className="empty">本周没有执行记录</p>}
     </section>}
@@ -154,7 +157,7 @@ export default function CalendarView({ api, runSignal, onOpenSession }: { api: A
       <h2>{selected === today ? "今天" : selected} 的执行日志（{dayLog.length}）</h2>
       {dayLog.length ? <ul className="list">{dayLog.map(e => {
         const st = statusOf(e, now);
-        return <li key={e.id}><button className="entity-row" onClick={() => onOpenSession(e.sessionId)}>
+        return <li key={e.id}><button className="entity-row" onClick={() => open(e)}>
           <span className="entity-main">
             <strong>{execTitle(e)}</strong>
             <span className="dim">{timeRange(e)} · {execMeta(e)}{st.detail ? ` · ${st.detail}` : ""}</span>

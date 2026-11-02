@@ -7,6 +7,9 @@ import Checklist from "./Checklist";
 const formOf=(t:Task)=>({...scheduleOf(t),checklist:t.checklist ?? [],title:t.title,notes:t.notes,status:t.status,goalId:t.goalId,agent:t.agent,machine:t.machine,cwd:t.cwd});
 export default function TaskView({task,goals,sessions,agents,api,onBack,onSession,onSaved,onDeleted}: {task:Task; goals:Goal[]; sessions:Session[]; agents:string[];api:Api;onBack():void;onSession(id:string):void;onSaved(t:Task):void;onDeleted():void}) {
   const [draft,setDraft]=useState(formOf(task)), [dirty,setDirty]=useState(false), [busy,setBusy]=useState(false), [err,setErr]=useState(""), [saved,setSaved]=useState(false), [starting,setStarting]=useState(false), [message,setMessage]=useState(""), [linking,setLinking]=useState(false);
+  const [now,setNow]=useState(Date.now());
+  useEffect(()=>{if(!task.timerStartedAt)return;const t=window.setInterval(()=>setNow(Date.now()),1000);return()=>window.clearInterval(t);},[task.timerStartedAt]);
+  const elapsed=(iso:string)=>{const s=Math.max(0,Math.floor((now-Date.parse(iso))/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h} 小时 ${m} 分`:`${m} 分 ${s%60} 秒`;};
   useEffect(()=>{if(!dirty)setDraft(formOf(task));},[task,dirty]);
   const change=(v:TaskInput)=>{setDraft(d=>({...d,...v}));setDirty(true);setSaved(false);setStarting(false);};
   const guard=async(fn:()=>Promise<unknown>)=>{setBusy(true);setErr("");try{await fn();}catch(e){setErr(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
@@ -27,6 +30,11 @@ export default function TaskView({task,goals,sessions,agents,api,onBack,onSessio
       <label>项目目录<input value={draft.cwd ?? ""} maxLength={4000} placeholder="例如 D:\Work2\项目" onChange={e=>change({cwd:e.target.value || null})}/></label>
       <div className="action-bar"><button className="primary" disabled={busy || !dirty}>保存</button>{saved&&<span role="status">已保存</span>}</div>
     </form>{err&&<p className="form-error" role="alert">{err}</p>}
+    <section><h2>执行</h2><div className="action-bar">
+      {task.timerStartedAt
+        ? <><button disabled={busy} onClick={()=>void guard(async()=>onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
+        : <><button className="primary" disabled={busy || task.status==="done"} onClick={()=>void guard(async()=>onSaved(await api.startTimer(task.id)))}>开始计时</button><span className="dim">不开会话也能记录一次执行，结束后会出现在日历里</span></>}
+    </div></section>
     <section><div className="action-bar"><button className="primary" disabled={busy || !!reason} onClick={()=>{setMessage(task.notes || task.title);setStarting(true);}}>{task.sessionIds.length ? "再开一个会话" : "开始"}</button>{reason&&<span className="dim">{reason}</span>}</div>
     {starting&&<form className="selection-panel" onSubmit={e=>{e.preventDefault();void guard(async()=>{const r=await api.startTask(task.id,{text:message,machine});onSaved(r.task);onSession(r.sessionId);});}}><label>第一条消息<textarea value={message} maxLength={8000} onChange={e=>setMessage(e.target.value)}/></label><div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>确认开始</button><button type="button" onClick={()=>setStarting(false)}>取消</button></div></form>}</section>
     <h2>关联会话（{task.sessionIds.length}）</h2><ul className="list">{task.sessionIds.map(id=>{const s=sessions.find(s=>s.id===id);return <li className="linked-row" key={id}><button className="entity-row" disabled={!s} onClick={()=>onSession(id)}><span className="entity-main"><strong>{s ? `${s.agent === "claude" ? "Claude" : s.agent === "doubao" ? "豆包" : "Codex"} · ${s.project || "未知项目"}` : "会话已清理"}</strong><span className="dim">{s ? `${s.title} · ${{idle:"空闲",running:"运行中",waiting:"等待授权",done:"已完成",aborted:"已中断",ended:"已结束",unknown:"状态未知"}[s.state]} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span></span></button><button disabled={busy} onClick={()=>void guard(async()=>onSaved(await api.unlinkSession(task.id,id)))}>取消挂接</button></li>;})}</ul>

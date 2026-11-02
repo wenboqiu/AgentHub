@@ -5,7 +5,7 @@ type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null }
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -29,7 +29,7 @@ export function id(raw: unknown): number {
 const iso = (v: Date) => v.toISOString()
 const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
 const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority, doneAt: r.done_at ? iso(r.done_at) : null })
-const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null })
+const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null })
 
 export async function migrateTasks(db: DB) {
   await db.query(`CREATE TABLE IF NOT EXISTS goals (
@@ -53,6 +53,12 @@ export async function migrateTasks(db: DB) {
       ADD COLUMN IF NOT EXISTS remind_due boolean NOT NULL DEFAULT true`)
   }
   await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist jsonb NOT NULL DEFAULT '[]'::jsonb`)
+  // runs.task_id 指向任务；任务删除后执行记录保留，只解除关联
+  await db.query(`DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'runs_task_id_fkey') THEN
+      ALTER TABLE runs ADD CONSTRAINT runs_task_id_fkey FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE SET NULL;
+    END IF;
+  END $$`)
   await db.query(`CREATE TABLE IF NOT EXISTS entity_reminders (
     id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     task_id bigint REFERENCES tasks(id) ON DELETE CASCADE, goal_id bigint REFERENCES goals(id) ON DELETE CASCADE,
@@ -71,11 +77,13 @@ export async function listGoals(db: DB, user: number): Promise<Goal[]> {
   return (await db.query('SELECT * FROM goals WHERE user_id=$1 ORDER BY updated_at DESC,id DESC', [user])).rows.map(goal)
 }
 export async function listTasks(db: DB, user: number): Promise<Task[]> {
-  return (await db.query(`SELECT t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids
+  return (await db.query(`SELECT t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids,
+      (SELECT min(r.created_at) FROM runs r WHERE r.user_id=t.user_id AND r.task_id=t.id AND r.status IN ('queued','running')) timer_since
     FROM tasks t WHERE user_id=$1 ORDER BY updated_at DESC,id DESC`, [user])).rows.map(task)
 }
 export async function getTask(db: DB, user: number, taskId: number): Promise<Task> {
-  const r = await db.query(`SELECT t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids
+  const r = await db.query(`SELECT t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids,
+      (SELECT min(r.created_at) FROM runs r WHERE r.user_id=t.user_id AND r.task_id=t.id AND r.status IN ('queued','running')) timer_since
     FROM tasks t WHERE user_id=$1 AND id=$2`, [user, taskId])
   if (!r.rows[0]) throw missing()
   return task(r.rows[0])

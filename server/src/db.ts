@@ -109,6 +109,12 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     updated_at timestamptz not null default now()
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(user_id, session_id, created_at DESC)')
+  // 执行记录不再必须挂在会话上：任务可以单独计时（session_id 为空、task_id 有值）
+  await pool.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS task_id bigint')
+  await pool.query('ALTER TABLE runs ALTER COLUMN session_id DROP NOT NULL')
+  // 标题快照：任务/会话被删掉后，历史执行记录仍然能看出当时在做什么
+  await pool.query("ALTER TABLE runs ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT ''")
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(user_id, task_id, created_at DESC)')
   await pool.query(`CREATE TABLE IF NOT EXISTS messages (
     id bigserial primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -355,7 +361,7 @@ export const MESSAGE_ROLES = ['user', 'assistant', 'tool', 'approval', 'system']
 export type MessageRole = (typeof MESSAGE_ROLES)[number]
 export const KEEP_MESSAGES = 200
 
-export type Run = { id: string; sessionId: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string }
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string }
 export type MessageMeta = { sourceId?: string; branchPoint?: string }
 export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string }
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired'
@@ -370,7 +376,7 @@ export type Approval = {
   decidedAt: string | null
 }
 
-type RunRow = { id: string; session_id: string; machine: string; status: RunStatus; error: string; created_at: Date; updated_at: Date }
+type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; created_at: Date; updated_at: Date }
 type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
 type ApprovalRow = {
   id: string
@@ -385,7 +391,9 @@ type ApprovalRow = {
 
 const toRun = (r: RunRow): Run => ({
   id: r.id,
-  sessionId: r.session_id,
+  sessionId: r.session_id ?? null,
+  taskId: r.task_id === null || r.task_id === undefined ? null : Number(r.task_id),
+  title: r.title ?? '',
   machine: r.machine,
   status: r.status,
   error: r.error,
@@ -418,9 +426,35 @@ export function cleanText(v: string, max: number) {
   return v.replaceAll('\0', '').slice(0, max)
 }
 
-export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string): Promise<Run> {
-  const r = await pool.query<RunRow>("INSERT INTO runs (id, user_id, session_id, machine, status) VALUES ($1,$4,$2,$3,'queued') RETURNING *", [id, sessionId, machine, userId])
+export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string, taskId: number | null = null): Promise<Run> {
+  const r = await pool.query<RunRow>("INSERT INTO runs (id, user_id, session_id, machine, status, task_id, title) SELECT $1,$4,$2,$3,'queued',$5,COALESCE((SELECT title FROM tasks WHERE user_id=$4 AND id=$5),'') RETURNING *", [id, sessionId, machine, userId, taskId])
   return toRun(r.rows[0])
+}
+
+// 任务手动计时：不依赖任何会话的执行记录；标题做快照，任务删掉也还能看懂
+export async function createTaskRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, taskId: number): Promise<Run> {
+  const r = await pool.query<RunRow>(
+    "INSERT INTO runs (id, user_id, session_id, task_id, machine, status, title) SELECT $1,$3,NULL,t.id,'','running',t.title FROM tasks t WHERE t.user_id=$3 AND t.id=$2 RETURNING *",
+    [id, taskId, userId],
+  )
+  if (!r.rows[0]) throw new Error('任务不存在')
+  return toRun(r.rows[0])
+}
+
+export async function activeTaskRun(pool: pg.Pool, userId: number, taskId: number): Promise<Run | null> {
+  const r = await pool.query<RunRow>("SELECT * FROM runs WHERE user_id = $1 AND task_id = $2 AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1", [userId, taskId])
+  return r.rows[0] ? toRun(r.rows[0]) : null
+}
+
+export async function stopTaskRun(pool: pg.Pool, userId: number, runId: string, status: RunStatus = 'stopped'): Promise<Run | null> {
+  const r = await pool.query<RunRow>("UPDATE runs SET status = $2, updated_at = now() WHERE user_id = $3 AND id = $1 AND status IN ('queued','running') RETURNING *", [runId, status, userId])
+  return r.rows[0] ? toRun(r.rows[0]) : null
+}
+
+/** 任务标记完成时，收尾它名下所有还在跑的计时记录 */
+export async function closeTaskRuns(pool: pg.Pool, userId: number, taskId: number, status: RunStatus = 'done'): Promise<Run[]> {
+  const r = await pool.query<RunRow>("UPDATE runs SET status = $3, updated_at = now() WHERE user_id = $1 AND task_id = $2 AND status IN ('queued','running') RETURNING *", [userId, taskId, status])
+  return r.rows.map(toRun)
 }
 
 export async function getRun(pool: pg.Pool, userId: number, id: string): Promise<Run | null> {
@@ -452,20 +486,22 @@ export async function failActiveRuns(pool: pg.Pool, userId: number, machine: str
   return r.rows.map(toRun)
 }
 
-// 日历用：一段时间内的执行记录，联出会话标题、项目、状态和关联任务名（会话可能已被清理，字段可空）
-export type Execution = Run & { agent: Agent | null; project: string; state: State | null; tasks: string[] }
+// 日历用：一段时间内的执行记录，联出会话信息、任务名和关联任务列表（都可能是空：任务计时没有会话，会话也可能已被清理）
+export type Execution = Run & { agent: Agent | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] }
 export async function listExecutions(pool: pg.Pool, userId: number, from: Date, to: Date): Promise<Execution[]> {
   const r = await pool.query(
-    `SELECT ru.*, s.agent AS agent, s.project AS project, s.state AS state,
-       ARRAY(SELECT t.title FROM task_sessions ts JOIN tasks t ON t.user_id = ts.user_id AND t.id = ts.task_id
+    `SELECT ru.*, s.agent AS agent, s.project AS project, s.state AS state, t.title AS task_title,
+       ARRAY(SELECT tt.title FROM task_sessions ts JOIN tasks tt ON tt.user_id = ts.user_id AND tt.id = ts.task_id
              WHERE ts.user_id = ru.user_id AND ts.session_id = ru.session_id) AS task_titles
-     FROM runs ru LEFT JOIN sessions s ON s.user_id = ru.user_id AND s.id = ru.session_id
+     FROM runs ru
+     LEFT JOIN sessions s ON s.user_id = ru.user_id AND s.id = ru.session_id
+     LEFT JOIN tasks t ON t.user_id = ru.user_id AND t.id = ru.task_id
      WHERE ru.user_id = $1 AND ru.created_at <= $3 AND (ru.updated_at >= $2 OR ru.status IN ('queued','running'))
      ORDER BY ru.created_at DESC, ru.id DESC`,
     [userId, from, to],
   )
-  return r.rows.map((row: RunRow & { agent: Agent | null; project: string | null; state: State | null; task_titles: string[] }) => ({
-    ...toRun(row), agent: row.agent, project: row.project ?? '', state: row.state, tasks: row.task_titles ?? [],
+  return r.rows.map((row: RunRow & { agent: Agent | null; project: string | null; state: State | null; task_title: string | null; task_titles: string[] }) => ({
+    ...toRun(row), agent: row.agent, project: row.project ?? '', state: row.state, taskTitle: row.task_title, tasks: row.task_titles ?? [],
   }))
 }
 

@@ -290,6 +290,7 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .exec-status.failed { color: var(--alert); background: var(--alert-bg); }
 .exec-status.stopped, .exec-status.queued { color: var(--dim); background: var(--field); }
 .exec-error { color: var(--alert); font-size: 12px; }
+.timer-badge { flex-shrink: 0; font-size: 11px; font-weight: 600; padding: 2px 8px; margin-right: 6px; border-radius: 999px; color: var(--accent); background: var(--accent-soft); }
 @media (max-width: 640px) {
   .cal-cell { min-height: 52px; padding: 4px 6px; }
   .cal-cell .cal-count { display: none; }

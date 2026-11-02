@@ -3,7 +3,7 @@ export type Schedule = { startAt: string | null; dueAt: string | null; remindSta
 export type ChecklistItem = { id: string; text: string; done: boolean };
 export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
 
 export type Session = {
@@ -23,9 +23,9 @@ export type Session = {
 };
 
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
-export type Run = { id: string; sessionId: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
-/** 日历执行记录：run 联出会话信息（会话可能已被清理，agent/state 为空） */
-export type Execution = Run & { agent: "claude" | "codex" | "doubao" | null; project: string; state: State | null; tasks: string[] };
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
+/** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
+export type Execution = Run & { agent: "claude" | "codex" | "doubao" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";
 export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null };
 export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
@@ -117,6 +117,9 @@ export class Api {
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
   startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId: string; sessionId: string; task: Task}>("POST", `/tasks/${id}/start`, input);
+  /** 手动计时：不依赖会话，直接给任务记一次执行 */
+  startTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/start`, {})).task;
+  stopTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/stop`, {})).task;
   ackReminder = (id: number) => this.call("POST", `/reminders/${id}/ack`);
   ack = (id: string) => this.call("POST", `/sessions/${encodeURIComponent(id)}/ack`);
   ackAll = () => this.call("POST", "/sessions/ack-all");

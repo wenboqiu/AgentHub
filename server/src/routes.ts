@@ -9,11 +9,14 @@ import {
   ackAll,
   ackSession,
   activeRun,
+  activeTaskRun,
   applyEvent,
   cleanText,
+  closeTaskRuns,
   createApproval,
   createPendingSession,
   createRun,
+  createTaskRun,
   decideApproval,
   expireApproval,
   expireApprovalsOfRuns,
@@ -36,6 +39,7 @@ import {
   removeSession,
   renamePendingSession,
   setRunStatus,
+  stopTaskRun,
   type Approval,
   type EventIn,
   type Message,
@@ -173,7 +177,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     try {
       await db.query('BEGIN')
       pending = await createPendingSession(db,userId,pendingId,base,title)
-      run = await createRun(db,userId,runId,pendingId,base.machine)
+      run = await createRun(db,userId,runId,pendingId,base.machine,taskId ?? null)
       message = await insertMessage(db,userId,pendingId,runId,'user',text)
       if (taskId !== undefined) {
         await linkSession(db,userId,taskId,pendingId)
@@ -197,7 +201,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const runs = await failActiveRuns(pool, userId, machine, '电脑端断开')
     for (const r of runs) {
       pushRun(userId, r)
-      await abortPending(userId, r.sessionId, r.error)
+      if (r.sessionId) await abortPending(userId, r.sessionId, r.error)
     }
     const expired = await expireApprovalsOfRuns(
       pool,
@@ -291,7 +295,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     pushTask(req.userId,task); return {task}
   }))
   app.patch('/tasks/:id', async req => serial(async () => {
-    const task = await saveTask(pool,req.userId,req.body,entityId((req.params as {id:string}).id))
+    const id = entityId((req.params as {id:string}).id)
+    const task = await saveTask(pool,req.userId,req.body,id)
+    // 标记完成时收尾手动计时的执行记录，日历才能看到真实的结束时间
+    if ((req.body as {status?:unknown}|null)?.status === 'done')
+      for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
     pushTask(req.userId,task); return {task}
   }))
   app.delete('/tasks/:id', async req => serial(async () => {
@@ -302,6 +310,27 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.post('/tasks/:id/sessions', async req => serial(async () => {
     const task = await linkSession(pool,req.userId,entityId((req.params as {id:string}).id),taskText(object(req.body).sessionId,'会话 ID',200))
     pushTask(req.userId,task); return {task}
+  }))
+  // 手动计时：任务不依赖任何会话也能产生执行记录（日历里的基本单位）
+  app.post('/tasks/:id/timer/start', async req => serial(async () => {
+    const taskId = entityId((req.params as {id:string}).id)
+    const task = await getTask(pool,req.userId,taskId)
+    if (task.status === 'done') throw new TaskError('已完成的任务不能再开始计时')
+    if (await activeTaskRun(pool,req.userId,taskId)) throw new TaskError('这个任务已经在执行中',409)
+    const run = await createTaskRun(pool,req.userId,randomUUID(),taskId)
+    pushRun(req.userId,run)
+    const updated = await saveTask(pool,req.userId,{status:'doing'},taskId)
+    pushTask(req.userId,updated)
+    return {run,task:updated}
+  }))
+  app.post('/tasks/:id/timer/stop', async req => serial(async () => {
+    const taskId = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,taskId)
+    const run = await activeTaskRun(pool,req.userId,taskId)
+    if (!run) throw new TaskError('这个任务没有在执行',409)
+    const stopped = await stopTaskRun(pool,req.userId,run.id)
+    if (stopped) pushRun(req.userId,stopped)
+    return {run:stopped,task:await getTask(pool,req.userId,taskId)}
   }))
   app.delete('/tasks/:id/sessions/:sessionId', async req => serial(async () => {
     const p = req.params as {id:string;sessionId:string}
@@ -531,8 +560,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const updated = await setRunStatus(pool, userId, run.id, status as Run['status'], str(m.error))
         if (!updated) return
         pushRun(userId, updated)
-        if (!isPendingId(updated.sessionId) && (status === 'done' || status === 'running')) await syncTask(userId,updated.sessionId,status)
-        if (status === 'failed' || status === 'stopped') await abortPending(userId, updated.sessionId, str(m.error) || (status === 'stopped' ? '已停止' : '启动失败'))
+        if (updated.sessionId && !isPendingId(updated.sessionId) && (status === 'done' || status === 'running')) await syncTask(userId,updated.sessionId,status)
+        if (updated.sessionId && (status === 'failed' || status === 'stopped')) await abortPending(userId, updated.sessionId, str(m.error) || (status === 'stopped' ? '已停止' : '启动失败'))
         if (TERMINAL.includes(status)) {
           for (const a of await expireApprovalsOfRuns(pool, userId, [run.id])) await pushApproval(userId, a, false)
         }
@@ -542,7 +571,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const key = str(m.sessionKey)
         if (!SESSION_KEY_RE.test(key)) return
         const run = await getRun(pool, userId, str(m.runId))
-        if (!run || run.machine !== machine || !isPendingId(run.sessionId)) return
+        if (!run || run.machine !== machine || !run.sessionId || !isPendingId(run.sessionId)) return
         const from = run.sessionId
         const to = `${from.slice(0, from.indexOf(':'))}:${key}`
         const session = await renamePendingSession(pool, userId, from, to)
@@ -560,13 +589,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const role = str(m.role)
         if (!MESSAGE_ROLES.includes(role as never) || role === 'user' || role === 'approval') return
         const run = await getRun(pool, userId, str(m.runId))
-        if (!run || run.machine !== machine) return
+        if (!run || run.machine !== machine || !run.sessionId) return
         pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text), {sourceId:nativeKey(m.sourceId) ?? undefined,branchPoint:role==='assistant' ? nativeKey(m.branchPoint) ?? undefined : undefined}))
         return
       }
       case 'run.approval': {
         const run = await getRun(pool, userId, str(m.runId))
-        if (!run || run.machine !== machine || TERMINAL.includes(run.status)) return
+        if (!run || run.machine !== machine || !run.sessionId || TERMINAL.includes(run.status)) return
         const tool = cleanText(str(m.tool), 100) || 'tool'
         const approval = await createApproval(pool, userId, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
         const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', `请求授权：${approval.tool} ${approval.detail}`)
