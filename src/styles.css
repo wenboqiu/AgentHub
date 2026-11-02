@@ -258,6 +258,7 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .cal-cell .cal-day { font-size: 13px; color: var(--fg); }
 .cal-cell .cal-count { font-size: 11px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 2px 6px; }
 .cal-cell .cal-fail { font-style: normal; color: var(--alert); }
+.cal-cell .cal-sess { font-style: normal; color: var(--accent); margin-right: 6px; }
 .cal-cell.heat-1 { background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
 .cal-cell.heat-2 { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
 .cal-cell.heat-3 { background: color-mix(in srgb, var(--accent) 26%, var(--card)); }
