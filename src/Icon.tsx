@@ -1,4 +1,4 @@
-type IconName = "sessions" | "tasks" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch";
+type IconName = "sessions" | "tasks" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit";
 
 /** Original outline symbols; inherit text colour and remain decorative. */
 export default function Icon({ name }: { name: IconName }) {
@@ -17,6 +17,7 @@ export default function Icon({ name }: { name: IconName }) {
     back: <path d="m14 5-7 7 7 7" />,
     plus: <path d="M12 5v14M5 12h14" />,
     chevron: <path d="m9 5 7 7-7 7" />,
+    edit: <><path d="M4 20h4L19.5 8.5a2.5 2.5 0 0 0-3.5-3.5L4.5 16.5 4 20Z" /><path d="m14.5 7.5 3 3" /></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{paths[name]}</svg>;
 }

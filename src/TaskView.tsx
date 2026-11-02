@@ -5,31 +5,68 @@ import Icon from "./Icon";
 import ScheduleFields, { scheduleOf } from "./ScheduleFields";
 import Checklist from "./Checklist";
 const formOf=(t:Task)=>({...scheduleOf(t),checklist:t.checklist ?? [],title:t.title,notes:t.notes,status:t.status,goalId:t.goalId,agent:t.agent,machine:t.machine,cwd:t.cwd});
+const fmt=(iso:string|null|undefined)=>iso ? new Date(iso).toLocaleString() : "未设置";
+const AGENT_LABEL:Record<string,string>={claude:"Claude",codex:"Codex",doubao:"豆包"};
+const STATE_LABEL:Record<string,string>={idle:"空闲",running:"运行中",waiting:"等待授权",done:"已完成",aborted:"已中断",ended:"已结束",unknown:"状态未知"};
+const STATUSES=Object.keys(TASK_LABEL) as Task["status"][];
 export default function TaskView({task,goals,sessions,agents,api,onBack,onSession,onSaved,onDeleted}: {task:Task; goals:Goal[]; sessions:Session[]; agents:string[];api:Api;onBack():void;onSession(id:string):void;onSaved(t:Task):void;onDeleted():void}) {
-  const [draft,setDraft]=useState(formOf(task)), [dirty,setDirty]=useState(false), [busy,setBusy]=useState(false), [err,setErr]=useState(""), [saved,setSaved]=useState(false), [starting,setStarting]=useState(false), [message,setMessage]=useState(""), [linking,setLinking]=useState(false);
+  const [draft,setDraft]=useState(formOf(task)), [editing,setEditing]=useState(false), [dirty,setDirty]=useState(false), [busy,setBusy]=useState(false), [err,setErr]=useState(""), [saved,setSaved]=useState(false), [starting,setStarting]=useState(false), [message,setMessage]=useState(""), [linking,setLinking]=useState(false), [newItem,setNewItem]=useState("");
   const [now,setNow]=useState(Date.now());
   useEffect(()=>{if(!task.timerStartedAt)return;const t=window.setInterval(()=>setNow(Date.now()),1000);return()=>window.clearInterval(t);},[task.timerStartedAt]);
   const elapsed=(iso:string)=>{const s=Math.max(0,Math.floor((now-Date.parse(iso))/1000)),h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h} 小时 ${m} 分`:`${m} 分 ${s%60} 秒`;};
   useEffect(()=>{if(!dirty)setDraft(formOf(task));},[task,dirty]);
   const change=(v:TaskInput)=>{setDraft(d=>({...d,...v}));setDirty(true);setSaved(false);setStarting(false);};
   const guard=async(fn:()=>Promise<unknown>)=>{setBusy(true);setErr("");try{await fn();}catch(e){setErr(e instanceof Error?e.message:String(e));}finally{setBusy(false);}};
+  // 浏览态直接生效的小改动（状态、清单勾选），不需要进入编辑模式
+  const patch=(v:TaskInput)=>void guard(async()=>onSaved(await api.updateTask(task.id,v)));
+  const closeEdit=()=>{if(dirty && !confirm("放弃未保存的修改？"))return;setDraft(formOf(task));setDirty(false);setEditing(false);};
   const machine=task.machine || (agents.length===1 ? agents[0] : "");
   const reason=dirty ? "请先保存修改" : !task.agent ? "请选择 Claude 或 Codex" : !task.cwd ? "请填写项目目录" : !machine ? "请选择电脑" : !agents.includes(machine) ? "电脑端不在线" : "";
   const machines=[...new Set([...agents,...(draft.machine ? [draft.machine] : [])])];
+  const items=task.checklist ?? [], doneCount=items.filter(i=>i.done).length;
+  // 浏览态直接新增清单项
+  const addItem=async()=>{const text=newItem.trim();if(!text||busy)return;await guard(async()=>{onSaved(await api.updateTask(task.id,{checklist:[...items,{id:crypto.randomUUID(),text,done:false}]}));setNewItem("");});};
+  const goalTitle=goals.find(g=>g.id===task.goalId)?.title;
   return <div className="app"><header><button className="back-button" onClick={onBack}><Icon name="back"/>返回</button><h1>任务详情</h1></header><main className="entity-detail">
-    <form className="entity-form" onSubmit={e=>{e.preventDefault();void guard(async()=>{onSaved(await api.updateTask(task.id,draft));setDirty(false);setSaved(true);});}}>
-      <label>标题<input value={draft.title} maxLength={200} onChange={e=>change({title:e.target.value})} required/></label>
-      <label>备注<textarea value={draft.notes} maxLength={4000} onChange={e=>change({notes:e.target.value})}/></label>
-      <ScheduleFields value={draft} onChange={change}/>
-      {task.doneAt && <p className="dim">完成于：{new Date(task.doneAt).toLocaleString()}</p>}
-      <Checklist items={draft.checklist} onChange={checklist=>change({checklist})}/>
-      <div className="form-grid"><label>状态<select value={draft.status} onChange={e=>change({status:e.target.value as Task["status"]})}>{Object.entries(TASK_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
-      <label>所属目标<select value={draft.goalId ?? ""} onChange={e=>change({goalId:e.target.value ? Number(e.target.value) : null})}><option value="">无</option>{goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></label>
-      <label>执行工具<select value={draft.agent ?? ""} onChange={e=>change({agent:(e.target.value || null) as Task["agent"]})}><option value="">无（普通待办）</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
-      <label>电脑<select value={draft.machine ?? ""} onChange={e=>change({machine:e.target.value || null})}><option value="">开始时选（仅一台在线时自动选择）</option>{machines.map(m=><option key={m} value={m}>{m}{agents.includes(m) ? "" : "（离线）"}</option>)}</select></label></div>
-      <label>项目目录<input value={draft.cwd ?? ""} maxLength={4000} placeholder="例如 D:\Work2\项目" onChange={e=>change({cwd:e.target.value || null})}/></label>
-      <div className="action-bar"><button className="primary" disabled={busy || !dirty}>保存</button>{saved&&<span role="status">已保存</span>}</div>
-    </form>{err&&<p className="form-error" role="alert">{err}</p>}
+    {editing
+      ? <form className="entity-form" onSubmit={e=>{e.preventDefault();void guard(async()=>{onSaved(await api.updateTask(task.id,draft));setDirty(false);setSaved(true);setEditing(false);});}}>
+        <label>标题<input value={draft.title} maxLength={200} onChange={e=>change({title:e.target.value})} required/></label>
+        <label>备注<textarea value={draft.notes} maxLength={4000} onChange={e=>change({notes:e.target.value})}/></label>
+        <ScheduleFields value={draft} onChange={change}/>
+        <Checklist items={draft.checklist} onChange={checklist=>change({checklist})}/>
+        <div className="form-grid"><label>状态<select value={draft.status} onChange={e=>change({status:e.target.value as Task["status"]})}>{Object.entries(TASK_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
+        <label>所属目标<select value={draft.goalId ?? ""} onChange={e=>change({goalId:e.target.value ? Number(e.target.value) : null})}><option value="">无</option>{goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></label>
+        <label>执行工具<select value={draft.agent ?? ""} onChange={e=>change({agent:(e.target.value || null) as Task["agent"]})}><option value="">无（普通待办）</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>
+        <label>电脑<select value={draft.machine ?? ""} onChange={e=>change({machine:e.target.value || null})}><option value="">开始时选（仅一台在线时自动选择）</option>{machines.map(m=><option key={m} value={m}>{m}{agents.includes(m) ? "" : "（离线）"}</option>)}</select></label></div>
+        <label>项目目录<input value={draft.cwd ?? ""} maxLength={4000} placeholder={"例如 D:\\Work2\\项目"} onChange={e=>change({cwd:e.target.value || null})}/></label>
+        <div className="action-bar"><button className="primary" disabled={busy || !dirty}>保存</button><button type="button" disabled={busy} onClick={closeEdit}>取消</button>{saved&&<span role="status">已保存</span>}</div>
+      </form>
+      : <section className="entity-read">
+        <div className="read-head"><h2>{task.title || "未命名任务"}</h2><button className="ghost" onClick={()=>{setSaved(false);setEditing(true);}}><Icon name="edit"/>编辑</button></div>
+        <div className="seg status" role="group" aria-label="任务状态">{STATUSES.map(s=><button key={s} className={task.status===s ? "active" : ""} aria-pressed={task.status===s} disabled={busy} onClick={()=>patch({status:s})}>{TASK_LABEL[s]}</button>)}</div>
+        {task.notes.trim() && <p className="read-notes">{task.notes}</p>}
+        <dl className="read-grid">
+          <div><dt>所属目标</dt><dd>{goalTitle ?? "无"}</dd></div>
+          <div><dt>开始时间</dt><dd>{fmt(task.startAt)}</dd></div>
+          <div><dt>截止时间</dt><dd className={task.dueAt && task.status!=="done" && Date.parse(task.dueAt) < now ? "overdue" : ""}>{fmt(task.dueAt)}</dd></div>
+          {task.doneAt && <div><dt>完成时间</dt><dd>{fmt(task.doneAt)}</dd></div>}
+          <div><dt>执行工具</dt><dd>{task.agent ? AGENT_LABEL[task.agent] ?? task.agent : "无（普通待办）"}</dd></div>
+          <div><dt>电脑</dt><dd>{task.machine ?? "未指定"}</dd></div>
+          <div className="wide"><dt>项目目录</dt><dd className="mono">{task.cwd ?? "未指定"}</dd></div>
+        </dl>
+        <div className="read-checklist"><h3>Checklist · {doneCount}/{items.length}</h3>
+          {items.length>0 && <progress value={doneCount} max={items.length} aria-label="清单完成进度"/>}
+          {items.length>0
+            ? <ul>{items.map(item=><li key={item.id}><label className={item.done ? "done" : ""}><input type="checkbox" checked={item.done} disabled={busy} onChange={()=>patch({checklist:items.map(i=>i.id===item.id ? {...i,done:!i.done} : i)})}/><span>{item.text || "（空清单项）"}</span></label></li>)}</ul>
+            : <p className="dim">还没有清单项，可以直接在下面添加。</p>}
+          <form className="checklist-add" onSubmit={e=>{e.preventDefault();void addItem();}}>
+            <input value={newItem} maxLength={500} placeholder="添加清单项…" aria-label="新清单项" onChange={e=>setNewItem(e.target.value)}/>
+            <button className="primary" disabled={busy || !newItem.trim()}>添加</button>
+          </form>
+        </div>
+        {saved && <p className="dim" role="status">已保存</p>}
+      </section>}
+    {err&&<p className="form-error" role="alert">{err}</p>}
     <section><h2>执行</h2><div className="action-bar">
       {task.timerStartedAt
         ? <><button disabled={busy} onClick={()=>void guard(async()=>onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
@@ -37,9 +74,9 @@ export default function TaskView({task,goals,sessions,agents,api,onBack,onSessio
     </div></section>
     <section><div className="action-bar"><button className="primary" disabled={busy || !!reason} onClick={()=>{setMessage(task.notes || task.title);setStarting(true);}}>{task.sessionIds.length ? "再开一个会话" : "开始"}</button>{reason&&<span className="dim">{reason}</span>}</div>
     {starting&&<form className="selection-panel" onSubmit={e=>{e.preventDefault();void guard(async()=>{const r=await api.startTask(task.id,{text:message,machine});onSaved(r.task);onSession(r.sessionId);});}}><label>第一条消息<textarea value={message} maxLength={8000} onChange={e=>setMessage(e.target.value)}/></label><div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>确认开始</button><button type="button" onClick={()=>setStarting(false)}>取消</button></div></form>}</section>
-    <h2>关联会话（{task.sessionIds.length}）</h2><ul className="list">{task.sessionIds.map(id=>{const s=sessions.find(s=>s.id===id);return <li className="linked-row" key={id}><button className="entity-row" disabled={!s} onClick={()=>onSession(id)}><span className="entity-main"><strong>{s ? `${s.agent === "claude" ? "Claude" : s.agent === "doubao" ? "豆包" : "Codex"} · ${s.project || "未知项目"}` : "会话已清理"}</strong><span className="dim">{s ? `${s.title} · ${{idle:"空闲",running:"运行中",waiting:"等待授权",done:"已完成",aborted:"已中断",ended:"已结束",unknown:"状态未知"}[s.state]} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span></span></button><button disabled={busy} onClick={()=>void guard(async()=>onSaved(await api.unlinkSession(task.id,id)))}>取消挂接</button></li>;})}</ul>
+    <h2>关联会话（{task.sessionIds.length}）</h2><ul className="list">{task.sessionIds.map(id=>{const s=sessions.find(s=>s.id===id);return <li className="linked-row" key={id}><button className="entity-row" disabled={!s} onClick={()=>onSession(id)}><span className="entity-main"><strong>{s ? `${AGENT_LABEL[s.agent] ?? s.agent} · ${s.project || "未知项目"}` : "会话已清理"}</strong><span className="dim">{s ? `${s.title} · ${STATE_LABEL[s.state] ?? s.state} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span></span></button><button disabled={busy} onClick={()=>void guard(async()=>onSaved(await api.unlinkSession(task.id,id)))}>取消挂接</button></li>;})}</ul>
     <button disabled={busy} onClick={()=>setLinking(!linking)}>关联已有会话</button>
-    {linking&&<div className="selection-panel"><p>选择会话（最近 30 条）</p>{sessions.filter(s=>!task.sessionIds.includes(s.id)).slice(0,30).map(s=><button className="entity-row" key={s.id} disabled={busy} onClick={()=>void guard(async()=>{onSaved(await api.linkSession(task.id,s.id));setLinking(false);})}><span>{s.agent === "claude" ? "Claude" : s.agent === "doubao" ? "豆包" : "Codex"} · {s.project} · {s.title}</span></button>)}</div>}
+    {linking&&<div className="selection-panel"><p>选择会话（最近 30 条）</p>{sessions.filter(s=>!task.sessionIds.includes(s.id)).slice(0,30).map(s=><button className="entity-row" key={s.id} disabled={busy} onClick={()=>void guard(async()=>{onSaved(await api.linkSession(task.id,s.id));setLinking(false);})}><span>{AGENT_LABEL[s.agent] ?? s.agent} · {s.project} · {s.title}</span></button>)}</div>}
     <div className="action-bar"><button className="danger" disabled={busy} onClick={()=>{if(confirm("删除这个任务？关联会话会保留。"))void guard(async()=>{await api.deleteTask(task.id);onDeleted();});}}>删除任务</button></div>
   </main></div>;
 }
