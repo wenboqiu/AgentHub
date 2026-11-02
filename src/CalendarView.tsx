@@ -64,6 +64,7 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
   const [cursor, setCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [selected, setSelected] = useState(today);
   const [mode, setMode] = useState<"month" | "timeline">("month");
+  const [scale, setScale] = useState<"week" | "day">("week");
   const [execs, setExecs] = useState<Execution[]>([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
@@ -127,24 +128,28 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
   // 点执行记录：任务计时直接回任务，会话执行回会话
   const open = (e: CalItem) => e.taskId ? onOpenTask(e.taskId) : e.sessionId ? onOpenSession(e.sessionId) : undefined;
 
-  // 时间轴：选中日所在一周的执行与会话，按会话（或任务计时）分行
+  // 时间轴：周（7 天）或日（24 小时）粒度，按会话（或任务计时）分行
   const timeline = useMemo(() => {
-    const start = weekStart(new Date(selected.replace(/-/g, "/"))).getTime();
+    const [y, m, d] = selected.split("-").map(Number);
+    const start = scale === "day" ? new Date(y, m - 1, d).getTime() : weekStart(new Date(y, m - 1, d)).getTime();
+    const span = scale === "day" ? DAY : 7 * DAY;
+    const end = start + span;
     const rows = new Map<string, { label: string; runs: CalItem[] }>();
     const add = (key: string, label: string, e: CalItem) => {
       if (!rows.has(key)) rows.set(key, { label, runs: [] });
       rows.get(key)!.runs.push(e);
     };
     for (const e of execs) {
-      if (Date.parse(e.createdAt) >= start + 7 * DAY || endOf(e, now) < start) continue;
+      if (Date.parse(e.createdAt) >= end || endOf(e, now) < start) continue;
       add(e.taskId ? `task-${e.taskId}` : `session-${e.sessionId ?? e.id}`, `${execTitle(e)}${e.agent ? ` · ${AGENT_LABEL[e.agent]}` : ""}`, e);
     }
     for (const e of sessionItems) {
-      if (itemAt(e) >= start + 7 * DAY) continue;
+      const t = itemAt(e);
+      if (t < start || t >= end) continue;
       add(`session-${e.sessionId}`, `${execTitle(e)}${e.agent ? ` · ${AGENT_LABEL[e.agent]}` : ""}`, e);
     }
-    return { start, rows: [...rows.values()] };
-  }, [execs, sessionItems, selected, now]);
+    return { start, span, rows: [...rows.values()] };
+  }, [execs, sessionItems, selected, scale, now]);
 
   const shiftMonth = (delta: number) => {
     const next = new Date(cursor.y, cursor.m + delta, 1);
@@ -162,7 +167,10 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
 
   return <div className="calendar-panel">
     <div className="page-heading"><div><p className="eyebrow">按日期组织的工作执行看板</p><h2>日历</h2><p>{loading ? "加载中…" : `${cursor.y} 年 ${cursor.m + 1} 月：执行 ${monthTotal.total} · 会话 ${monthTotal.sessions} · 完成 ${monthTotal.done} · 失败 ${monthTotal.failed}`}</p></div>
-      <div className="action-bar"><div className="seg"><button className={mode === "month" ? "active" : ""} onClick={() => setMode("month")}>月历</button><button className={mode === "timeline" ? "active" : ""} onClick={() => setMode("timeline")}>时间轴</button></div></div>
+      <div className="action-bar">
+        {mode === "timeline" && <div className="seg" role="group" aria-label="时间轴粒度"><button className={scale === "week" ? "active" : ""} onClick={() => setScale("week")}>周</button><button className={scale === "day" ? "active" : ""} onClick={() => setScale("day")}>日</button></div>}
+        <div className="seg"><button className={mode === "month" ? "active" : ""} onClick={() => setMode("month")}>月历</button><button className={mode === "timeline" ? "active" : ""} onClick={() => setMode("timeline")}>时间轴</button></div>
+      </div>
     </div>
     {err && <p className="form-error" role="alert">{err}</p>}
     <div className="calendar-nav">
@@ -185,17 +193,23 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
         })())}
       </div>
     </section> : <section className="cal-timeline">
-      <div className="tl-axis">{Array.from({ length: 7 }, (_, i) => { const d = new Date(timeline.start + i * DAY); return <span key={i} className={dateKey(d) === today ? "today" : ""}>{`${d.getMonth()+1}/${d.getDate()}`}</span>; })}</div>
+      <div className={`tl-axis${scale === "day" ? " hours" : ""}`}>{scale === "week"
+        ? Array.from({ length: 7 }, (_, i) => { const d = new Date(timeline.start + i * DAY); return <span key={i} className={dateKey(d) === today ? "today" : ""}>{`${d.getMonth()+1}/${d.getDate()}`}</span>; })
+        : Array.from({ length: 8 }, (_, i) => <span key={i}>{`${i * 3}:00`}</span>)}</div>
       {timeline.rows.length ? timeline.rows.map(row => <div className="tl-row" key={row.label}>
         <span className="tl-label">{row.label}</span>
-        <div className="tl-track">{row.runs.map(e => {
+        <div className={`tl-track${scale === "day" ? " hours" : ""}`}>{row.runs.map(e => {
           const s = itemAt(e), end = endOf(e, now);
-          const left = Math.max(0, (s - timeline.start) / (7 * DAY) * 100);
-          const width = Math.min(100 - left, Math.max(0.8, (Math.min(end, timeline.start + 7 * DAY) - Math.max(s, timeline.start)) / (7 * DAY) * 100));
+          const left = Math.max(0, (s - timeline.start) / timeline.span * 100);
+          const width = Math.min(100 - left, Math.max(0.8, (Math.min(end, timeline.start + timeline.span) - Math.max(s, timeline.start)) / timeline.span * 100));
           const st = statusOf(e, now);
           return <button key={e.id} className={`tl-block ${st.cls}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${timeRange(e)} ${execTitle(e)} · ${st.label}`} onClick={() => open(e)} />;
         })}</div>
-      </div>) : <p className="empty">本周没有执行或会话记录</p>}
+      </div>) : <p className="empty">{scale === "day" ? "这一天" : "本周"}没有执行或会话记录</p>}
+      {scale === "day" && selected === today && timeline.start <= now && now < timeline.start + timeline.span && (() => {
+        const f = Math.min(1, Math.max(0, (now - timeline.start) / timeline.span));
+        return <div className="tl-now" style={{ left: `calc(var(--tl-label-w) + 8px + (100% - var(--tl-label-w) - 8px) * ${f.toFixed(4)})` }} aria-hidden="true" title="当前时间"/>;
+      })()}
     </section>}
     <section className="day-log">
       <h2>{selected === today ? "今天" : selected} 的执行日志（{dayLog.length}）</h2>

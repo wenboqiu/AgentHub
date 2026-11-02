@@ -267,15 +267,18 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .cal-cell.today { border-color: var(--accent); }
 .cal-cell.selected { box-shadow: 0 0 0 2px var(--accent); border-color: transparent; }
 /* 时间轴 */
-.cal-timeline { border: 1px solid var(--line); border-radius: 16px; background: var(--card); padding: 12px 14px 16px; overflow-x: auto; }
-.tl-axis { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); margin-left: 200px; border-bottom: 1px solid var(--line); }
+.cal-timeline { --tl-label-w: 192px; position: relative; border: 1px solid var(--line); border-radius: 16px; background: var(--card); padding: 12px 14px 16px; overflow-x: auto; }
+.tl-axis { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); margin-left: calc(var(--tl-label-w) + 8px); border-bottom: 1px solid var(--line); }
+.tl-axis.hours { grid-template-columns: repeat(8, 1fr); }
 .tl-axis span { font-size: 11px; color: var(--dim); text-align: center; padding: 2px 0 6px; border-left: 1px dashed var(--line); }
 .tl-axis span.today { color: var(--accent); font-weight: 650; }
 .tl-row { display: flex; align-items: center; gap: 8px; min-height: 40px; border-bottom: 1px dashed var(--line); }
 .tl-row:last-child { border-bottom: none; }
-.tl-label { width: 192px; flex-shrink: 0; font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-label { width: var(--tl-label-w); flex-shrink: 0; font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-track { position: relative; flex: 1; height: 22px; min-width: 280px; background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% / 7 - 1px), var(--line) calc(100% / 7 - 1px), var(--line) calc(100% / 7)); border-radius: 6px; }
-.tl-block { position: absolute; top: 3px; bottom: 3px; min-width: 8px; padding: 0; border: none; border-radius: 6px; background: var(--accent); cursor: pointer; }
+.tl-track.hours { background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% / 8 - 1px), var(--line) calc(100% / 8 - 1px), var(--line) calc(100% / 8)); }
+.tl-now { position: absolute; top: 40px; bottom: 8px; width: 2px; margin-left: -1px; background: var(--accent); opacity: .6; pointer-events: none; }
+.tl-block { position: absolute; top: 3px; height: 16px; min-height: 0; min-width: 8px; padding: 0; border: none; border-radius: 4px; background: var(--accent); cursor: pointer; }
 .tl-block.done { background: color-mix(in srgb, var(--ok) 75%, transparent); }
 .tl-block.failed { background: var(--alert); }
 .tl-block.stopped { background: color-mix(in srgb, var(--alert) 45%, transparent); }
@@ -295,8 +298,7 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 @media (max-width: 640px) {
   .cal-cell { min-height: 52px; padding: 4px 6px; }
   .cal-cell .cal-count { display: none; }
-  .tl-label { width: 120px; }
-  .tl-axis { margin-left: 128px; }
+  .cal-timeline { --tl-label-w: 120px; }
   .entity-read { padding: 20px; gap: 16px; }
 }
 
