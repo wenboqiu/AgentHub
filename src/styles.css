@@ -285,6 +285,9 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .tl-block.waiting { background: var(--priority-medium); }
 .tl-block.queued { background: var(--dim); }
 .tl-block.running { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+/* 会话活动片段：没有精确起止，颜色淡一档以区别于 run 的真实执行区间 */
+.tl-block.act { background: color-mix(in srgb, var(--accent) 42%, transparent); }
+.tl-block.act.stopped { background: color-mix(in srgb, var(--dim) 55%, transparent); }
 @keyframes pulse { 50% { opacity: .6; } }
 /* 执行日志状态标签 */
 .exec-status { flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; }

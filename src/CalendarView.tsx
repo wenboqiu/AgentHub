@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Api, Execution, Session } from "./lib/api";
+import type { ActivityBucket, Api, Execution, Session } from "./lib/api";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const DAY = 86_400_000;
+/** 服务端活动桶粒度：5 分钟 */
+const BUCKET = 5 * 60_000;
+/** 相邻活动桶间隔不超过这个值就算同一段（中间没人动才断开） */
+const MERGE_GAP = 10 * 60_000;
 const dateKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const hm = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 /** 本周周一 0 点 */
@@ -66,6 +70,7 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
   const [mode, setMode] = useState<"month" | "timeline">("month");
   const [scale, setScale] = useState<"week" | "day">("week");
   const [execs, setExecs] = useState<Execution[]>([]);
+  const [activity, setActivity] = useState<ActivityBucket[]>([]);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [now, setNow] = useState(Date.now());
@@ -83,6 +88,30 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
   }, [api, cursor, runSignal]);
+
+  // 会话真实活动分布：消息时间戳按 5 分钟聚合（老服务端没有这个接口时退化为空，画刻度点）
+  useEffect(() => {
+    let alive = true;
+    const from = new Date(cursor.y, cursor.m, 1), to = new Date(cursor.y, cursor.m + 1, 0, 23, 59, 59, 999);
+    api.activity(from.toISOString(), to.toISOString())
+      .then(r => { if (alive) setActivity(r.activity); })
+      .catch(() => { if (alive) setActivity([]); });
+    return () => { alive = false; };
+  }, [api, cursor, runSignal]);
+
+  // 把活动桶合并成片段：间隔 ≤ MERGE_GAP 视为同一次连续工作
+  const segments = useMemo(() => {
+    const map = new Map<string, { start: number; end: number; count: number }[]>();
+    const sorted = [...activity].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+    for (const b of sorted) {
+      const t = Date.parse(b.at);
+      const list = map.get(b.sessionId) ?? map.set(b.sessionId, []).get(b.sessionId)!;
+      const last = list[list.length - 1];
+      if (last && t - last.end <= MERGE_GAP) { last.end = Math.max(last.end, t + BUCKET); last.count += b.count; }
+      else list.push({ start: t, end: t + BUCKET, count: b.count });
+    }
+    return map;
+  }, [activity]);
 
   // 当月有活动的会话（最后活动时间落在当月）——终端里直接开的会话没有 run 记录，也要出现在日历
   const monthStart = new Date(cursor.y, cursor.m, 1).getTime(), monthEnd = new Date(cursor.y, cursor.m + 1, 1).getTime();
@@ -129,24 +158,26 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
   const open = (e: CalItem) => e.taskId ? onOpenTask(e.taskId) : e.sessionId ? onOpenSession(e.sessionId) : undefined;
 
   // 时间轴：周（7 天）或日（24 小时）粒度，按会话（或任务计时）分行
+  // 有 run 的会话用 run 的真实起止；没有 run 的会话用消息活动片段（不连续）
   const timeline = useMemo(() => {
     const [y, m, d] = selected.split("-").map(Number);
     const start = scale === "day" ? new Date(y, m - 1, d).getTime() : weekStart(new Date(y, m - 1, d)).getTime();
     const span = scale === "day" ? DAY : 7 * DAY;
     const end = start + span;
-    const rows = new Map<string, { label: string; runs: CalItem[] }>();
-    const add = (key: string, label: string, e: CalItem) => {
-      if (!rows.has(key)) rows.set(key, { label, runs: [] });
-      rows.get(key)!.runs.push(e);
-    };
+    const rows = new Map<string, { label: string; runs: CalItem[]; sessionId?: string; marker?: CalItem }>();
+    const labelOf = (e: CalItem) => `${execTitle(e)}${e.agent ? ` · ${AGENT_LABEL[e.agent]}` : ""}`;
     for (const e of execs) {
       if (Date.parse(e.createdAt) >= end || endOf(e, now) < start) continue;
-      add(e.taskId ? `task-${e.taskId}` : `session-${e.sessionId ?? e.id}`, `${execTitle(e)}${e.agent ? ` · ${AGENT_LABEL[e.agent]}` : ""}`, e);
+      const key = e.taskId ? `task-${e.taskId}` : `session-${e.sessionId ?? e.id}`;
+      if (!rows.has(key)) rows.set(key, { label: labelOf(e), runs: [], sessionId: e.sessionId ?? undefined });
+      rows.get(key)!.runs.push(e);
     }
     for (const e of sessionItems) {
       const t = itemAt(e);
       if (t < start || t >= end) continue;
-      add(`session-${e.sessionId}`, `${execTitle(e)}${e.agent ? ` · ${AGENT_LABEL[e.agent]}` : ""}`, e);
+      const key = `session-${e.sessionId}`;
+      if (rows.has(key)) continue; // 已有 run 记录，起止更精确，不再叠加会话合成条目
+      rows.set(key, { label: labelOf(e), runs: [], sessionId: e.sessionId ?? undefined, marker: e });
     }
     return { start, span, rows: [...rows.values()] };
   }, [execs, sessionItems, selected, scale, now]);
@@ -196,16 +227,36 @@ export default function CalendarView({ api, sessions, runSignal, onOpenSession, 
       <div className={`tl-axis${scale === "day" ? " hours" : ""}`}>{scale === "week"
         ? Array.from({ length: 7 }, (_, i) => { const d = new Date(timeline.start + i * DAY); return <span key={i} className={dateKey(d) === today ? "today" : ""}>{`${d.getMonth()+1}/${d.getDate()}`}</span>; })
         : Array.from({ length: 8 }, (_, i) => <span key={i}>{`${i * 3}:00`}</span>)}</div>
-      {timeline.rows.length ? timeline.rows.map(row => <div className="tl-row" key={row.label}>
-        <span className="tl-label">{row.label}</span>
-        <div className={`tl-track${scale === "day" ? " hours" : ""}`}>{row.runs.map(e => {
-          const s = itemAt(e), end = endOf(e, now);
-          const left = Math.max(0, (s - timeline.start) / timeline.span * 100);
-          const width = Math.min(100 - left, Math.max(0.8, (Math.min(end, timeline.start + timeline.span) - Math.max(s, timeline.start)) / timeline.span * 100));
-          const st = statusOf(e, now);
-          return <button key={e.id} className={`tl-block ${st.cls}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${timeRange(e)} ${execTitle(e)} · ${st.label}`} onClick={() => open(e)} />;
-        })}</div>
-      </div>) : <p className="empty">{scale === "day" ? "这一天" : "本周"}没有执行或会话记录</p>}
+      {timeline.rows.length ? timeline.rows.map((row, rowIndex) => {
+        const spanEnd = timeline.start + timeline.span;
+        const segs = row.runs.length || !row.sessionId ? [] : (segments.get(row.sessionId) ?? []).filter(sg => sg.end > timeline.start && sg.start < spanEnd);
+        const markerState = row.marker ? statusOf(row.marker, now) : null;
+        const clampPos = (s: number, e: number) => {
+          const left = Math.max(0, Math.min(100, (s - timeline.start) / timeline.span * 100));
+          const right = Math.max(0, Math.min(100, (e - timeline.start) / timeline.span * 100));
+          return { left, width: Math.max(0.8, Math.min(100 - left, right - left)) };
+        };
+        return <div className="tl-row" key={rowIndex}>
+          <span className="tl-label">{row.label}</span>
+          <div className={`tl-track${scale === "day" ? " hours" : ""}`}>
+            {row.runs.map(e => {
+              const st = statusOf(e, now);
+              const { left, width } = clampPos(itemAt(e), endOf(e, now));
+              return <button key={e.id} className={`tl-block ${st.cls}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${timeRange(e)} ${execTitle(e)} · ${st.label}`} onClick={() => open(e)} />;
+            })}
+            {segs.map(sg => {
+              const { left, width } = clampPos(sg.start, Math.min(sg.end, spanEnd));
+              return <button key={sg.start} className={`tl-block act${markerState?.cls === "running" ? " running" : ""}`} style={{ left: `${left}%`, width: `${width}%` }}
+                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, spanEnd)).toISOString())} · ${sg.count} 条消息`}
+                onClick={() => row.sessionId && onOpenSession(row.sessionId)} />;
+            })}
+            {!row.runs.length && !segs.length && row.marker && (() => {
+              const { left } = clampPos(itemAt(row.marker), itemAt(row.marker));
+              return <button className="tl-block act stopped" style={{ left: `${left}%`, width: "0.8%" }} title={`最后活动 ${hm(row.marker.createdAt)} · 无活动明细`} onClick={() => row.sessionId && onOpenSession(row.sessionId)} />;
+            })()}
+          </div>
+        </div>;
+      }) : <p className="empty">{scale === "day" ? "这一天" : "本周"}没有执行或会话记录</p>}
       {scale === "day" && selected === today && timeline.start <= now && now < timeline.start + timeline.span && (() => {
         const f = Math.min(1, Math.max(0, (now - timeline.start) / timeline.span));
         return <div className="tl-now" style={{ left: `calc(var(--tl-label-w) + 8px + (100% - var(--tl-label-w) - 8px) * ${f.toFixed(4)})` }} aria-hidden="true" title="当前时间"/>;

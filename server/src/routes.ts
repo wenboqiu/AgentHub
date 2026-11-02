@@ -32,6 +32,7 @@ import {
   insertMessage,
   isPendingId,
   latestRun,
+  listActivity,
   listExecutions,
   listMessages,
   listSessions,
@@ -485,6 +486,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const to = q.to ? new Date(q.to) : new Date()
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return reply.code(400).send({ error: 'from/to 时间格式不合法' })
     return { executions: await listExecutions(pool, req.userId, from, to) }
+  })
+
+  app.get('/activity', async (req, reply) => {
+    const q = req.query as { from?: string; to?: string }
+    const from = q.from ? new Date(q.from) : new Date(Date.now() - 7 * 86_400_000)
+    const to = q.to ? new Date(q.to) : new Date()
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return reply.code(400).send({ error: 'from/to 时间格式不合法' })
+    return { activity: await listActivity(pool, req.userId, from, to) }
   })
 
   app.post('/approvals/:id', async (req, reply) => {

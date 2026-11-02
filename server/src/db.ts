@@ -131,6 +131,7 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     primary key (user_id,session_id,source_id)
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(user_id, session_id, id)')
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(user_id, created_at)')
   await pool.query(`CREATE TABLE IF NOT EXISTS approvals (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -503,6 +504,21 @@ export async function listExecutions(pool: pg.Pool, userId: number, from: Date, 
   return r.rows.map((row: RunRow & { agent: Agent | null; project: string | null; state: State | null; task_title: string | null; task_titles: string[] }) => ({
     ...toRun(row), agent: row.agent, project: row.project ?? '', state: row.state, taskTitle: row.task_title, tasks: row.task_titles ?? [],
   }))
+}
+
+// 会话的真实活动分布：按 5 分钟时间桶统计消息数（只返回有消息的桶）
+// 会话表只有单个 event_at，画不出真实工作时长；消息时间戳才能反映"干干停停"的节奏
+export type ActivityBucket = { sessionId: string; at: string; count: number }
+export async function listActivity(pool: pg.Pool, userId: number, from: Date, to: Date): Promise<ActivityBucket[]> {
+  const r = await pool.query<{ session_id: string; bucket: Date; n: number }>(
+    `SELECT session_id, to_timestamp(floor(extract(epoch FROM created_at) / 300) * 300) AS bucket, count(*)::int AS n
+     FROM messages
+     WHERE user_id = $1 AND created_at >= $2 AND created_at < $3
+     GROUP BY session_id, bucket
+     ORDER BY bucket`,
+    [userId, from, to],
+  )
+  return r.rows.map(row => ({ sessionId: row.session_id, at: row.bucket.toISOString(), count: row.n }))
 }
 
 // 排序按 created_at、id；每个会话只留最近 KEEP_MESSAGES 条
