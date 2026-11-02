@@ -9,9 +9,10 @@ import TasksPanel from "./TasksPanel";
 import GoalsPanel from "./GoalsPanel";
 import TaskView from "./TaskView";
 import GoalView from "./GoalView";
+import CalendarView from "./CalendarView";
 import Icon from "./Icon";
 type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
-type Tab = "sessions"|"tasks"|"goals";
+type Tab = "sessions"|"tasks"|"goals"|"calendar";
 
 const AGENT_LABEL = { claude: "Claude", codex: "Codex", doubao: "豆包" } as const;
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
@@ -155,6 +156,7 @@ export default function App() {
   const bus = useMemo(() => makeBus(), []);
   const [now, setNow] = useState(Date.now());
   const [toast, setToast] = useState("");
+  const [runSignal, setRunSignal] = useState(0);
   const cfgRef = useRef<Config | null>(null);
   cfgRef.current = cfg;
   const openIdRef = useRef<string | null>(null);
@@ -261,7 +263,7 @@ export default function App() {
         }
         bus.emit({ kind: "resync" });
       },
-      onRun: (r) => bus.emit({ kind: "run", r }),
+      onRun: (r) => { setRunSignal(s => s + 1); bus.emit({ kind: "run", r }); },
       onMessage: (m) => bus.emit({ kind: "message", m }),
       onApproval: (a, notify) => {
         setApprovals((m) => {
@@ -436,12 +438,13 @@ export default function App() {
         <span className="spacer" />
         <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>
-      <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","goals"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span>{{sessions:"会话",tasks:"任务",goals:"目标"}[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}</button>)}</nav>
+      <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","goals","calendar"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span>{{sessions:"会话",tasks:"任务",goals:"目标",calendar:"日历"}[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}</button>)}</nav>
       {toast && <div className="toast" role="status">{toast}</div>}
       <main>
         {activeReminders.length > 0 && <section className="reminder-list" aria-label="时间提醒"><h2>时间提醒（{activeReminders.length}）</h2><ul className="list">{activeReminders.map(r=><li key={r.id} className="reminder-row"><button className="entity-row" onClick={()=>r.entityType === "task" ? openTask(r.entityId) : openGoal(r.entityId)}><span className="entity-main"><strong>{r.title}</strong><span>{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span></span></button><button onClick={()=>void dismissReminder(r.id)}>已处理</button></li>)}</ul></section>}
         <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
+        <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} runSignal={runSignal} onOpenSession={openSession}/>}</div>
         <div hidden={tab!=="sessions"}>
         <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
         <section>

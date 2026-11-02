@@ -241,3 +241,58 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
   .row.pending { border-left: 3px solid Highlight; }
   .task-status, .goal-priority, .count, .tag { border: 1px solid CanvasText; }
 }
+
+/* ---------- 日历（执行看板） ---------- */
+.seg { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); }
+.seg button { min-height: 36px; padding: 6px 16px; border: none; background: transparent; border-radius: 999px; color: var(--dim); font-size: 13px; }
+.seg button.active { background: var(--accent-soft); color: var(--accent); }
+.calendar-panel .page-heading { align-items: center; }
+.calendar-nav { display: flex; align-items: center; gap: 14px; margin: 4px 0 12px; }
+.calendar-nav strong { font-size: 15px; font-weight: 600; }
+.calendar-nav button { min-width: 44px; padding: 8px 12px; }
+.cal-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-bottom: 4px; }
+.cal-weekdays span { text-align: center; font-size: 12px; color: var(--dim); }
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-cell { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-height: 64px; padding: 6px 8px; border-radius: 12px; border: 1px solid var(--line); background: var(--card); font-weight: 500; text-align: left; }
+.cal-cell.blank { border-color: transparent; background: transparent; pointer-events: none; }
+.cal-cell .cal-day { font-size: 13px; color: var(--fg); }
+.cal-cell .cal-count { font-size: 11px; color: var(--dim); display: flex; flex-wrap: wrap; gap: 2px 6px; }
+.cal-cell .cal-fail { font-style: normal; color: var(--alert); }
+.cal-cell.heat-1 { background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
+.cal-cell.heat-2 { background: color-mix(in srgb, var(--accent) 16%, var(--card)); }
+.cal-cell.heat-3 { background: color-mix(in srgb, var(--accent) 26%, var(--card)); }
+.cal-cell.heat-4 { background: color-mix(in srgb, var(--accent) 38%, var(--card)); }
+.cal-cell.heat-1 .cal-day, .cal-cell.heat-2 .cal-day, .cal-cell.heat-3 .cal-day, .cal-cell.heat-4 .cal-day { font-weight: 650; }
+.cal-cell.today { border-color: var(--accent); }
+.cal-cell.selected { box-shadow: 0 0 0 2px var(--accent); border-color: transparent; }
+/* 时间轴 */
+.cal-timeline { border: 1px solid var(--line); border-radius: 16px; background: var(--card); padding: 12px 14px 16px; overflow-x: auto; }
+.tl-axis { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); margin-left: 200px; border-bottom: 1px solid var(--line); }
+.tl-axis span { font-size: 11px; color: var(--dim); text-align: center; padding: 2px 0 6px; border-left: 1px dashed var(--line); }
+.tl-axis span.today { color: var(--accent); font-weight: 650; }
+.tl-row { display: flex; align-items: center; gap: 8px; min-height: 40px; border-bottom: 1px dashed var(--line); }
+.tl-row:last-child { border-bottom: none; }
+.tl-label { width: 192px; flex-shrink: 0; font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tl-track { position: relative; flex: 1; height: 22px; min-width: 280px; background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% / 7 - 1px), var(--line) calc(100% / 7 - 1px), var(--line) calc(100% / 7)); border-radius: 6px; }
+.tl-block { position: absolute; top: 3px; bottom: 3px; min-width: 8px; padding: 0; border: none; border-radius: 6px; background: var(--accent); cursor: pointer; }
+.tl-block.done { background: color-mix(in srgb, var(--ok) 75%, transparent); }
+.tl-block.failed { background: var(--alert); }
+.tl-block.stopped { background: color-mix(in srgb, var(--alert) 45%, transparent); }
+.tl-block.waiting { background: var(--priority-medium); }
+.tl-block.queued { background: var(--dim); }
+.tl-block.running { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .6; } }
+/* 执行日志状态标签 */
+.exec-status { flex-shrink: 0; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; }
+.exec-status.running { color: var(--accent); background: var(--accent-soft); }
+.exec-status.waiting { color: var(--priority-medium); background: var(--priority-medium-bg); }
+.exec-status.done { color: var(--ok); background: var(--ok-bg); }
+.exec-status.failed { color: var(--alert); background: var(--alert-bg); }
+.exec-status.stopped, .exec-status.queued { color: var(--dim); background: var(--field); }
+.exec-error { color: var(--alert); font-size: 12px; }
+@media (max-width: 640px) {
+  .cal-cell { min-height: 52px; padding: 4px 6px; }
+  .cal-cell .cal-count { display: none; }
+  .tl-label { width: 120px; }
+  .tl-axis { margin-left: 128px; }
+}

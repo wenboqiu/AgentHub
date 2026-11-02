@@ -334,8 +334,9 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
 }
 
 export async function purgeOld(pool: pg.Pool): Promise<number> {
-  const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '7 days'")
-  await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '7 days'")
+  // 会话和明细保留 30 天（日历执行日志要能翻回去看）；runs 保留 90 天供月度概览
+  const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '30 days'")
+  await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '90 days'")
   await pool.query("DELETE FROM approvals WHERE created_at < now() - interval '7 days'")
   await pool.query("DELETE FROM auth_sessions WHERE last_used_at < now() - interval '180 days'")
   return r.rowCount ?? 0
@@ -449,6 +450,23 @@ export async function failActiveRuns(pool: pg.Pool, userId: number, machine: str
     [machine, error, userId],
   )
   return r.rows.map(toRun)
+}
+
+// 日历用：一段时间内的执行记录，联出会话标题、项目、状态和关联任务名（会话可能已被清理，字段可空）
+export type Execution = Run & { agent: Agent | null; project: string; state: State | null; tasks: string[] }
+export async function listExecutions(pool: pg.Pool, userId: number, from: Date, to: Date): Promise<Execution[]> {
+  const r = await pool.query(
+    `SELECT ru.*, s.agent AS agent, s.project AS project, s.state AS state,
+       ARRAY(SELECT t.title FROM task_sessions ts JOIN tasks t ON t.user_id = ts.user_id AND t.id = ts.task_id
+             WHERE ts.user_id = ru.user_id AND ts.session_id = ru.session_id) AS task_titles
+     FROM runs ru LEFT JOIN sessions s ON s.user_id = ru.user_id AND s.id = ru.session_id
+     WHERE ru.user_id = $1 AND ru.created_at <= $3 AND (ru.updated_at >= $2 OR ru.status IN ('queued','running'))
+     ORDER BY ru.created_at DESC, ru.id DESC`,
+    [userId, from, to],
+  )
+  return r.rows.map((row: RunRow & { agent: Agent | null; project: string | null; state: State | null; task_titles: string[] }) => ({
+    ...toRun(row), agent: row.agent, project: row.project ?? '', state: row.state, tasks: row.task_titles ?? [],
+  }))
 }
 
 // 排序按 created_at、id；每个会话只留最近 KEEP_MESSAGES 条

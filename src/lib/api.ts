@@ -24,6 +24,8 @@ export type Session = {
 
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 export type Run = { id: string; sessionId: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
+/** 日历执行记录：run 联出会话信息（会话可能已被清理，agent/state 为空） */
+export type Execution = Run & { agent: "claude" | "codex" | "doubao" | null; project: string; state: State | null; tasks: string[] };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";
 export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null };
 export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
@@ -137,6 +139,8 @@ export class Api {
     (await this.call<{message:Message}>("PATCH",`/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}/feedback`,{rating})).message;
   send = (sessionId: string, text: string) => this.call<{ runId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/messages`, { text });
   stop = (runId: string) => this.call("POST", `/runs/${encodeURIComponent(runId)}/stop`, {});
+  /** 日历：一段时间内的执行记录（ISO 时间） */
+  executions = (from: string, to: string) => this.call<{ executions: Execution[] }>("GET", `/runs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
   decide = (approvalId: string, decision: "allow" | "deny") => this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision });
   history = (sessionId: string) => this.call<{ messages: Message[] }>("POST", `/sessions/${encodeURIComponent(sessionId)}/history`, {});
 }
