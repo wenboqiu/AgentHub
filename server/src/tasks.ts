@@ -2,8 +2,10 @@ import type pg from 'pg'
 import type { State } from './db.ts'
 
 type DB = Pick<pg.Pool, 'query'>
-export type Goal = { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string }
-export type Task = { id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null }
+export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
+export type ChecklistItem = { id: string; text: string; done: boolean }
+export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string }
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -25,9 +27,9 @@ export function id(raw: unknown): number {
   return n
 }
 const iso = (v: Date) => v.toISOString()
-const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at) })
+const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
 const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority })
-const task = (r: any): Task => ({ ...entity(r), goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null })
+const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null })
 
 export async function migrateTasks(db: DB) {
   await db.query(`CREATE TABLE IF NOT EXISTS goals (
@@ -42,6 +44,20 @@ export async function migrateTasks(db: DB) {
     agent text CHECK (agent IN ('claude','codex')), machine text, cwd text,
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), done_at timestamptz,
     UNIQUE(user_id,id))`)
+  for (const table of ['goals','tasks']) {
+    await db.query(`ALTER TABLE ${table}
+      ADD COLUMN IF NOT EXISTS start_at timestamptz,
+      ADD COLUMN IF NOT EXISTS due_at timestamptz,
+      ADD COLUMN IF NOT EXISTS remind_start boolean NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS remind_due boolean NOT NULL DEFAULT true`)
+  }
+  await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist jsonb NOT NULL DEFAULT '[]'::jsonb`)
+  await db.query(`CREATE TABLE IF NOT EXISTS entity_reminders (
+    id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    task_id bigint REFERENCES tasks(id) ON DELETE CASCADE, goal_id bigint REFERENCES goals(id) ON DELETE CASCADE,
+    kind text NOT NULL CHECK (kind IN ('start','due')), scheduled_at timestamptz NOT NULL, acked boolean NOT NULL DEFAULT false,
+    CHECK ((task_id IS NULL) <> (goal_id IS NULL)),
+    UNIQUE(task_id,kind,scheduled_at), UNIQUE(goal_id,kind,scheduled_at))`)
   await db.query(`CREATE TABLE IF NOT EXISTS task_sessions (
     task_id bigint NOT NULL, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     session_id text NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(task_id,session_id),
@@ -67,6 +83,25 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
   const b = object(raw), out: Record<string, unknown> = {}
   if (create || 'title' in b) out.title = text(b.title, '标题', 200)
   if ('notes' in b) out.notes = text(b.notes, '备注', 4000, true)
+  for (const [key,column] of [['startAt','start_at'],['dueAt','due_at']] as const) if (key in b) {
+    const value = b[key]
+    if (value !== null && (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?(?:Z|[+-]\d\d:\d\d)$/.test(value) || !Number.isFinite(Date.parse(value)))) throw new TaskError('时间格式不合法，请提供含时区的日期时间')
+    out[column] = value === null ? null : new Date(value as string).toISOString()
+  }
+  for (const [key,column] of [['remindStart','remind_start'],['remindDue','remind_due']] as const) if (key in b) {
+    if (typeof b[key] !== 'boolean') throw new TaskError('提醒开关必须是布尔值')
+    out[column] = b[key]
+  }
+  if (isTask && 'checklist' in b) {
+    if (!Array.isArray(b.checklist) || b.checklist.length > 100) throw new TaskError('Checklist 最多支持 100 项')
+    const seen = new Set<string>()
+    out.checklist = JSON.stringify(b.checklist.map(raw => {
+      const item = object(raw), key = text(item.id, '清单项 ID', 100)
+      if (seen.has(key) || typeof item.done !== 'boolean') throw new TaskError('清单项 ID 须唯一，完成状态须为布尔值')
+      seen.add(key)
+      return { id: key, text: text(item.text, '清单项', 500), done: item.done }
+    }))
+  }
   if (!isTask && 'priority' in b) {
     if (!['high','medium','low'].includes(b.priority as string)) throw new TaskError('优先级不合法')
     out.priority = b.priority
@@ -90,9 +125,15 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
   }
   return out
 }
+async function validateSchedule(db: DB, user: number, table: 'goals'|'tasks', entityId: number | undefined, f: Record<string,unknown>) {
+  const prev = entityId === undefined ? {} : (await db.query(`SELECT start_at,due_at FROM ${table} WHERE user_id=$1 AND id=$2`, [user,entityId])).rows[0] ?? {}
+  const start = 'start_at' in f ? f.start_at : prev.start_at, due = 'due_at' in f ? f.due_at : prev.due_at
+  if (start && due && new Date(start as string) > new Date(due as string)) throw new TaskError('截止时间不能早于开始时间')
+}
 export async function saveGoal(db: DB, user: number, raw: unknown, goalId?: number): Promise<Goal> {
   if (goalId !== undefined && !(await db.query('SELECT id FROM goals WHERE user_id=$1 AND id=$2', [user,goalId])).rowCount) throw missing()
   const f = await fields(db,user,raw,false,goalId === undefined)
+  await validateSchedule(db,user,'goals',goalId,f)
   const keys = Object.keys(f), values = Object.values(f)
   const r = goalId === undefined
     ? await db.query(`INSERT INTO goals(user_id,${keys.join(',')}) VALUES($1,${keys.map((_,i) => `$${i+2}`).join(',')}) RETURNING *`, [user,...values])
@@ -103,6 +144,7 @@ export async function saveGoal(db: DB, user: number, raw: unknown, goalId?: numb
 export async function saveTask(db: DB, user: number, raw: unknown, taskId?: number): Promise<Task> {
   if (taskId !== undefined) await getTask(db,user,taskId)
   const f = await fields(db,user,raw,true,taskId === undefined)
+  await validateSchedule(db,user,'tasks',taskId,f)
   const keys = Object.keys(f), values = Object.values(f)
   const done = 'status' in f ? ",done_at=CASE WHEN $" + (keys.indexOf('status')+3) + "='done' THEN COALESCE(done_at,now()) ELSE NULL END" : ''
   const r = taskId === undefined

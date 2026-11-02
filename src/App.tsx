@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task } from "./lib/api";
+import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder } from "./lib/api";
 import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
 import SessionView from "./SessionView";
 import { makeBus } from "./lib/sessionSync";
@@ -57,6 +57,15 @@ async function notifyDesktop(s: Session) {
   } catch {
     /* 通知失败不影响主流程 */
   }
+}
+
+async function notifyReminder(r: Reminder) {
+  try {
+    const n = await import("@tauri-apps/plugin-notification");
+    let ok = await n.isPermissionGranted();
+    if (!ok) ok = (await n.requestPermission()) === "granted";
+    if (ok) n.sendNotification({title:`${r.entityType === "task" ? "任务" : "目标"} · ${r.kind === "start" ? "开始时间到了" : "已到截止时间"}`,body:r.title.slice(0,100)});
+  } catch { /* 应用内仍保留待处理提醒 */ }
 }
 
 async function notifyApproval(a: Approval) {
@@ -136,6 +145,8 @@ export default function App() {
   const [detail,setDetail] = useState<Detail>(null);
   const [tab,setTab] = useState<Tab>("sessions");
   const [goals,setGoals] = useState<Map<number,Goal>>(new Map());
+  const [reminders,setReminders] = useState<Map<number,Reminder>>(new Map());
+  const notifiedReminders = useRef(new Set<number>());
   const [tasks,setTasks] = useState<Map<number,Task>>(new Map());
   const openId = detail?.kind === "session" ? detail.id : null;
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
@@ -192,10 +203,19 @@ export default function App() {
       setAgents([]);
       setGoals(new Map());
       setTasks(new Map());
+      setReminders(new Map());
+      notifiedReminders.current.clear();
       setDetail(null);
       renamedIds.current.clear();
       return;
     }
+    const receiveReminder = (r:Reminder) => {
+      setReminders(m=>new Map(m).set(r.id,r));
+      if (!notifiedReminders.current.has(r.id) && isDesktop && cfgRef.current?.notifyDesktop) {
+        notifiedReminders.current.add(r.id);
+        void notifyReminder(r);
+      }
+    };
     return connect(api.url, api.token, {
       onState: (c) => {
         setConn(c);
@@ -203,7 +223,9 @@ export default function App() {
         if (c === "closed") api.me().catch(() => {});
       },
       onAuthExpired: expire,
-      onSnapshot: (list, ag, aps, gs, ts) => {
+      onSnapshot: (list, ag, aps, gs, ts, rs) => {
+        setReminders(new Map(rs.map(r=>[r.id,r])));
+        rs.forEach(receiveReminder);
         setSessions(new Map(list.map((s) => [s.id, s])));
         setAgents(ag);
         setApprovals(new Map(aps.filter((a) => a.status === "pending").map((a) => [a.id, a])));
@@ -251,6 +273,8 @@ export default function App() {
         if (notify && a.status === "pending" && isDesktop && cfgRef.current?.notifyDesktop) void notifyApproval(a);
       },
       onAgents: setAgents,
+      onReminder: receiveReminder,
+      onReminderAck: id=>setReminders(m=>{const n=new Map(m);n.delete(id);return n;}),
       onGoal: g=>setGoals(m=>mergeEntity(m,g)),
       onGoalRemoved: id=>setGoals(m=>{const n=new Map(m);n.delete(id);return n;}),
       onTask: t=>setTasks(m=>mergeEntity(m,t)),
@@ -317,6 +341,16 @@ export default function App() {
   const saveGoal=(g:Goal)=>setGoals(m=>mergeEntity(m,g,"response"));
   const taskList=[...tasks.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
   const goalList=[...goals.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+
+  const activeReminders = [...reminders.values()].filter(r=>{
+    const entity = r.entityType === "task" ? tasks.get(r.entityId) : goals.get(r.entityId);
+    return entity && entity.status !== "done" && entity.status !== "archived" &&
+      (r.kind === "start" ? entity.remindStart && entity.startAt === r.scheduledAt : entity.remindDue && entity.dueAt === r.scheduledAt);
+  });
+  const dismissReminder = async (id:number) => {
+    try { await api?.ackReminder(id);setReminders(m=>{const n=new Map(m);n.delete(id);return n;}); }
+    catch(e) { say(e instanceof Error ? e.message : String(e)); }
+  };
 
   const focus = async (s: Session) => {
     try {
@@ -405,6 +439,7 @@ export default function App() {
       <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","goals"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span>{{sessions:"会话",tasks:"任务",goals:"目标"}[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}</button>)}</nav>
       {toast && <div className="toast" role="status">{toast}</div>}
       <main>
+        {activeReminders.length > 0 && <section className="reminder-list" aria-label="时间提醒"><h2>时间提醒（{activeReminders.length}）</h2><ul className="list">{activeReminders.map(r=><li key={r.id} className="reminder-row"><button className="entity-row" onClick={()=>r.entityType === "task" ? openTask(r.entityId) : openGoal(r.entityId)}><span className="entity-main"><strong>{r.title}</strong><span>{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span></span></button><button onClick={()=>void dismissReminder(r.id)}>已处理</button></li>)}</ul></section>}
         <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="sessions"}>

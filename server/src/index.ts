@@ -8,7 +8,7 @@ import { registerAdmin } from './admin.ts'
 import { TaskError } from './tasks.ts'
 
 // adminToken：管理页（/admin）用，不设则 /admin* 全部 404
-export type AppConfig = { adminToken?: string; historyTimeoutMs?: number }
+export type AppConfig = { adminToken?: string; historyTimeoutMs?: number; reminderIntervalMs?: number }
 
 // 构造应用（测试里直接用，不 listen）
 export async function buildApp(databaseUrl: string, logLevel = 'info', config: AppConfig = { adminToken: process.env.ADMIN_TOKEN ?? '' }) {

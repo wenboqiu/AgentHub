@@ -2,7 +2,9 @@ import { useEffect, useState } from "react";
 import type { Api, Goal, Session, Task, TaskInput } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
-const formOf=(t:Task)=>({title:t.title,notes:t.notes,status:t.status,goalId:t.goalId,agent:t.agent,machine:t.machine,cwd:t.cwd});
+import ScheduleFields, { scheduleOf } from "./ScheduleFields";
+import Checklist from "./Checklist";
+const formOf=(t:Task)=>({...scheduleOf(t),checklist:t.checklist ?? [],title:t.title,notes:t.notes,status:t.status,goalId:t.goalId,agent:t.agent,machine:t.machine,cwd:t.cwd});
 export default function TaskView({task,goals,sessions,agents,api,onBack,onSession,onSaved,onDeleted}: {task:Task; goals:Goal[]; sessions:Session[]; agents:string[];api:Api;onBack():void;onSession(id:string):void;onSaved(t:Task):void;onDeleted():void}) {
   const [draft,setDraft]=useState(formOf(task)), [dirty,setDirty]=useState(false), [busy,setBusy]=useState(false), [err,setErr]=useState(""), [saved,setSaved]=useState(false), [starting,setStarting]=useState(false), [message,setMessage]=useState(""), [linking,setLinking]=useState(false);
   useEffect(()=>{if(!dirty)setDraft(formOf(task));},[task,dirty]);
@@ -15,6 +17,8 @@ export default function TaskView({task,goals,sessions,agents,api,onBack,onSessio
     <form className="entity-form" onSubmit={e=>{e.preventDefault();void guard(async()=>{onSaved(await api.updateTask(task.id,draft));setDirty(false);setSaved(true);});}}>
       <label>标题<input value={draft.title} maxLength={200} onChange={e=>change({title:e.target.value})} required/></label>
       <label>备注<textarea value={draft.notes} maxLength={4000} onChange={e=>change({notes:e.target.value})}/></label>
+      <ScheduleFields value={draft} onChange={change}/>
+      <Checklist items={draft.checklist} onChange={checklist=>change({checklist})}/>
       <div className="form-grid"><label>状态<select value={draft.status} onChange={e=>change({status:e.target.value as Task["status"]})}>{Object.entries(TASK_LABEL).map(([v,l])=><option key={v} value={v}>{l}</option>)}</select></label>
       <label>所属目标<select value={draft.goalId ?? ""} onChange={e=>change({goalId:e.target.value ? Number(e.target.value) : null})}><option value="">无</option>{goals.map(g=><option key={g.id} value={g.id}>{g.title}</option>)}</select></label>
       <label>执行工具<select value={draft.agent ?? ""} onChange={e=>change({agent:(e.target.value || null) as Task["agent"]})}><option value="">无（普通待办）</option><option value="claude">Claude</option><option value="codex">Codex</option></select></label>

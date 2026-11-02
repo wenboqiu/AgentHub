@@ -42,6 +42,7 @@ import {
   type Session,
 } from './db.ts'
 import { authenticate, type Kick } from './auth.ts'
+import { ackReminder, collectReminders, listReminders } from './reminders.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -55,6 +56,7 @@ type Sock = {
 export type RouteOptions = {
   // 等执行器返回历史记录的最长时间（毫秒），测试里调短
   historyTimeoutMs?: number
+  reminderIntervalMs?: number
 }
 
 type HistoryResult = { messages: ({ role: string; text: string } & MessageMeta)[]; error?: string }
@@ -156,6 +158,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
 
   const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
+  const checkReminders = async (user?: number) => {
+    for (const r of await collectReminders(pool,user)) broadcast(r.userId, {type:'reminder',reminder:r.reminder})
+  }
   const syncTask = async (userId: number, sessionId: string, state: Session['state']) => {
     for (const t of await syncTaskForSession(pool,userId,sessionId,state)) pushTask(userId,t)
   }
@@ -258,6 +263,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // ---------- 目标与任务（所有变更与执行器事件串行） ----------
   app.get('/goals', async req => serial(async () => ({goals:await listGoals(pool,req.userId)})))
   app.get('/tasks', async req => serial(async () => ({tasks:await listTasks(pool,req.userId)})))
+  app.post('/reminders/:id/ack', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await ackReminder(pool,req.userId,id)
+    broadcast(req.userId,{type:'reminder.acked',id})
+    return {ok:true}
+  }))
   app.post('/goals', async req => serial(async () => {
     const goal = await saveGoal(pool,req.userId,req.body)
     broadcast(req.userId,{type:'goal',goal}); return {goal}
@@ -625,6 +636,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     socket.on('error', () => clients.delete(me))
     await serial(async () => {
     if (socket.readyState !== 1) return
+    await checkReminders(userId)
     socket.send(
       JSON.stringify({
         type: 'snapshot',
@@ -633,6 +645,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         approvals: await Promise.all((await pendingApprovals(pool, userId)).map(a => withProject(userId, a))),
         goals: await listGoals(pool,userId),
         tasks: await listTasks(pool,userId),
+        reminders: await listReminders(pool,userId),
       }),
     )
     clients.add(me)
@@ -649,8 +662,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
   }, 30_000)
   ping.unref()
+  const reminderTimer = setInterval(() => {
+    void serial(() => checkReminders()).catch(e => app.log.error(e,'检查时间提醒失败'))
+  }, opts.reminderIntervalMs ?? 15_000)
+  reminderTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
+    clearInterval(reminderTimer)
     for (const c of clients) c.sock.close()
     for (const c of executors.values()) c.sock.close()
   })

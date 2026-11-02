@@ -236,6 +236,21 @@ class AgentHubService : Service() {
       return
     }
     val type = msg.optString("type")
+    if (type == "snapshot") {
+      val reminders = msg.optJSONArray("reminders")
+      if (reminders != null) for (i in 0 until reminders.length()) {
+        reminders.optJSONObject(i)?.let { handleReminder(it) }
+      }
+      return
+    }
+    if (type == "reminder") {
+      msg.optJSONObject("reminder")?.let { handleReminder(it) }
+      return
+    }
+    if (type == "reminder.acked") {
+      getSystemService(NotificationManager::class.java).cancel(("reminder:" + msg.optString("id")).hashCode())
+      return
+    }
     if (type == "approval") {
       handleApproval(msg)
       return
@@ -271,6 +286,27 @@ class AgentHubService : Service() {
       .setContentIntent(openAppIntent())
       .build()
     nm.notify(id.hashCode(), n)
+  }
+
+  private fun handleReminder(r: JSONObject) {
+    val id = r.optString("id")
+    if (id.isEmpty()) return
+    val p = prefs(this)
+    val key = "reminder_seen:" + p.getString("url", "") + ":" + id
+    if (p.getBoolean(key, false)) return
+    val entity = if (r.optString("entityType") == "task") "任务" else "目标"
+    val kind = if (r.optString("kind") == "start") "开始时间到了" else "已到截止时间"
+    val n = NotificationCompat.Builder(this, CH_ALERTS)
+      .setSmallIcon(R.drawable.ic_stat)
+      .setContentTitle("$entity · $kind")
+      .setContentText(r.optString("title").take(100))
+      .setPriority(NotificationCompat.PRIORITY_HIGH)
+      .setCategory(NotificationCompat.CATEGORY_REMINDER)
+      .setAutoCancel(true)
+      .setContentIntent(openAppIntent())
+      .build()
+    getSystemService(NotificationManager::class.java).notify(("reminder:" + id).hashCode(), n)
+    p.edit().putBoolean(key, true).apply()
   }
 
   // 授权请求：新建 pending 时弹通知（点击打开 App 去批）；之后不再 pending（已处理 / 过期）就取消

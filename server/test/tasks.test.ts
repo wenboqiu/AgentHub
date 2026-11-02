@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { buildApp } from '../src/index.ts'
 import { createPool, migrate } from '../src/db.ts'
+import { collectReminders, listReminders } from '../src/reminders.ts'
 import { syncTaskForSession } from '../src/tasks.ts'
 import { DATABASE_URL, makeUser } from './helpers.ts'
 
@@ -33,7 +34,7 @@ describe('目标与任务', () => {
     assert.equal((await call('POST','/events',{events:[{agent:'claude',sessionId:key,machine:'任务测试机',cwd:'D:\\TaskTest',state,at:new Date().toISOString()}]},token)).status,200)
     return `claude:${key}`
   }
-  before(async()=>{app=await buildApp(DATABASE_URL,'silent');base=await app.listen({port:0,host:'127.0.0.1'});a=await makeUser(pool);b=await makeUser(pool);})
+  before(async()=>{app=await buildApp(DATABASE_URL,'silent',{reminderIntervalMs:100});base=await app.listen({port:0,host:'127.0.0.1'});a=await makeUser(pool);b=await makeUser(pool);})
   after(async()=>{for(const ws of peers)ws.close();await app.close();await pool.query('DELETE FROM users WHERE id=ANY($1::bigint[])',[[a.id,b.id]]);await pool.end();})
 
   it('目标与普通任务 CRUD、清洗、完成时间、删除目标保留任务',async()=>{
@@ -174,6 +175,54 @@ describe('目标与任务', () => {
     const r=await app.inject({method:'OPTIONS',url:'/tasks/1',headers:{origin:'http://tauri.localhost','access-control-request-method':'PATCH','access-control-request-headers':'authorization,content-type'}})
     assert.equal(r.statusCode,204);assert.match(String(r.headers['access-control-allow-methods']),/PATCH/)
   })
+  it('任务和目标时间持久化、时区归一化、部分更新与先后校验；checklist 可勾选删除',async()=>{
+    for (const kind of ['tasks','goals']) {
+      const created=await call('POST',`/${kind}`,{title:'有时间的事项',startAt:'2030-01-01T08:00:00+08:00',dueAt:'2030-01-02T08:00:00+08:00',remindStart:false})
+      assert.equal(created.status,200)
+      const entity=created.body[kind==='tasks'?'task':'goal']
+      assert.equal(entity.startAt,'2030-01-01T00:00:00.000Z');assert.equal(entity.remindStart,false);assert.equal(entity.remindDue,true)
+      for(const body of [{startAt:'2031-01-01T00:00:00Z'},{dueAt:'2020-01-01T00:00:00Z'},{startAt:'bad'},{startAt:'2030-01-01T08:00'},{remindDue:'true'}]) {
+        assert.equal((await call('PATCH',`/${kind}/${entity.id}`,body)).status,400)
+      }
+      const updated=(await call('PATCH',`/${kind}/${entity.id}`,{startAt:null,remindDue:false})).body[kind==='tasks'?'task':'goal']
+      assert.equal(updated.startAt,null);assert.equal(updated.dueAt,entity.dueAt);assert.equal(updated.remindDue,false)
+    }
+    const checklist=[{id:'one',text:' 第一步 ',done:false},{id:'two',text:'第二步',done:true}]
+    const t=await newTask({checklist});assert.equal(t.checklist[0].text,'第一步')
+    assert.equal((await get(t.id)).checklist[1].done,true)
+    const updated=(await call('PATCH',`/tasks/${t.id}`,{checklist:[{...checklist[0],done:true}]})).body.task
+    assert.equal(updated.checklist.length,1);assert.equal(updated.checklist[0].done,true);assert.equal(updated.status,'todo')
+    for(const checklist of [null,[{id:'x',text:'',done:false}],[{id:'x',text:'x',done:'yes'}],[{id:'x',text:'x',done:false},{id:'x',text:'y',done:false}],Array(101).fill({id:'x',text:'x',done:false})]) {
+      assert.equal((await call('PATCH',`/tasks/${t.id}`,{checklist})).status,400)
+    }
+    await call('PATCH',`/tasks/${t.id}`,{checklist:[]});assert.deepEqual((await get(t.id)).checklist,[])
+  })
+  it('到点广播、重连补提醒、去重、已处理同步及账号隔离',async()=>{
+    const va=await connect(),vb=await connect('',b.token),at=new Date(Date.now()-1000).toISOString()
+    const t=await newTask({startAt:at,dueAt:at})
+    await wait(()=>va.msgs.find(m=>m.type==='reminder'&&m.reminder.entityId===t.id&&m.reminder.entityType==='task'&&m.reminder.kind==='due'))
+    const entries=va.msgs.filter(m=>m.type==='reminder'&&m.reminder.entityType==='task'&&m.reminder.entityId===t.id)
+    assert.equal(entries.length,2)
+    assert.equal((await collectReminders(pool,a.id)).length,0)
+    assert.equal(vb.msgs.filter(m=>m.type==='reminder').length,0)
+    const reconnected=await connect(),pending=reconnected.msgs.find(m=>m.type==='snapshot').reminders.filter((r:any)=>r.entityType==='task'&&r.entityId===t.id)
+    assert.equal(pending.length,2)
+    assert.equal((await call('POST',`/reminders/${pending[0].id}/ack`,{},b.token)).status,404)
+    assert.equal((await call('POST',`/reminders/${pending[0].id}/ack`,{})).status,200)
+    await wait(()=>va.msgs.find(m=>m.type==='reminder.acked'&&m.id===pending[0].id))
+    assert.equal((await listReminders(pool,a.id)).filter(r=>r.entityType==='task'&&r.entityId===t.id).length,1)
+    await call('PATCH',`/tasks/${t.id}`,{status:'done'})
+    assert.equal((await listReminders(pool,a.id)).filter(r=>r.entityType==='task'&&r.entityId===t.id).length,0)
+    const g=(await call('POST','/goals',{title:'离线目标',dueAt:at})).body.goal
+    const next=await connect()
+    assert.ok(next.msgs.find(m=>m.type==='snapshot').reminders.some((r:any)=>r.entityType==='goal'&&r.entityId===g.id))
+    await call('PATCH',`/goals/${g.id}`,{remindDue:false})
+    assert.ok(!(await listReminders(pool,a.id)).some(r=>r.entityType==='goal'&&r.entityId===g.id))
+    await call('PATCH',`/goals/${g.id}`,{remindDue:true,dueAt:'2030-01-01T00:00:00Z'})
+    assert.ok(!(await listReminders(pool,a.id)).some(r=>r.entityType==='goal'&&r.entityId===g.id))
+    await call('DELETE',`/goals/${g.id}`)
+    assert.equal((await pool.query('SELECT * FROM entity_reminders WHERE goal_id=$1',[g.id])).rowCount,0)
+  })
   it('已有 0.4 表的 schema 增量迁移不丢数据且重复执行幂等',async()=>{
     const schema=`tasks_migration_${randomUUID().replaceAll('-','')}`,db=await pool.connect()
     try {
@@ -184,7 +233,7 @@ describe('目标与任务', () => {
       const url=new URL(DATABASE_URL);url.searchParams.set('options',`-c search_path=${schema}`)
       const old=createPool(url.toString())
       try {
-        await migrate(old);await old.query('DROP TABLE task_sessions,tasks,goals')
+        await migrate(old);await old.query('DROP TABLE entity_reminders,task_sessions,tasks,goals')
         await old.query("INSERT INTO sessions(user_id,id,agent,machine,cwd,project,title,state,summary,state_since,acked,event_at,updated_at) VALUES(1,'claude:keep','claude','pc','','','','done','',now(),true,now(),now())")
         await migrate(old);await migrate(old)
         assert.equal((await old.query('SELECT * FROM sessions')).rows[0].id,'claude:keep')
