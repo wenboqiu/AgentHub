@@ -110,7 +110,9 @@ npm run tauri build        # 产物 src-tauri/target/release/bundle/nsis/AgentHu
 
 新会话的真实 id 要等 CLI 启动后才知道：服务端先建一个临时会话（id 形如 `claude:pending-<runId>`），界面立刻跳过去；执行器拿到真实 id 后上报 `run.session`，服务端把临时会话改名（真实 id 已被 hook / 轮询抢先登记时合并）。拿到真实 id 之前就失败，临时会话标为「已中断」并显示错误，可手动删除。
 
-**在终端打开**（仅桌面端、本机的会话）：Claude 会话在原目录新开一个 Windows Terminal 窗口执行 `claude --resume <id>`（`wt.exe` 失败时回退 `cmd /k`）；如果这个会话已经在终端里开着，就直接切过去。Codex 会话把 Codex Desktop 切到前台（无法直接定位到具体会话）。AgentHub 正在运行这个会话时按钮禁用。这是本机的主动点击，不走目录白名单。
+**在终端打开**（仅桌面端、本机的会话）：Claude 会话在原目录新开一个 Windows Terminal **命名窗口** `AgentHub-<id>` 执行 `claude --resume <id>`（`wt.exe` 失败时回退 `cmd /k`）；如果这个会话已经在终端里开着，就直接切过去。Codex 会话把 Codex Desktop 切到前台（无法直接定位到具体会话）。AgentHub 正在运行这个会话时按钮禁用。这是本机的主动点击，不走目录白名单。
+
+**跳转**（仅桌面端、本机的会话）：把会话所在的终端窗口带到前台。如果这个会话是 AgentHub 用「在终端打开」启动的（本次运行期间），还会用 `wt -w AgentHub-<id> focus-tab` 精确切到对应 tab —— Windows Terminal 的所有 tab 共用一个 HWND，纯 Win32 只能切窗口切不了 tab；用户手动开的 tab 仍只能到窗口级。AgentHub 重启后命名窗口的记忆丢失，退化为只切窗口。
 
 ## 安装 Claude Code hook
 

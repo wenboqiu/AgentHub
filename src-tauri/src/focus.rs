@@ -129,29 +129,45 @@ mod win {
         exe.eq_ignore_ascii_case("ChatGPT.exe") || exe.to_lowercase().contains("codex")
     }
 
-    pub fn focus(pid: Option<u32>, agent: &str) -> Result<(), String> {
-        let procs = snapshot();
-        if let Some(pid) = pid {
-            // 沿父进程链往上找第一个有可见顶层窗口的进程
-            let mut cur = pid;
-            for _ in 0..16 {
-                if let Some(w) = window_of(cur) {
-                    return bring_to_front(w);
-                }
-                // Claude Code 后台会话跑在 `claude daemon run` 下，和终端没有父子关系；
-                // daemon 的 --spawned-by 参数里记着启动它的前台 claude 进程号，从那里接着往上找
-                if procs.get(&cur).is_some_and(|p| p.exe.eq_ignore_ascii_case("claude.exe")) {
-                    if let Some(next) = cmdline(cur).as_deref().and_then(spawned_by_pid) {
-                        if next != cur && procs.contains_key(&next) {
-                            cur = next;
-                            continue;
-                        }
+    /// 沿父进程链往上找会话所在的可见顶层窗口（通常是 WindowsTerminal.exe）
+    fn window_for_session(pid: u32, procs: &HashMap<u32, Proc>) -> Option<HWND> {
+        let mut cur = pid;
+        for _ in 0..16 {
+            if let Some(w) = window_of(cur) {
+                return Some(w);
+            }
+            // Claude Code 后台会话跑在 `claude daemon run` 下，和终端没有父子关系；
+            // daemon 的 --spawned-by 参数里记着启动它的前台 claude 进程号，从那里接着往上找
+            if procs.get(&cur).is_some_and(|p| p.exe.eq_ignore_ascii_case("claude.exe")) {
+                if let Some(next) = cmdline(cur).as_deref().and_then(spawned_by_pid) {
+                    if next != cur && procs.contains_key(&next) {
+                        cur = next;
+                        continue;
                     }
                 }
-                match procs.get(&cur) {
-                    Some(p) if p.ppid != 0 && p.ppid != cur => cur = p.ppid,
-                    _ => break,
+            }
+            match procs.get(&cur) {
+                Some(p) if p.ppid != 0 && p.ppid != cur => cur = p.ppid,
+                _ => break,
+            }
+        }
+        None
+    }
+
+    pub fn focus(pid: Option<u32>, agent: &str, session_key: Option<&str>) -> Result<(), String> {
+        let procs = snapshot();
+        if let Some(pid) = pid {
+            let w = window_for_session(pid, &procs);
+            // AgentHub 自己用命名窗口打开过的会话：`wt -w <name> focus-tab` 能精确切到
+            // 那个 tab（WT 的所有 tab 共用一个 HWND，SetForegroundWindow 只能切窗口切不了 tab）。
+            // 先确认窗口还活着再调用，避免 wt 把不存在的窗口当新建处理，多开一个空窗口。
+            if let (Some(_), Some(key)) = (w, session_key) {
+                if agent == "claude" && crate::terminal::has_named_window(key) {
+                    let _ = crate::terminal::focus_wt_tab(key);
                 }
+            }
+            if let Some(w) = w {
+                return bring_to_front(w);
             }
             return Err("没找到该会话所在的窗口（可能已经关闭）".into());
         }
@@ -194,12 +210,12 @@ pub fn stable_pid(pid: u32) -> u32 {
 }
 
 #[cfg(windows)]
-pub fn focus_session(pid: Option<u32>, agent: &str) -> Result<(), String> {
-    win::focus(pid, agent)
+pub fn focus_session(pid: Option<u32>, agent: &str, session_key: Option<&str>) -> Result<(), String> {
+    win::focus(pid, agent, session_key)
 }
 
 #[cfg(not(windows))]
-pub fn focus_session(_pid: Option<u32>, _agent: &str) -> Result<(), String> {
+pub fn focus_session(_pid: Option<u32>, _agent: &str, _session_key: Option<&str>) -> Result<(), String> {
     Err("窗口跳转目前只支持 Windows".into())
 }
 

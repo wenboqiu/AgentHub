@@ -356,7 +356,10 @@ export default function App() {
 
   const focus = async (s: Session) => {
     try {
-      await desktop.focus(s.pid, s.agent);
+      // claude 会话把 sessionKey 传给后端：AgentHub 用命名窗口打开过的会话，
+      // 跳转时除了把窗口带到前台，还能用 `wt focus-tab` 精确切到那个 tab
+      const sessionKey = s.agent === "claude" ? s.id.slice(s.id.indexOf(":") + 1) : undefined;
+      await desktop.focus(s.pid, s.agent, sessionKey);
       await ack(s.id);
     } catch (e) {
       say(String(e));

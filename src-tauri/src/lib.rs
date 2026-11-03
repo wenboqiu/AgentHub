@@ -111,8 +111,8 @@ mod desktop {
     }
 
     #[tauri::command]
-    fn focus_session(pid: Option<u32>, agent: String) -> Result<(), String> {
-        focus::focus_session(pid, &agent)
+    fn focus_session(pid: Option<u32>, agent: String, session_key: Option<String>) -> Result<(), String> {
+        focus::focus_session(pid, &agent, session_key.as_deref())
     }
 
     #[tauri::command]
