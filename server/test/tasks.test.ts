@@ -233,7 +233,7 @@ describe('目标与任务', () => {
       const url=new URL(DATABASE_URL);url.searchParams.set('options',`-c search_path=${schema}`)
       const old=createPool(url.toString())
       try {
-        await migrate(old);await old.query('DROP TABLE entity_reminders,task_sessions,tasks,goals')
+        await migrate(old);await old.query('DROP TABLE entity_reminders,task_sessions,tasks,goals CASCADE')
         await old.query("INSERT INTO sessions(user_id,id,agent,machine,cwd,project,title,state,summary,state_since,acked,event_at,updated_at) VALUES(1,'claude:keep','claude','pc','','','','done','',now(),true,now(),now())")
         await migrate(old);await migrate(old)
         assert.equal((await old.query('SELECT * FROM sessions')).rows[0].id,'claude:keep')

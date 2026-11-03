@@ -69,11 +69,13 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | DELETE | `/tasks/:id` | `{ok:true}`；关联会话保留 |
 | POST | `/tasks/:id/sessions` | `{sessionId}` → `{task}`，重复挂接幂等 |
 | DELETE | `/tasks/:id/sessions/:sessionId` | `{task}`；会话清理后仍可取消挂接 |
-| POST | `/tasks/:id/start` | `{agent?, machine?, cwd?, text?}` → `{runId, sessionId, task}` |
+| POST | `/tasks/:id/start` | `{agent?, machine?, cwd?, text?}` → `{runId, sessionId, task}`；agent 只能是 claude / codex |
 
 开始任务时，body 优先于任务默认设置；没有 machine 且只有一台在线电脑时自动选用它。text 默认备注或标题（1–8000 字符）。离线预检查返回 409 且任务不变。创建运行、临时会话、首条消息、挂接关系和 doing 状态在事务内完成；提交后发送 `mode:'fresh'`。发送失败返回 409，保留 doing 状态和 aborted 临时会话。执行器仍负责目录白名单和授权。
 
 目标与任务的 POST/PATCH 均支持 `startAt`、`dueAt`（含时区的 ISO 日期时间或 null）及 `remindStart`、`remindDue`（boolean，默认 true）。返回时间归一化为 UTC；截止时间不得早于开始时间，部分更新也按合并后的时间校验。任务另支持 `checklist: [{id,text,done}]`，最多 100 项，id 唯一且最多 100 字符，text 为 1–500 字符，done 为 boolean；PATCH 替换整个清单，默认空数组。
+
+任务的 `agent` 取值为 `claude` / `codex` / `doubao` / `workbuddy`。豆包和 WorkBuddy 只做状态监听：可以记在任务上用于归类，但 `/tasks/:id/start` 会返回 400，需要在客户端里执行完再用 `/tasks/:id/sessions` 关联会话。
 
 服务端每 15 秒生成已到开始/截止时间且未完成、未归档的提醒。同一事项、提醒种类和时间只生成一条记录。`snapshot.reminders` 包含当前有效且未处理的提醒，实时广播为 `{type:'reminder',reminder:{id,entityType:'task'|'goal',entityId,title,kind:'start'|'due',scheduledAt}}`。`POST /reminders/:id/ack` 标记本账号提醒已处理并广播 `{type:'reminder.acked',id}`；跨账号返回 404。编辑时间或关闭提醒会使旧提醒失效，删除事项级联删除提醒。数据库新增时间/开关列、tasks.checklist 和 entity_reminders，启动时幂等迁移。
 

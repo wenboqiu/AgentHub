@@ -1,10 +1,28 @@
 export type State = "idle" | "running" | "waiting" | "done" | "aborted" | "ended" | "unknown";
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean };
 export type ChecklistItem = { id: string; text: string; done: boolean };
-export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string };
+export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string; /** 服务端通知过滤后的结果：false 表示按账号规则静音（照常入列，不弹通知） */ notify?: boolean };
+export type NotifyKind = "done" | "aborted" | "reminder";
+export type NotifySettings = {
+  agents: Record<"claude" | "codex" | "doubao" | "workbuddy", boolean>;
+  minPriority: "high" | "medium" | "low";
+  quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
+};
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
+export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
+/** 验收摘要：任务进入待验收时服务端后台预生成（投机执行），打开详情即见 */
+export type ReviewDigest = { kind: "review"; builtAt: string; sessionId: string | null; sessionTitle: string; agent: string | null; project: string; messages: number; lastReply: string; lastReplyAt: string | null; runs: RunBrief[] };
+/** 失败上下文：run 失败时预收集的错误与最后几条消息 */
+export type FailureDigest = { kind: "failure"; builtAt: string; runId: string; sessionId: string | null; error: string; tail: { role: string; text: string }[] };
+export type TaskDigests = { review: ReviewDigest | null; failure: FailureDigest | null };
+/** Thread 事件：任务视角的统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要） */
+export type ThreadEvent =
+  | { type: "message"; at: string; sessionId: string; role: string; text: string; sourceId?: string }
+  | { type: "run"; at: string; runId: string; status: string; error: string; title: string }
+  | { type: "reminder"; at: string; kind: "start" | "due"; title: string; acked: boolean }
+  | { type: "digest"; at: string; kind: "review" | "failure"; text: string };
 
 export type Session = {
   id: string;
@@ -117,12 +135,16 @@ export class Api {
   updateTask = async (id: number, input: TaskInput) => (await this.call<{task: Task}>("PATCH", `/tasks/${id}`, input)).task;
   deleteTask = (id: number) => this.call("DELETE", `/tasks/${id}`);
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
+  digests = (id: number) => this.call<TaskDigests>("GET", `/tasks/${id}/digest`);
+  thread = (id: number, limit = 200) => this.call<{ events: ThreadEvent[] }>("GET", `/threads/task/${id}?limit=${limit}`);
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
   startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId: string; sessionId: string; task: Task}>("POST", `/tasks/${id}/start`, input);
   /** 手动计时：不依赖会话，直接给任务记一次执行 */
   startTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/start`, {})).task;
   stopTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/stop`, {})).task;
   ackReminder = (id: number) => this.call("POST", `/reminders/${id}/ack`);
+  notifySettings = async () => (await this.call<{ settings: NotifySettings }>("GET", "/notify/settings")).settings;
+  saveNotifySettings = async (patch: Partial<NotifySettings>) => (await this.call<{ settings: NotifySettings }>("PATCH", "/notify/settings", patch)).settings;
   ack = (id: string) => this.call("POST", `/sessions/${encodeURIComponent(id)}/ack`);
   ackAll = () => this.call("POST", "/sessions/ack-all");
 
@@ -162,6 +184,7 @@ export type Handlers = {
   onGoalRemoved(id: number): void;
   onTask(task: Task): void;
   onTaskRemoved(id: number): void;
+  onTaskDigest(taskId: number, kind: "review" | "failure", digest: unknown): void;
   onSession(s: Session, notify: boolean): void;
   onRemoved(id: string): void;
   /** 新开的临时会话拿到真实 id */
@@ -169,6 +192,8 @@ export type Handlers = {
   onRun(r: Run): void;
   onMessage(m: Message): void;
   onApproval(a: Approval, notify: boolean): void;
+  /** Watchdog 升级提醒：stall = 会话长时间无事件疑似卡死；abort-spree = 同一会话反复失败 */
+  onWatchdog(issue: "stall" | "abort-spree", s: Session): void;
   onAgents(agents: string[]): void;
   /** 服务端以 4401 关闭连接：登录已失效，不再自动重连 */
   onAuthExpired(): void;
@@ -204,6 +229,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "goal") h.onGoal(m.goal);
         else if (m.type === "goal.removed") h.onGoalRemoved(m.id);
         else if (m.type === "task") h.onTask(m.task);
+        else if (m.type === "task.digest") h.onTaskDigest(m.taskId, m.kind === "failure" ? "failure" : "review", m.digest);
         else if (m.type === "task.removed") h.onTaskRemoved(m.id);
         else if (m.type === "session") h.onSession(m.session, !!m.notify);
         else if (m.type === "removed") h.onRemoved(m.id);
@@ -211,6 +237,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "run") h.onRun(m.run);
         else if (m.type === "message") h.onMessage(m.message);
         else if (m.type === "approval") h.onApproval(m.approval, !!m.notify);
+        else if (m.type === "watchdog") h.onWatchdog(m.issue === "abort-spree" ? "abort-spree" : "stall", m.session);
         else if (m.type === "agents") h.onAgents(m.agents ?? []);
       } catch {
         /* 忽略坏消息 */

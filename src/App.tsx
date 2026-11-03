@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder } from "./lib/api";
+import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests } from "./lib/api";
 import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
 import SessionView from "./SessionView";
 import { makeBus } from "./lib/sessionSync";
@@ -54,6 +54,25 @@ async function notifyDesktop(s: Session) {
     n.sendNotification({
       title: `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${ALERT_LABEL[s.state] ?? ""}`.trim(),
       body: (s.summary || s.title).slice(0, 80),
+    });
+  } catch {
+    /* 通知失败不影响主流程 */
+  }
+}
+
+/** Watchdog 升级提醒：只提醒不干预 */
+async function notifyWatchdog(issue: "stall" | "abort-spree", s: Session) {
+  try {
+    const n = await import("@tauri-apps/plugin-notification");
+    let ok = await n.isPermissionGranted();
+    if (!ok) ok = (await n.requestPermission()) === "granted";
+    if (!ok) return;
+    n.sendNotification({
+      title: `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${issue === "stall" ? "可能卡住了" : "反复失败"}`,
+      body:
+        issue === "stall"
+          ? `运行中超过 45 分钟没有新事件，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`
+          : `短时间内多次中断，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`,
     });
   } catch {
     /* 通知失败不影响主流程 */
@@ -149,6 +168,8 @@ export default function App() {
   const [reminders,setReminders] = useState<Map<number,Reminder>>(new Map());
   const notifiedReminders = useRef(new Set<number>());
   const [tasks,setTasks] = useState<Map<number,Task>>(new Map());
+  // 投机预摘要：taskId -> {review, failure}，由 WS task.digest 实时更新
+  const [digests,setDigests] = useState<Map<number,TaskDigests>>(new Map());
   const openId = detail?.kind === "session" ? detail.id : null;
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   const [agents, setAgents] = useState<string[]>([]);
@@ -205,6 +226,7 @@ export default function App() {
       setAgents([]);
       setGoals(new Map());
       setTasks(new Map());
+      setDigests(new Map());
       setReminders(new Map());
       notifiedReminders.current.clear();
       setDetail(null);
@@ -213,7 +235,8 @@ export default function App() {
     }
     const receiveReminder = (r:Reminder) => {
       setReminders(m=>new Map(m).set(r.id,r));
-      if (!notifiedReminders.current.has(r.id) && isDesktop && cfgRef.current?.notifyDesktop) {
+      // notify === false：服务端按账号规则（免打扰时段/优先级/agent 静音）静音，只入列不弹通知
+      if (r.notify !== false && !notifiedReminders.current.has(r.id) && isDesktop && cfgRef.current?.notifyDesktop) {
         notifiedReminders.current.add(r.id);
         void notifyReminder(r);
       }
@@ -274,12 +297,16 @@ export default function App() {
         });
         if (notify && a.status === "pending" && isDesktop && cfgRef.current?.notifyDesktop) void notifyApproval(a);
       },
+      onWatchdog: (issue, s) => {
+        if (isDesktop && cfgRef.current?.notifyDesktop) void notifyWatchdog(issue, s);
+      },
       onAgents: setAgents,
       onReminder: receiveReminder,
       onReminderAck: id=>setReminders(m=>{const n=new Map(m);n.delete(id);return n;}),
       onGoal: g=>setGoals(m=>mergeEntity(m,g)),
       onGoalRemoved: id=>setGoals(m=>{const n=new Map(m);n.delete(id);return n;}),
       onTask: t=>setTasks(m=>mergeEntity(m,t)),
+      onTaskDigest: (taskId,kind,digest)=>setDigests(m=>{const cur=m.get(taskId)??{review:null,failure:null};return new Map(m).set(taskId,{...cur,[kind]:digest} as TaskDigests);}),
       onTaskRemoved: id=>setTasks(m=>{const n=new Map(m);n.delete(id);return n;}),
     });
   }, [api, bus, expire]);
@@ -405,7 +432,7 @@ export default function App() {
   if (detail && api) {
     if(detail.kind === "task") {
       const task=tasks.get(detail.id);
-      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
+      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} digest={digests.get(task.id)} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
     }
     if(detail.kind === "goal") {
       const goal=goals.get(detail.id);

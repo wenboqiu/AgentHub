@@ -255,6 +255,26 @@ class AgentHubService : Service() {
       handleApproval(msg)
       return
     }
+    if (type == "watchdog") {
+      val s = msg.optJSONObject("session") ?: return
+      val issue = if (msg.optString("issue") == "abort-spree") "反复失败" else "可能卡住了"
+      val agent = when (s.optString("agent")) { "codex" -> "Codex"; "doubao" -> "豆包"; "workbuddy" -> "WorkBuddy"; else -> "Claude" }
+      val project = s.optString("project").ifEmpty { "会话" }
+      val body = (if (msg.optString("issue") == "abort-spree") "短时间内多次中断" else "运行中超过 45 分钟没有新事件") +
+        "，点开看看要不要处理。" + s.optString("summary").ifEmpty { s.optString("title") }.take(50)
+      val n = NotificationCompat.Builder(this, CH_ALERTS)
+        .setSmallIcon(R.drawable.ic_stat)
+        .setContentTitle("$project · $agent $issue")
+        .setContentText(body)
+        .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+        .setPriority(NotificationCompat.PRIORITY_HIGH)
+        .setCategory(NotificationCompat.CATEGORY_ALARM)
+        .setAutoCancel(true)
+        .setContentIntent(openAppIntent())
+        .build()
+      getSystemService(NotificationManager::class.java).notify(("watchdog:" + s.optString("id")).hashCode(), n)
+      return
+    }
     if (type != "session") return
     val s = msg.optJSONObject("session") ?: return
     val id = s.optString("id")
@@ -291,6 +311,8 @@ class AgentHubService : Service() {
   private fun handleReminder(r: JSONObject) {
     val id = r.optString("id")
     if (id.isEmpty()) return
+    // 服务端通知过滤：notify=false 表示按账号规则静音（照常入列，不弹通知）；旧服务端没有该字段视为提醒
+    if (!r.optBoolean("notify", true)) return
     val p = prefs(this)
     val key = "reminder_seen:" + p.getString("url", "") + ":" + id
     if (p.getBoolean(key, false)) return

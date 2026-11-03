@@ -5,7 +5,7 @@ type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null }
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -42,10 +42,24 @@ export async function migrateTasks(db: DB) {
     id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     goal_id bigint REFERENCES goals(id) ON DELETE SET NULL, title text NOT NULL, notes text NOT NULL DEFAULT '',
     status text NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','review','done')),
-    agent text CHECK (agent IN ('claude','codex')), machine text, cwd text,
+    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy')), machine text, cwd text,
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), done_at timestamptz,
     UNIQUE(user_id,id))`)
   await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low'))`)
+  // 执行工具从 claude/codex 扩到 doubao/workbuddy（后两者只做状态监听）：老库里的列级 CHECK 要换掉
+  await db.query(`DO $$
+  DECLARE def text;
+  BEGIN
+    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
+      WHERE c.conrelid = 'tasks'::regclass AND c.contype = 'c' AND c.conname = 'tasks_agent_check';
+    IF def IS NOT NULL AND def NOT LIKE '%workbuddy%' THEN
+      ALTER TABLE tasks DROP CONSTRAINT tasks_agent_check;
+      def := NULL;
+    END IF;
+    IF def IS NULL THEN
+      ALTER TABLE tasks ADD CONSTRAINT tasks_agent_check CHECK (agent IN ('claude','codex','doubao','workbuddy'));
+    END IF;
+  END $$`)
   for (const table of ['goals','tasks']) {
     await db.query(`ALTER TABLE ${table}
       ADD COLUMN IF NOT EXISTS start_at timestamptz,
@@ -128,7 +142,7 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
       out.goal_id = g
     }
     if ('agent' in b) {
-      if (![null,'','claude','codex'].includes(b.agent as any)) throw new TaskError('请选择 Claude 或 Codex')
+      if (![null,'','claude','codex','doubao','workbuddy'].includes(b.agent as any)) throw new TaskError('请选择有效的执行工具')
       out.agent = b.agent || null
     }
     for (const key of ['machine','cwd']) if (key in b) out[key] = b[key] === null ? null : text(b[key], key === 'cwd' ? '项目目录' : '电脑名', 4000, true) || null

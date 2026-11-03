@@ -49,6 +49,10 @@ import {
 } from './db.ts'
 import { authenticate, type Kick } from './auth.ts'
 import { ackReminder, collectReminders, listReminders } from './reminders.ts'
+import { evaluateNotify, getSettings, saveSettings } from './notify.ts'
+import { buildFailureDigest, buildReviewDigest, getDigests } from './digest.ts'
+import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } from './watchdog.ts'
+import { taskThread } from './threads.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -63,6 +67,11 @@ export type RouteOptions = {
   // 等执行器返回历史记录的最长时间（毫秒），测试里调短
   historyTimeoutMs?: number
   reminderIntervalMs?: number
+  // Watchdog：检查间隔、running 多久没新事件算卡死、失败连击阈值与窗口
+  watchdogIntervalMs?: number
+  stallAfterMs?: number
+  abortSpreeCount?: number
+  abortSpreeWindowMs?: number
 }
 
 type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
@@ -112,6 +121,9 @@ const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 // 返回 kick：删除设备会话 / 账号后，用它立刻关闭对应的 WS（viewer 和执行器）
 export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions = {}): Kick {
   const historyTimeoutMs = opts.historyTimeoutMs ?? 10_000
+  const stallAfterMs = opts.stallAfterMs ?? 45 * 60_000
+  // 反复失败计数（内存态，服务重启清零）
+  const spree = new AbortSpreeTracker(opts.abortSpreeCount ?? 3, opts.abortSpreeWindowMs ?? 2 * 3600_000)
   const clients = new Set<Conn>()
   // (userId, machine) -> 在线执行器连接
   const executors = new Map<string, Exec>()
@@ -164,11 +176,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
 
   const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
+  // 通知过滤管线：提醒广播和快照里的提醒都带 notify（静音的照常入列，只是不弹通知）
   const checkReminders = async (user?: number) => {
-    for (const r of await collectReminders(pool,user)) broadcast(r.userId, {type:'reminder',reminder:r.reminder})
+    for (const r of await collectReminders(pool,user)) {
+      const notify = await evaluateNotify(pool, r.userId, { kind:'reminder', entityType:r.reminder.entityType, entityId:r.reminder.entityId })
+      broadcast(r.userId, {type:'reminder', reminder:{...r.reminder, notify}})
+    }
   }
   const syncTask = async (userId: number, sessionId: string, state: Session['state']) => {
-    for (const t of await syncTaskForSession(pool,userId,sessionId,state)) pushTask(userId,t)
+    const tasks = await syncTaskForSession(pool,userId,sessionId,state)
+    for (const t of tasks) pushTask(userId,t)
+    // 投机执行：任务进入待验收时预生成验收摘要（调用点都在 serial 内，几条查询不阻塞）
+    if (state === 'done') {
+      for (const t of tasks) {
+        const digest = await buildReviewDigest(pool,userId,t.id)
+        if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
+      }
+    }
   }
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string) {
@@ -218,11 +242,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
   }
 
-  // 拿到真实 id 之前 run 就结束了：临时会话标 aborted 并提醒
+  // 拿到真实 id 之前 run 就结束了：临时会话标 aborted 并提醒（走通知过滤管线）
   async function abortPending(userId: number, sessionId: string, error: string) {
     if (!isPendingId(sessionId)) return
     const s = await abortPendingSession(pool, userId, sessionId, error || '启动失败')
-    if (s) pushSession(userId, s, true)
+    if (!s) return
+    const notify = await evaluateNotify(pool, userId, { kind:'session', agent:s.agent, state:'aborted', sessionId:s.id })
+    pushSession(userId, s, notify)
   }
 
   // 鉴权：/health、/auth/login、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）免登录；其它都要设备会话 token
@@ -252,7 +278,19 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     for (const ev of events as EventIn[]) {
       const res = await serial(async () => {
         const r = await applyEvent(pool,req.userId,ev)
-        if (r) { pushSession(req.userId,r.session,r.notify); await syncTask(req.userId,r.session.id,r.session.state) }
+        if (r) {
+          // 通知过滤管线（Fast Path）：底层判定可通知后，再过账号规则；静音的照常入列
+          const notify = r.notify
+            ? await evaluateNotify(pool, req.userId, { kind:'session', agent:r.session.agent, state:r.session.state as 'done'|'aborted'|'waiting', sessionId:r.session.id })
+            : false
+          pushSession(req.userId,r.session,notify)
+          await syncTask(req.userId,r.session.id,r.session.state)
+          // Watchdog：反复失败达到阈值时提醒一次（running 清零计数）
+          if ((ev.state === 'aborted' || ev.state === 'running') && !ev.quiet &&
+              spree.record(req.userId, r.session.id, ev.state)) {
+            broadcast(req.userId, { type:'watchdog', issue:'abort-spree', session:r.session })
+          }
+        }
         return r
       })
       if (!res) continue
@@ -274,6 +312,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await ackReminder(pool,req.userId,id)
     broadcast(req.userId,{type:'reminder.acked',id})
     return {ok:true}
+  }))
+  // 账号级通知规则：agent 静音、免打扰时段、最低优先级（Fast Path）；审批与等待授权不受影响
+  app.get('/notify/settings', async req => ({ settings: await getSettings(pool, req.userId) }))
+  app.patch('/notify/settings', async req => serial(async () => {
+    const settings = await saveSettings(pool, req.userId, req.body)
+    broadcast(req.userId, { type: 'notify.settings', settings })
+    return { settings }
   }))
   app.post('/goals', async req => serial(async () => {
     const goal = await saveGoal(pool,req.userId,req.body)
@@ -312,6 +357,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const task = await linkSession(pool,req.userId,entityId((req.params as {id:string}).id),taskText(object(req.body).sessionId,'会话 ID',200))
     pushTask(req.userId,task); return {task}
   }))
+  // 投机预摘要：验收摘要（进入待验收时后台生成）与失败上下文
+  app.get('/tasks/:id/digest', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    return getDigests(pool,req.userId,id)
+  }))
+  // Thread 视图：任务 = 统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要）
+  app.get('/threads/task/:id', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    const q = req.query as { limit?: string }
+    const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '200', 10) || 200, 1), 200)
+    return { events: await taskThread(pool,req.userId,id,limit) }
+  }))
   // 手动计时：任务不依赖任何会话也能产生执行记录（日历里的基本单位）
   app.post('/tasks/:id/timer/start', async req => serial(async () => {
     const taskId = entityId((req.params as {id:string}).id)
@@ -341,6 +400,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.post('/tasks/:id/start', async req => serial(async () => {
     const task = await getTask(pool,req.userId,entityId((req.params as {id:string}).id)), b = object(req.body ?? {})
     const agent = b.agent ?? task.agent
+    if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex') throw new TaskError('请选择 Claude 或 Codex')
     const cwd = taskText(b.cwd ?? task.cwd ?? '', '项目目录',4000)
     const online = agentList(req.userId)
@@ -580,6 +640,15 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!updated) return
         pushRun(userId, updated)
         if (updated.sessionId && !isPendingId(updated.sessionId) && (status === 'done' || status === 'running')) await syncTask(userId,updated.sessionId,status)
+        // 投机执行：run 失败时预收集错误上下文挂到任务上（关联任务或会话所属任务）
+        if (status === 'failed') {
+          const ids = updated.taskId ? [Number(updated.taskId)]
+            : updated.sessionId ? (await tasksForSession(pool,userId,updated.sessionId)).map(t => t.id) : []
+          for (const id of ids) {
+            const digest = await buildFailureDigest(pool,userId,id,{ id:updated.id, sessionId:updated.sessionId, error:updated.error })
+            if (digest) broadcast(userId,{type:'task.digest',taskId:id,kind:'failure',digest})
+          }
+        }
         if (updated.sessionId && (status === 'failed' || status === 'stopped')) await abortPending(userId, updated.sessionId, str(m.error) || (status === 'stopped' ? '已停止' : '启动失败'))
         if (TERMINAL.includes(status)) {
           for (const a of await expireApprovalsOfRuns(pool, userId, [run.id])) await pushApproval(userId, a, false)
@@ -703,7 +772,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         approvals: await Promise.all((await pendingApprovals(pool, userId)).map(a => withProject(userId, a))),
         goals: await listGoals(pool,userId),
         tasks: await listTasks(pool,userId),
-        reminders: await listReminders(pool,userId),
+        reminders: await Promise.all((await listReminders(pool,userId)).map(async r =>
+          ({ ...r, notify: await evaluateNotify(pool,userId,{ kind:'reminder', entityType:r.entityType, entityId:r.entityId }) }))),
       }),
     )
     clients.add(me)
@@ -724,9 +794,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     void serial(() => checkReminders()).catch(e => app.log.error(e,'检查时间提醒失败'))
   }, opts.reminderIntervalMs ?? 15_000)
   reminderTimer.unref()
+  // Watchdog：独立检测回路，只提醒不干预（执行在 Claude/Codex 手里）
+  const watchdogTimer = setInterval(() => {
+    // 独立回路：不进事件 serial 链（检查只读 + 幂等领取，不与事件处理争抢顺序）
+    void (async () => {
+      for (const row of await stalledSessions(pool, stallAfterMs)) {
+        if (!(await claimStalled(pool, row.userId, row.sessionId, row.eventKey))) continue
+        const s = await getSession(pool, row.userId, row.sessionId)
+        if (s) broadcast(row.userId, { type:'watchdog', issue:'stall', session:s })
+      }
+      await cleanupWatchdog(pool)
+    })().catch(e => app.log.error(e, 'Watchdog 检查失败'))
+  }, opts.watchdogIntervalMs ?? 60_000)
+  watchdogTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
     clearInterval(reminderTimer)
+    clearInterval(watchdogTimer)
     for (const c of clients) c.sock.close()
     for (const c of executors.values()) c.sock.close()
   })

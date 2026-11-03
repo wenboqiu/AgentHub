@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
-import { Api, type Device } from "./lib/api";
+import { Api, type Device, type NotifyKind, type NotifySettings } from "./lib/api";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
 export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
+
+const AGENT_LABELS: { key: keyof NotifySettings["agents"]; label: string }[] = [
+  { key: "claude", label: "Claude" },
+  { key: "codex", label: "Codex" },
+  { key: "doubao", label: "豆包" },
+  { key: "workbuddy", label: "WorkBuddy" },
+];
+const KIND_LABELS: { key: NotifyKind; label: string }[] = [
+  { key: "done", label: "会话完成" },
+  { key: "aborted", label: "失败 / 中断" },
+  { key: "reminder", label: "时间提醒" },
+];
 
 /** 登录时上报的设备名：桌面「<machine>（电脑）」，Android「<机型>（手机）」 */
 export function deviceName(cfg: Config): string {
@@ -44,6 +56,9 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   const [autostart, setAutostart] = useState(false);
   const [bg, setBg] = useState(false);
   const [notif, setNotif] = useState(true);
+  // 账号级通知规则（Fast Path 过滤管线）
+  const [ns, setNs] = useState<NotifySettings | null>(null);
+  const [nsMsg, setNsMsg] = useState("");
 
   // 登录表单
   const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
@@ -84,6 +99,23 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   useEffect(() => {
     if (loggedIn) loadDevices();
   }, [loggedIn, loadDevices]);
+
+  // 通知规则随登录加载；改动即时保存到服务端，对所有设备生效
+  useEffect(() => {
+    if (!api) return;
+    api.notifySettings().then(setNs).catch(() => {});
+  }, [api]);
+  const saveNs = async (next: NotifySettings) => {
+    setNs(next);
+    if (!api) return;
+    try {
+      setNs(await api.saveNotifySettings(next));
+      setNsMsg("已保存");
+      window.setTimeout(() => setNsMsg(""), 2000);
+    } catch (e) {
+      setNsMsg(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   const login = async () => {
     const url = server.trim().replace(/\/+$/, "");
@@ -301,6 +333,83 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             ))}
           </ul>
         </section>
+
+        {loggedIn && (
+          <section className="box">
+            <h2>通知规则（账号级）</h2>
+            <p className="hint">在服务端统一过滤要弹的通知，对所有设备生效；等待授权和审批请求永远提醒，不受规则影响。</p>
+            {!ns ? (
+              <p className="hint">加载中…</p>
+            ) : (
+              <>
+                <h3>按 agent 通知</h3>
+                {AGENT_LABELS.map(({ key, label }) => (
+                  <label className="check" key={key}>
+                    <input
+                      type="checkbox"
+                      checked={ns.agents[key]}
+                      onChange={(e) => saveNs({ ...ns, agents: { ...ns.agents, [key]: e.target.checked } })}
+                    />
+                    {label}
+                  </label>
+                ))}
+                <h3>最低优先级</h3>
+                <label>
+                  会话事件要求关联任务达到的优先级（未关联任务的会话按中优先级处理）
+                  <select value={ns.minPriority} onChange={(e) => saveNs({ ...ns, minPriority: e.target.value as NotifySettings["minPriority"] })}>
+                    <option value="low">不限（全部提醒）</option>
+                    <option value="medium">中及以上</option>
+                    <option value="high">仅高优先级</option>
+                  </select>
+                </label>
+                <h3>免打扰时段</h3>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={ns.quiet.enabled}
+                    onChange={(e) =>
+                      saveNs({
+                        ...ns,
+                        quiet: { ...ns.quiet, enabled: e.target.checked, tzOffsetMinutes: e.target.checked ? -new Date().getTimezoneOffset() : ns.quiet.tzOffsetMinutes },
+                      })
+                    }
+                  />
+                  启用免打扰（静音下面勾选的类型）
+                </label>
+                {ns.quiet.enabled && (
+                  <>
+                    <label>
+                      开始{" "}
+                      <input type="time" value={ns.quiet.start} onChange={(e) => saveNs({ ...ns, quiet: { ...ns.quiet, start: e.target.value } })} />
+                      {" "}结束{" "}
+                      <input type="time" value={ns.quiet.end} onChange={(e) => saveNs({ ...ns, quiet: { ...ns.quiet, end: e.target.value } })} />
+                    </label>
+                    {KIND_LABELS.map(({ key, label }) => (
+                      <label className="check" key={key}>
+                        <input
+                          type="checkbox"
+                          checked={ns.quiet.muteKinds.includes(key)}
+                          onChange={(e) =>
+                            saveNs({
+                              ...ns,
+                              quiet: {
+                                ...ns.quiet,
+                                muteKinds: e.target.checked ? [...ns.quiet.muteKinds, key] : ns.quiet.muteKinds.filter((k) => k !== key),
+                              },
+                            })
+                          }
+                        />
+                        静音：{label}
+                      </label>
+                    ))}
+                    <p className="hint">开始等于结束视为全天静音。免打扰只作用于勾选的类型；失败 / 中断建议保留提醒。</p>
+                  </>
+                )}
+                {nsMsg && <p className="msg">{nsMsg}</p>}
+              </>
+            )}
+          </section>
+        )}
 
         {isDesktop && (
           <label>

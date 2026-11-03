@@ -4,6 +4,7 @@ import type { Goal, Task } from "./lib/api";
 import { PriorityBadge } from "./GoalPriority";
 import { ENTITY_SORTERS, SortBar, type EntitySort } from "./lib/sort";
 import Icon from "./Icon";
+import { AGENT_LABEL } from "./lib/agents";
 export const TASK_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行中", review: "待验收", done: "已完成" };
 export function QuickCreate({ placeholder, create, children }: {placeholder: string; create(title: string): Promise<unknown>; children?: ReactNode}) {
   const [title,setTitle] = useState(""), [error,setError] = useState(""), [busy,setBusy] = useState(false);
@@ -12,7 +13,7 @@ export function QuickCreate({ placeholder, create, children }: {placeholder: str
   </form>;
 }
 export function TaskRows({tasks,goals,onOpen}: {tasks: Task[]; goals: Goal[]; onOpen(id:number): void}) {
-  return <ul className="list">{tasks.map(t=><li key={t.id}><button className="entity-row" onClick={()=>onOpen(t.id)}><span className="entity-main"><span className="entity-title"><strong>{t.title}</strong><PriorityBadge priority={t.priority}/></span><span className="dim">{goals.find(g=>g.id===t.goalId)?.title ?? "无目标"}{t.sessionIds.length > 0 ? ` · ${t.sessionIds.length} 个会话` : ""}{t.agent ? ` · ${t.agent === "claude" ? "Claude" : "Codex"}` : ""}</span><ScheduleSummary value={t}/>{t.checklist?.length > 0 && <span className="dim">Checklist {t.checklist.filter(i=>i.done).length}/{t.checklist.length}</span>}</span>{t.timerStartedAt && <span className="timer-badge">计时中</span>}<span className={`task-status ${t.status}`}>{TASK_LABEL[t.status]}</span></button></li>)}</ul>;
+  return <ul className="list">{tasks.map(t=><li key={t.id}><button className="entity-row" onClick={()=>onOpen(t.id)}><span className="entity-main"><span className="entity-title"><strong>{t.title}</strong><PriorityBadge priority={t.priority}/></span><span className="dim">{goals.find(g=>g.id===t.goalId)?.title ?? "无目标"}{t.sessionIds.length > 0 ? ` · ${t.sessionIds.length} 个会话` : ""}{t.agent ? ` · ${AGENT_LABEL[t.agent] ?? t.agent}` : ""}</span><ScheduleSummary value={t}/>{t.checklist?.length > 0 && <span className="dim">Checklist {t.checklist.filter(i=>i.done).length}/{t.checklist.length}</span>}</span>{t.timerStartedAt && <span className="timer-badge">计时中</span>}<span className={`task-status ${t.status}`}>{TASK_LABEL[t.status]}</span></button></li>)}</ul>;
 }
 export default function TasksPanel({tasks,goals,onOpen,onCreate}: {tasks: Task[]; goals: Goal[]; onOpen(id:number):void; onCreate(title:string):Promise<unknown>}) {
   const [sort,setSort]=useState<EntitySort>("updated");

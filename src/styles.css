@@ -465,3 +465,16 @@ header h1 { white-space: nowrap; }
 .icon-ghost .icon { width: 17px; height: 17px; }
 @media (hover: hover) { .icon-ghost:not(:disabled):hover { color: var(--alert); background: var(--alert-bg); border-color: transparent; } }
 .detail-progress { flex-direction: row; }
+
+/* 任务详情预摘要（投机生成的验收摘要与失败上下文） */
+.digest-card { margin: 10px 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.digest-card.bad { border-color: var(--alert); background: var(--alert-bg); }
+.digest-card p { margin: 0; white-space: pre-wrap; word-break: break-word; }
+
+/* 任务详情 Thread 时间线 */
+.timeline { display: flex; flex-direction: column; gap: 4px; margin: 10px 0; padding: 0; list-style: none; }
+.tl-item { display: flex; gap: 10px; align-items: baseline; padding: 4px 8px; border-radius: 8px; font-size: 13px; }
+.tl-item:nth-child(odd) { background: var(--field); }
+.tl-time { flex-shrink: 0; color: var(--dim); font-variant-numeric: tabular-nums; }
+.tl-body { min-width: 0; word-break: break-word; white-space: pre-wrap; }
+.tl-digest .tl-body, .tl-run .tl-body { color: var(--dim); }
