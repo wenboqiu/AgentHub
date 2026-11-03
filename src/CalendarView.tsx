@@ -94,6 +94,8 @@ type TlRow = {
   sessionIds: string[];
   marker?: CalItem;
   plan?: PlanInfo;
+  /** 没有可画区间时，只标出完成时刻 */
+  doneMark?: number;
   taskId?: number;
   goalId?: number;
   sort: number;
@@ -103,8 +105,9 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   const today = dateKey(new Date());
   const [cursor, setCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [selected, setSelected] = useState(today);
-  const [mode, setMode] = useState<"month" | "timeline">("month");
-  const [scale, setScale] = useState<"week" | "day">("week");
+  // 默认落在"日"粒度的时间轴：打开就是今天这一条时间线，不用先切两次视图
+  const [mode, setMode] = useState<"month" | "timeline">("timeline");
+  const [scale, setScale] = useState<"week" | "day">("day");
   const isDayView = mode === "timeline" && scale === "day";
   const isWeekView = mode === "timeline" && scale === "week";
   const [execs, setExecs] = useState<Execution[]>([]);
@@ -255,19 +258,29 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
 
     for (const t of tasks) {
       const plan = planOf(t.startAt, t.dueAt, t.doneAt, t.status);
-      if (!plan || !inView(plan)) continue;
+      const doneAt = t.doneAt ? Date.parse(t.doneAt) : null;
+      // 在本视图内完成的任务必须留痕：刚勾完就整行消失，会让人以为任务丢了
+      const doneHere = doneAt !== null && doneAt >= start && doneAt < end;
       const key = `task-${t.id}`;
       let row = rows.get(key);
-      // 已完成、没干过活、又不在本周计划里的任务，默认折叠（否则时间轴会被历史任务铺满）
-      if (!row && t.status === "done" && !showDone) continue;
+      // 既没有落在视图内的计划、又不是在本视图完成的（且没有执行记录），时间轴上没有它的位置
+      if (!row && !doneHere && !(plan && inView(plan))) continue;
+      // 完成时间早于本视图的旧任务默认折叠，否则时间轴会被历史任务铺满
+      if (!row && t.status === "done" && !doneHere && !showDone) continue;
       if (!row) {
-        row = { key, kind: "task", label: t.title, runs: [], sessionIds: [], taskId: t.id, sort: plan.start ?? plan.due ?? start };
+        row = { key, kind: "task", label: t.title, runs: [], sessionIds: [], taskId: t.id, sort: start };
         rows.set(key, row);
       }
-      row.plan = plan;
+      if (plan && inView(plan)) {
+        row.plan = plan;
+        row.sort = Math.min(row.sort, plan.start ?? plan.due ?? start);
+      } else if (doneAt !== null && doneHere) {
+        // 计划在视图外（或没填日期）：只在完成时刻画一个标记
+        row.doneMark = doneAt;
+        row.sort = Math.min(row.sort, doneAt);
+      }
       row.label = t.title;
       row.taskId = t.id;
-      row.sort = Math.min(row.sort, plan.start ?? plan.due ?? start);
       for (const sid of t.sessionIds) if (!row.sessionIds.includes(sid)) row.sessionIds.push(sid);
     }
 
@@ -395,7 +408,8 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         <span><i className="lg-plan" aria-hidden="true"/>计划</span>
         <span><i className="lg-act" aria-hidden="true"/>实际执行</span>
         <span><i className="lg-due" aria-hidden="true"/>截止</span>
-        <label className="tl-check"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)}/>显示已完成的旧任务</label>
+        <span><i className="lg-done" aria-hidden="true"/>完成</span>
+        <label className="tl-check" title="计划跨越当前视图、但完成时间更早的任务；在本视图内完成的始终显示"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)}/>显示已完成的旧任务</label>
       </div>
       <div className="tl-rows">
       {timeline.rows.length ? timeline.rows.map(row => {
@@ -446,6 +460,8 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
               <span className={`tl-due${p.overdue ? " overdue" : p.done !== null ? " done" : ""}`} style={{ left: `${pct(p.due)}%` }} aria-hidden="true"/>}
             {p && p.done !== null && p.done >= timeline.start && p.done <= spanEnd &&
               <span className="tl-done-flag" style={{ left: `${pct(p.done)}%` }} aria-hidden="true"/>}
+            {row.doneMark !== undefined && row.doneMark >= timeline.start && row.doneMark <= spanEnd &&
+              <span className="tl-done-mark" style={{ left: `${pct(row.doneMark)}%` }} title={`完成于 ${md(row.doneMark)} ${hm(new Date(row.doneMark).toISOString())}`} aria-hidden="true"/>}
             {row.runs.map(e => {
               const st = statusOf(e, now);
               const { left, width } = clampPos(itemAt(e), endOf(e, now));
