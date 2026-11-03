@@ -13,6 +13,14 @@ const hm = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours(
 /** 本周周一 0 点 */
 const weekStart = (d: Date) => { const s = new Date(d.getFullYear(), d.getMonth(), d.getDate() - (d.getDay() + 6) % 7); return s; };
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
+const WEEKDAY_FULL = ["日", "一", "二", "三", "四", "五", "六"];
+/** 2026 年 11 月 3 日 周二 */
+const dayLabel = (key: string) => {
+  const [y, m, d] = key.split("-").map(Number);
+  return `${y} 年 ${m} 月 ${d} 日 周${WEEKDAY_FULL[new Date(y, m - 1, d).getDay()]}`;
+};
+type DayStat = { total: number; done: number; failed: number; sessions: number };
+const EMPTY_STAT: DayStat = { total: 0, done: 0, failed: 0, sessions: 0 };
 
 /** 日历条目：API 的执行记录，或由会话合成的"会话活动"（sessionState 有值） */
 type CalItem = Execution & { sessionState?: Session["state"] };
@@ -97,6 +105,8 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   const [selected, setSelected] = useState(today);
   const [mode, setMode] = useState<"month" | "timeline">("month");
   const [scale, setScale] = useState<"week" | "day">("week");
+  const isDayView = mode === "timeline" && scale === "day";
+  const isWeekView = mode === "timeline" && scale === "week";
   const [execs, setExecs] = useState<Execution[]>([]);
   const [activity, setActivity] = useState<ActivityBucket[]>([]);
   const [showDone, setShowDone] = useState(false);
@@ -107,27 +117,40 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
 
   useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), 30000); return () => window.clearInterval(t); }, []);
 
-  // 拉取当前月（含跨月仍在执行的记录）；执行事件推送时重新拉取
+  /**
+   * 拉取区间：月历看整月；时间轴按视图窗口（日 / 周）取，且与当月取并集——
+   * 日视图往前翻到上月最后一天时，数据不能因为"当月"而缺失。
+   */
+  const range = useMemo(() => {
+    const mFrom = new Date(cursor.y, cursor.m, 1).getTime();
+    const mTo = new Date(cursor.y, cursor.m + 1, 1).getTime();
+    if (mode !== "timeline") return { from: mFrom, to: mTo };
+    const [y, m, d] = selected.split("-").map(Number);
+    const base = new Date(y, m - 1, d);
+    const start = scale === "day" ? base.getTime() : weekStart(base).getTime();
+    const end = start + (scale === "day" ? DAY : 7 * DAY);
+    return { from: Math.min(mFrom, start), to: Math.max(mTo, end) };
+  }, [cursor, mode, scale, selected]);
+
+  // 拉取区间内的执行记录（含跨区间边界仍在执行的记录）；执行事件推送时重新拉取
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    const from = new Date(cursor.y, cursor.m, 1), to = new Date(cursor.y, cursor.m + 1, 0, 23, 59, 59, 999);
-    api.executions(from.toISOString(), to.toISOString())
+    api.executions(new Date(range.from).toISOString(), new Date(range.to - 1).toISOString())
       .then(r => { if (alive) { setExecs(r.executions); setErr(""); } })
       .catch(e => { if (alive) setErr(e instanceof Error ? e.message : String(e)); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [api, cursor, runSignal]);
+  }, [api, range, runSignal]);
 
   // 会话真实活动分布：消息时间戳按 5 分钟聚合（老服务端没有这个接口时退化为空，画刻度点）
   useEffect(() => {
     let alive = true;
-    const from = new Date(cursor.y, cursor.m, 1), to = new Date(cursor.y, cursor.m + 1, 0, 23, 59, 59, 999);
-    api.activity(from.toISOString(), to.toISOString())
+    api.activity(new Date(range.from).toISOString(), new Date(range.to - 1).toISOString())
       .then(r => { if (alive) setActivity(r.activity); })
       .catch(() => { if (alive) setActivity([]); });
     return () => { alive = false; };
-  }, [api, cursor, runSignal]);
+  }, [api, range, runSignal]);
 
   // 把活动桶合并成片段：间隔 ≤ MERGE_GAP 视为同一次连续工作
   const segments = useMemo(() => {
@@ -143,15 +166,14 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
     return map;
   }, [activity]);
 
-  // 当月有活动的会话（最后活动时间落在当月）——终端里直接开的会话没有 run 记录，也要出现在日历
-  const monthStart = new Date(cursor.y, cursor.m, 1).getTime(), monthEnd = new Date(cursor.y, cursor.m + 1, 1).getTime();
+  // 拉取区间内有活动的会话（最后活动时间落在区间内）——终端里直接开的会话没有 run 记录，也要出现在日历
   const sessionItems = useMemo(() => sessions
     .map(sessionItem)
-    .filter(e => { const t = itemAt(e); return t >= monthStart && t < monthEnd; }), [sessions, monthStart, monthEnd]);
+    .filter(e => { const t = itemAt(e); return t >= range.from && t < range.to; }), [sessions, range]);
 
   // 每天汇总：执行按开始日期归属，会话按最后活动归属
   const byDay = useMemo(() => {
-    const map = new Map<string, { total: number; done: number; failed: number; sessions: number }>();
+    const map = new Map<string, DayStat>();
     const bump = (key: string) => map.get(key) ?? map.set(key, { total: 0, done: 0, failed: 0, sessions: 0 }).get(key)!;
     for (const e of execs) {
       const c = bump(dateKey(new Date(e.createdAt)));
@@ -163,8 +185,22 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
     return map;
   }, [execs, sessionItems]);
 
-  const monthTotal = [...byDay.values()].reduce((a, c) => ({ total: a.total + c.total, done: a.done + c.done, failed: a.failed + c.failed, sessions: a.sessions + c.sessions }), { total: 0, done: 0, failed: 0, sessions: 0 });
-  const maxCount = Math.max(1, ...[...byDay.values()].map(c => c.total + c.sessions));
+  // 统计只算当月（拉取区间可能比当月大），日历热度也按当月峰值归一化
+  const monthPrefix = `${cursor.y}-${pad(cursor.m + 1)}`;
+  const monthDays = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  const monthStat = useMemo(() => {
+    const acc = { ...EMPTY_STAT };
+    for (let d = 1; d <= monthDays; d++) {
+      const c = byDay.get(`${monthPrefix}-${pad(d)}`);
+      if (!c) continue;
+      acc.total += c.total; acc.done += c.done; acc.failed += c.failed; acc.sessions += c.sessions;
+    }
+    return acc;
+  }, [byDay, monthPrefix, monthDays]);
+  const maxCount = Math.max(1, ...Array.from({ length: monthDays }, (_, i) => {
+    const c = byDay.get(`${monthPrefix}-${pad(i + 1)}`);
+    return c ? c.total + c.sessions : 0;
+  }));
 
   // 月历网格：周一开头
   const cells = useMemo(() => {
@@ -281,6 +317,19 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
     const t = dateKey(new Date());
     setSelected(t.startsWith(`${next.getFullYear()}-${pad(next.getMonth()+1)}`) ? t : `${next.getFullYear()}-${pad(next.getMonth()+1)}-01`);
   };
+  /** 按天平移选中日（跨月时同步 cursor，否则新的一天没有数据） */
+  const shiftDay = (delta: number) => {
+    const [y, m, d] = selected.split("-").map(Number);
+    const next = new Date(y, m - 1, d + delta);
+    setSelected(dateKey(next));
+    if (next.getFullYear() !== cursor.y || next.getMonth() !== cursor.m) setCursor({ y: next.getFullYear(), m: next.getMonth() });
+  };
+  /** 上一页 / 下一页：月历翻月，周视图翻周，日视图翻日 */
+  const shiftPeriod = (delta: number) => {
+    if (isDayView) shiftDay(delta);
+    else if (isWeekView) shiftDay(delta * 7);
+    else shiftMonth(delta);
+  };
   const timeRange = (e: CalItem) => {
     if (e.sessionState) return `最后活动 ${hm(e.createdAt)}`;
     const s = hm(e.createdAt);
@@ -295,8 +344,24 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   const planRange = (p: PlanInfo) => `${p.start !== null ? md(p.start) : "未定起"} – ${p.end !== null ? md(p.end) : "未定止"}`;
   const TASK_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行中", review: "待验收", done: "已完成" };
 
+  // 视图名称与标题：月历按月、周视图按周、日视图按日
+  const [selY, selM, selD] = selected.split("-").map(Number);
+  const selDate = new Date(selY, selM - 1, selD);
+  const weekFrom = weekStart(selDate), weekTo = new Date(weekFrom.getTime() + 6 * DAY);
+  const navTitle = isDayView
+    ? `${selected === today ? "今天 · " : ""}${dayLabel(selected)}`
+    : isWeekView
+      ? `${weekFrom.getFullYear()} 年 ${weekFrom.getMonth() + 1} 月 ${weekFrom.getDate()} 日 – ${weekTo.getMonth() + 1} 月 ${weekTo.getDate()} 日`
+      : `${cursor.y} 年 ${cursor.m + 1} 月`;
+  const navPrev = isDayView ? "前一日" : isWeekView ? "上一周" : "上个月";
+  const navNext = isDayView ? "后一日" : isWeekView ? "下一周" : "下个月";
+  const weekStat = Array.from({ length: 7 }, (_, i) => byDay.get(dateKey(new Date(weekFrom.getTime() + i * DAY))) ?? EMPTY_STAT)
+    .reduce((a, c) => ({ total: a.total + c.total, done: a.done + c.done, failed: a.failed + c.failed, sessions: a.sessions + c.sessions }), { ...EMPTY_STAT });
+  const scoped = isDayView ? (byDay.get(selected) ?? EMPTY_STAT) : isWeekView ? weekStat : monthStat;
+  const scopedLabel = isDayView ? `${selM} 月 ${selD} 日` : isWeekView ? `${md(weekFrom.getTime())} – ${md(weekTo.getTime())}` : `${cursor.y} 年 ${cursor.m + 1} 月`;
+
   return <div className="calendar-panel">
-    <div className="page-heading"><div><p className="eyebrow">按日期组织的工作执行看板</p><h2>日历</h2><p>{loading ? "加载中…" : `${cursor.y} 年 ${cursor.m + 1} 月：执行 ${monthTotal.total} · 会话 ${monthTotal.sessions} · 完成 ${monthTotal.done} · 失败 ${monthTotal.failed}`}</p></div>
+    <div className="page-heading"><div><p className="eyebrow">按日期组织的工作执行看板</p><h2>日历</h2><p>{loading ? "加载中…" : `${scopedLabel}：执行 ${scoped.total} · 会话 ${scoped.sessions} · 完成 ${scoped.done} · 失败 ${scoped.failed}`}</p></div>
       <div className="action-bar">
         {mode === "timeline" && <div className="seg" role="group" aria-label="时间轴粒度"><button className={scale === "week" ? "active" : ""} onClick={() => setScale("week")}>周</button><button className={scale === "day" ? "active" : ""} onClick={() => setScale("day")}>日</button></div>}
         <div className="seg"><button className={mode === "month" ? "active" : ""} onClick={() => setMode("month")}>月历</button><button className={mode === "timeline" ? "active" : ""} onClick={() => setMode("timeline")}>时间轴</button></div>
@@ -304,9 +369,9 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
     </div>
     {err && <p className="form-error" role="alert">{err}</p>}
     <div className="calendar-nav">
-      <button onClick={() => shiftMonth(-1)} aria-label="上个月">←</button>
-      <strong>{cursor.y} 年 {cursor.m + 1} 月</strong>
-      <button onClick={() => shiftMonth(1)} aria-label="下个月">→</button>
+      <button onClick={() => shiftPeriod(-1)} aria-label={navPrev} title={navPrev}>←</button>
+      <strong>{navTitle}</strong>
+      <button onClick={() => shiftPeriod(1)} aria-label={navNext} title={navNext}>→</button>
     </div>
     {mode === "month" ? <section className="cal-grid-wrap">
       <div className="cal-weekdays">{WEEKDAYS.map(w => <span key={w}>{w}</span>)}</div>
@@ -332,6 +397,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         <span><i className="lg-due" aria-hidden="true"/>截止</span>
         <label className="tl-check"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)}/>显示已完成的旧任务</label>
       </div>
+      <div className="tl-rows">
       {timeline.rows.length ? timeline.rows.map(row => {
         // 目标：跨度带，不占任务行
         if (row.kind === "goal" && row.plan) {
@@ -393,15 +459,19 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
             })}
             {!row.runs.length && !segs.length && row.marker && (() => {
               const { left } = clampPos(itemAt(row.marker), itemAt(row.marker));
-              return <button className="tl-block act stopped" style={{ left: `${left}%`, width: "0.8%" }} title={`最后活动 ${hm(row.marker.createdAt)} · 无活动明细`} onClick={() => sessionId && onOpenSession(sessionId)} />;
+              // 标记点代表"最后活动"这个时刻，右边缘贴住该时刻（向左延展），否则看起来像是发生在之后
+              return <button className="tl-block act stopped point" style={{ left: `${left}%`, width: "0.8%" }} title={`最后活动 ${hm(row.marker.createdAt)} · 无活动明细`} onClick={() => sessionId && onOpenSession(sessionId)} />;
             })()}
           </div>
         </div>;
       }) : <p className="empty">{scale === "day" ? "这一天" : "本周"}没有计划、执行或会话记录</p>}
-      {scale === "day" && selected === today && timeline.start <= now && now < spanEnd && (() => {
-        const f = Math.min(1, Math.max(0, (now - timeline.start) / timeline.span));
-        return <div className="tl-now" style={{ left: `calc(var(--tl-label-w) + 8px + (100% - var(--tl-label-w) - 8px) * ${f.toFixed(4)})` }} aria-hidden="true" title="当前时间"/>;
-      })()}
+      {/* 当前时间竖线：放在行容器里，用和轨道完全相同的栅格（标签列 + 8px 间隔）定位，避免像素级偏移 */}
+      {scale === "day" && selected === today && now >= timeline.start && now < spanEnd &&
+        <div className="tl-now-layer" aria-hidden="true">
+          <span className="tl-now-gutter" />
+          <span className="tl-now-rail"><span className="tl-now" style={{ left: `${pct(now)}%` }} /></span>
+        </div>}
+      </div>
     </section>}
     {mode === "timeline" && unscheduled.length > 0 && <section className="tl-unsched">
       <button className="tl-unsched-head" onClick={() => setShowUnsched(v => !v)} aria-expanded={showUnsched}>

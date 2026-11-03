@@ -305,13 +305,20 @@ header h1 { white-space: nowrap; }
 .tl-axis { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); margin-left: calc(var(--tl-label-w) + 8px); border-bottom: 1px solid var(--line); }
 .tl-axis.hours { grid-template-columns: repeat(8, 1fr); }
 .tl-axis span { font-size: 11px; color: var(--dim); text-align: center; padding: 2px 0 6px; border-left: 1px dashed var(--line); }
+/* 日视图：刻度线是 3 小时的起点，标签必须贴着刻度线左对齐，否则读位置会整体偏 1.5 小时 */
+.tl-axis.hours span { text-align: left; padding-left: 6px; }
 .tl-axis span.today { color: var(--accent); font-weight: 650; }
 .tl-row { display: flex; align-items: center; gap: 8px; min-height: 46px; border-bottom: 1px dashed var(--line); }
 .tl-row:last-child { border-bottom: none; }
 .tl-label { width: var(--tl-label-w); flex-shrink: 0; font-size: 12px; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-track { position: relative; flex: 1; height: 34px; min-width: 280px; background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% / 7 - 1px), var(--line) calc(100% / 7 - 1px), var(--line) calc(100% / 7)); border-radius: 6px; }
 .tl-track.hours { background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% / 8 - 1px), var(--line) calc(100% / 8 - 1px), var(--line) calc(100% / 8)); }
-.tl-now { position: absolute; top: 60px; bottom: 8px; width: 2px; margin-left: -1px; background: var(--accent); opacity: .6; pointer-events: none; }
+/* 行容器：当前时间线叠在行上面，栅格与 .tl-row 一致（标签列 + 8px 间隔 + 轨道） */
+.tl-rows { position: relative; }
+.tl-now-layer { position: absolute; inset: 0; display: flex; gap: 8px; pointer-events: none; }
+.tl-now-gutter { width: var(--tl-label-w); flex-shrink: 0; }
+.tl-now-rail { position: relative; flex: 1; min-width: 280px; }
+.tl-now { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--accent); opacity: .6; }
 .tl-block { position: absolute; top: 17px; height: 15px; min-height: 0; min-width: 8px; padding: 0; border: none; border-radius: 4px; background: var(--accent); cursor: pointer; }
 .tl-block.done { background: color-mix(in srgb, var(--ok) 75%, transparent); }
 .tl-block.failed { background: var(--alert); }
@@ -319,6 +326,8 @@ header h1 { white-space: nowrap; }
 .tl-block.waiting { background: var(--priority-medium); }
 .tl-block.queued { background: var(--dim); }
 .tl-block.running { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+/* 点状标记（会话最后活动）：右边缘对齐时刻 */
+.tl-block.point { transform: translateX(-100%); }
 /* 会话活动片段：没有精确起止，颜色淡一档以区别于 run 的真实执行区间 */
 .tl-block.act { background: color-mix(in srgb, var(--accent) 42%, transparent); }
 .tl-block.act.stopped { background: color-mix(in srgb, var(--dim) 55%, transparent); }
