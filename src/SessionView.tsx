@@ -57,7 +57,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [run, setRun] = useState<Run | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
+  /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
+  const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState("");
@@ -69,6 +70,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [gaveUp, setGaveUp] = useState(false);
   const [linkingTask,setLinkingTask] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
+  const stick = useRef(true);
   const id = session?.id ?? "";
 
   const syncRef = useRef<ReturnType<typeof syncSession> | null>(null);
@@ -79,6 +82,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     setRun(null);
     setLoading(true);
     setErr("");
+    stick.current = true; // 切换会话后重新跟随底部
     const sync = syncSession(api, id, bus, (data) => {
       setMessages(data.messages);
       setRun(data.run);
@@ -123,10 +127,32 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     setSpawnOpen(false);
     setBranchMessage(null);
     setSpawnText("");
+    setLinkingTask(false);
   }, [sessionId]);
 
+  // Esc 关闭浮层面板（分支/新建会话、关联任务）
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end" });
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setSpawnOpen(false);
+      setBranchMessage(null);
+      setLinkingTask(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // 跟随滚动：只有本来就停在底部附近时才自动滚到最新消息
+  useEffect(() => {
+    const onScroll = () => {
+      const doc = document.documentElement;
+      stick.current = window.innerHeight + window.scrollY >= doc.scrollHeight - 160;
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  useEffect(() => {
+    if (stick.current) endRef.current?.scrollIntoView({ block: "end" });
   }, [messages.length, approvals.length]);
 
   if (!session) {
@@ -144,22 +170,25 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const terminalRun = !!run && messages.some(m=>m.runId===run.id && m.role==="system" && m.text.startsWith("已连接原终端"));
   const reason = sendBlockReason({ session, agents, running: active });
 
-  const guard = async (fn: () => Promise<unknown>) => {
-    setBusy(true);
+  const guard = (key: "send" | "stop" | "spawn" | "terminal" | "link", fn: () => Promise<unknown>) => {
+    setPending(key);
     setErr("");
-    try {
-      await fn();
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
+    void (async () => {
+      try {
+        await fn();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setPending("");
+      }
+    })();
   };
 
   const send = () => {
     const t = text.trim();
-    if (!t || reason) return;
-    void guard(async () => {
+    if (!t || reason || pending === "send") return;
+    stick.current = true; // 发送后跳到最新消息
+    guard("send", async () => {
       await api.send(id, t);
       setText("");
       await reload();
@@ -168,7 +197,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const startSpawn = () => {
     const t = spawnText.trim();
     if (!t) return;
-    void guard(async () => {
+    guard("spawn", async () => {
       const selected=branchMessage ? messages.find(m=>m.sourceId===branchMessage.sourceId && m.branchPoint===branchMessage.branchPoint) : null;
       if(branchMessage && !selected)throw new Error("回复记录发生变化，请重新选择分支位置");
       const r = await api.spawn(id, branchMessage ? "fork" : "fresh", t, selected?.id);
@@ -182,17 +211,24 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const pendingSession = isPendingSession(id);
   const canOpenInTerminal = isDesktop && session.machine === localMachine && !pendingSession && !isListenOnly(session.agent);
   const openInTerminal = () =>
-    void guard(async () => {
+    guard("terminal", async () => {
       const msg = await desktop.openInTerminal(session.agent, sessionKey, session.cwd);
       setNote(msg);
       window.setTimeout(() => setNote(""), 3500);
     });
-  const stop = () => run && void guard(() => api.stop(run.id));
-  const loadHistory = () =>
-    void guard(async () => {
-      await api.history(id);
-      await reload();
-    });
+  const stop = () => run && guard("stop", () => api.stop(run.id));
+  // 手动同步电脑上的记录；失败要提示（自动同步失败才静默保留旧记录）
+  const loadHistory = () => {
+    if (syncing || !online || isListenOnly(session.agent)) return;
+    let gone = false;
+    setSyncing(true);
+    setErr("");
+    api
+      .history(id)
+      .then(() => { if (!gone) return syncRef.current?.reload(); })
+      .catch((e) => { if (!gone) setErr(e instanceof Error ? e.message : String(e)); })
+      .finally(() => { if (!gone) setSyncing(false); });
+  };
   const decide = async (a: Approval, d: "allow" | "deny") => {
     setDeciding(a.id);
     setErr("");
@@ -213,55 +249,66 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
         <span className="machine">
-          {session.machine} · {STATE_LABEL[session.state] ?? session.state}
+          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
+          {!pendingSession && !isListenOnly(session.agent) && (
+            <button
+              className={`icon-button${syncing ? " spin" : ""}`}
+              aria-label="刷新电脑上的记录"
+              title={syncing ? "正在同步电脑上的记录…" : online ? "刷新电脑上的记录" : "电脑端不在线"}
+              disabled={!online || syncing}
+              onClick={loadHistory}
+            >
+              <Icon name="refresh" />
+            </button>
+          )}
         </span>
       </header>
       {session.title && <div className="title wrap">{session.title}</div>}
-      {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => void guard(() => desktop.focus(null, session.agent))}>打开 {agentName(session.agent)} 客户端</button></div>}
-      <div className="task-links">{tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}<button onClick={()=>setLinkingTask(!linkingTask)}>关联到任务</button></div>
-      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={busy} onClick={()=>void guard(async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}>{t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/></div>}
-      {!pendingSession && !isListenOnly(session.agent) && (
-        <div className="btns">
-          <button onClick={() => {setBranchMessage(null);setSpawnText("");setSpawnOpen((o) => !o);}} disabled={busy || !agents.includes(session.machine)} title={agents.includes(session.machine) ? "" : "电脑端不在线"}>
-            同目录新建会话
-          </button>
-          {canOpenInTerminal && (
-            <button onClick={openInTerminal} disabled={busy || active} title={active ? "AgentHub 正在运行这个会话，结束后再打开" : ""}>
-              {session.agent === "codex" ? "打开 Codex Desktop" : "在终端打开"}
+      {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => { setErr(""); desktop.focus(null, session.agent).catch((e) => setErr(e instanceof Error ? e.message : String(e))); }}>打开 {agentName(session.agent)} 客户端</button></div>}
+      {/* 会话级操作合并为一行：任务关联、新建会话、终端打开 */}
+      <div className="task-links">
+        {tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}
+        <button onClick={()=>setLinkingTask(!linkingTask)} aria-expanded={linkingTask}>关联到任务</button>
+        {!pendingSession && !isListenOnly(session.agent) && (
+          <>
+            <button onClick={() => {setBranchMessage(null);setSpawnText("");setSpawnOpen((o) => !o);}} disabled={!agents.includes(session.machine)} title={agents.includes(session.machine) ? "" : "电脑端不在线"}>
+              同目录新建会话
             </button>
-          )}
-        </div>
-      )}
+            {canOpenInTerminal && (
+              <button onClick={openInTerminal} disabled={pending === "terminal" || active} title={active ? "AgentHub 正在运行这个会话，结束后再打开" : ""}>
+                {session.agent === "codex" ? "打开 Codex Desktop" : "在终端打开"}
+              </button>
+            )}
+          </>
+        )}
+      </div>
       {canOpenInTerminal && active && <p className="hint">AgentHub 正在运行这个会话，结束后再打开</p>}
+      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={pending==="link"} onClick={()=>guard("link",async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}>{t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/><div className="btns"><button onClick={()=>setLinkingTask(false)}>取消</button></div></div>}
       {spawnOpen && !pendingSession && (
         <div className="spawn-panel">
           <h2>{branchMessage ? "从此处分支到新聊天" : "同目录新建会话"}</h2>
           {branchMessage ? <><p className="hint">保留到所选回复为止的上下文，之后的消息不会带入。新聊天继续使用同一项目目录。</p><blockquote className="branch-preview">{branchMessage.text.slice(0,240)}{branchMessage.text.length>240?"…":""}</blockquote></> : <p className="hint">使用当前项目目录，对话从零开始。</p>}
-          <textarea aria-label="新会话的第一条消息" value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={busy} />
+          <textarea aria-label="新会话的第一条消息" value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={pending==="spawn"} />
           <div className="btns">
-            <button onClick={() => {setSpawnOpen(false);setBranchMessage(null);}} disabled={busy}>
+            <button onClick={() => {setSpawnOpen(false);setBranchMessage(null);}}>
               取消
             </button>
-            <button className="primary" onClick={startSpawn} disabled={busy || !spawnText.trim() || (branchMessage!==null && (active || session.state==="running"))}>
+            <button className="primary" onClick={startSpawn} disabled={pending==="spawn" || !spawnText.trim() || (branchMessage!==null && (active || session.state==="running"))}>
               {branchMessage ? "创建分支并发送" : "开始"}
             </button>
           </div>
         </div>
       )}
       <main className="chat">
-        <div className="btns">
-          <button onClick={loadHistory} disabled={isListenOnly(session.agent) || busy || syncing || !agents.includes(session.machine)}>
-            {syncing ? "正在同步电脑上的记录…" : "刷新电脑上的记录"}
-          </button>
-        </div>
+        {syncing && <p className="hint" role="status">正在同步电脑上的记录…</p>}
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `正在监听 ${agentName(session.agent)} 会话状态，暂不提供完整对话记录。请在 ${agentName(session.agent)} 中查看和继续对话。` : "还没有消息。可以发一条，或者刷新电脑上的记录。"}</p>}
+        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `正在监听 ${agentName(session.agent)} 会话状态，暂不提供完整对话记录。请在 ${agentName(session.agent)} 中查看和继续对话。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>
               <div className={`msg ${m.role}`}>{m.text}</div>
               {m.role==="assistant" && <MessageActions message={m} api={api}
-                branchReason={busy || active || session.state==="running" ? "请等待会话运行结束" : !agents.includes(session.machine) ? "电脑端不在线" : !m.branchPoint ? "请刷新记录，或等待完整回复结束后再分支" : ""}
+                branchReason={active || session.state==="running" ? "请等待会话运行结束" : !agents.includes(session.machine) ? "电脑端不在线" : !m.branchPoint ? "请刷新记录，或等待完整回复结束后再分支" : ""}
                 onRated={updated=>setMessages(items=>items.map(item=>item.id===updated.id ? updated : item))}
                 onBranch={()=>{setBranchMessage(m);setSpawnText("");setSpawnOpen(true);window.scrollTo({top:0,behavior:"auto"});}}/>}
             </li>
@@ -275,10 +322,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
             <pre>{a.detail}</pre>
             <div className="btns">
               <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
-                允许
+                {deciding === a.id ? "处理中…" : "允许"}
               </button>
               <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
-                拒绝
+                {deciding === a.id ? "处理中…" : "拒绝"}
               </button>
             </div>
           </div>
@@ -286,7 +333,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
         <div ref={endRef} />
       </main>
-      {(err || note || speech.error) && <div className="toast" role="status">{err || note || speech.error}</div>}
+      {(err || note || speech.error) && (
+        <div className="toast" role="status">
+          <span className="toast-text">{err || note || speech.error}</span>
+          <button className="toast-close" aria-label="关闭提示" onClick={() => { setErr(""); setNote(""); }}><Icon name="close" /></button>
+        </div>
+      )}
       {!spawnOpen && <footer className="composer">
         {reason && <p className="hint">{reason}</p>}
         <textarea
@@ -294,7 +346,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder={reason ?? "发消息给这个会话…（Ctrl+Enter 发送）"}
-          disabled={!!reason || busy}
+          disabled={!!reason}
           rows={2}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
@@ -302,12 +354,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         />
         <div className="btns">
           {active ? (
-            <button onClick={stop} disabled={busy}>
-              {terminalRun ? "停止跟踪" : "停止"}
+            <button onClick={stop} disabled={pending === "stop"}>
+              {pending === "stop" ? "停止中…" : terminalRun ? "停止跟踪" : "停止"}
             </button>
           ) : null}
-          <button className="primary" onClick={send} disabled={!!reason || busy || !text.trim()}>
-            发送
+          <button className="primary" onClick={send} disabled={!!reason || pending === "send" || !text.trim()}>
+            {pending === "send" ? "发送中…" : "发送"}
           </button>
         </div>
       </footer>}

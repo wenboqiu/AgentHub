@@ -25,13 +25,15 @@ export default function MessageActions({message,api,branchReason,onBranch,onRate
     finally{setSaving(false);}
   };
   const feedbackReason=!message.sourceId ? "请刷新记录以获取回复标识" : "";
+  /** 不可用的按钮不直接禁用：点击后把原因显示出来，否则用户只知道"灰了"不知道为什么 */
+  const blockedClick=(why:string,fn:()=>void)=>()=>{ if(why) setNotice(why); else fn(); };
   return <div className="reply-tools">
     <div className="reply-buttons" role="group" aria-label="回复操作">
       <button type="button" title="复制回复" aria-label="复制回复" onClick={()=>void copy()}><Icon name="copy"/></button>
-      <button type="button" title={feedbackReason||"评价：有帮助"} aria-label="评价：有帮助" aria-pressed={message.rating==="up"} disabled={saving||!!feedbackReason} onClick={()=>void rate("up")}><Icon name="up"/></button>
-      <button type="button" title={feedbackReason||"评价：没帮助"} aria-label="评价：没帮助" aria-pressed={message.rating==="down"} disabled={saving||!!feedbackReason} onClick={()=>void rate("down")}><Icon name="down"/></button>
+      <button type="button" title={feedbackReason||"评价：有帮助"} aria-label="评价：有帮助" aria-pressed={message.rating==="up"} aria-disabled={!!feedbackReason||saving||undefined} disabled={saving} onClick={blockedClick(feedbackReason,()=>void rate("up"))}><Icon name="up"/></button>
+      <button type="button" title={feedbackReason||"评价：没帮助"} aria-label="评价：没帮助" aria-pressed={message.rating==="down"} aria-disabled={!!feedbackReason||saving||undefined} disabled={saving} onClick={blockedClick(feedbackReason,()=>void rate("down"))}><Icon name="down"/></button>
       <button type="button" title={canSpeak() ? speaking?"停止朗读":"朗读回复" : "当前设备不支持朗读"} aria-label={speaking?"停止朗读":"朗读回复"} aria-pressed={speaking} disabled={!canSpeak()} onClick={()=>speaking?stopSpeech():startSpeech(key,message.text)}><Icon name={speaking?"stop":"speak"}/></button>
-      <button type="button" title={branchReason||"从此处分支到新聊天"} aria-label="从此处分支到新聊天" disabled={!!branchReason} onClick={onBranch}><Icon name="branch"/><span>分支</span></button>
+      <button type="button" title={branchReason||"从此处分支到新聊天"} aria-label="从此处分支到新聊天" aria-disabled={!!branchReason||undefined} onClick={blockedClick(branchReason,onBranch)}><Icon name="branch"/></button>
     </div>
     <span className="reply-notice" role="status">{notice}</span>
   </div>;
