@@ -36,7 +36,8 @@ button.primary { background: var(--accent); border-color: transparent; color: va
 button.link { background: transparent; border-color: transparent; color: var(--accent); padding: 8px 12px; }
 button.danger { color: var(--alert); background: var(--alert-bg); border-color: transparent; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-input:not([type="checkbox"]):not([type="radio"]), select, textarea { min-height: 46px; min-width: 0; padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); color: var(--fg); width: 100%; }
+/* 常规表单控件；详情页的就地编辑字段（.title-field/.notes-field/.inline-control/.checklist-text）自行定义外观 */
+input:not([type="checkbox"]):not([type="radio"]):not(.title-field):not(.inline-control):not(.checklist-text), select:not(.inline-control), textarea:not(.notes-field) { min-height: 46px; min-width: 0; padding: 11px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); color: var(--fg); width: 100%; }
 input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
 textarea { resize: vertical; line-height: 1.6; }
 textarea:disabled { opacity: .6; }
@@ -399,3 +400,40 @@ header h1 { white-space: nowrap; }
 @media (forced-colors: active) {
   .entity-read, .read-checklist { border: 1px solid CanvasText; }
 }
+/* 详情页：就地编辑（Linear / Todoist 式）。字段本身就是控件，改完即保存 */
+.detail-head { display: flex; align-items: flex-start; gap: 12px; }
+.complete-toggle { flex-shrink: 0; width: 34px; height: 34px; min-height: 34px; padding: 0; margin-top: 5px; border: 2px solid var(--line); border-radius: 50%; background: transparent; color: transparent; display: inline-flex; align-items: center; justify-content: center; }
+.complete-toggle .icon { width: 18px; height: 18px; }
+.complete-toggle.done { background: var(--ok); border-color: var(--ok); color: #fff; }
+@media (hover: hover) { .complete-toggle:not(:disabled):hover { border-color: var(--ok); color: var(--ok); } }
+.title-field { flex: 1; width: 100%; min-height: 44px; padding: 4px 10px; margin: -4px -10px; border: 1px solid transparent; border-radius: 10px; background: transparent; font-size: clamp(20px,2.4vw,26px); font-weight: 650; letter-spacing: -.4px; }
+.title-field:hover { background: var(--field); }
+.title-field:focus { background: var(--card); border-color: var(--accent); }
+.notes-field { width: 100%; min-height: 64px; padding: 12px 14px; border: 1px solid transparent; border-radius: 14px; background: transparent; font-size: 14px; line-height: 1.7; }
+.notes-field:hover { background: var(--field); }
+.notes-field:focus { background: var(--card); border-color: var(--accent); }
+.detail-props { display: flex; flex-wrap: wrap; gap: 14px 28px; padding-top: 16px; border-top: 1px solid var(--line); }
+.prop { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.prop-label { font-size: 12px; color: var(--dim); }
+.prop-value { font-size: 14px; }
+.prop .check { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dim); }
+.prop .goal-priority-select { width: auto; min-height: 38px; }
+.inline-control { width: auto; max-width: 100%; min-height: 38px; padding: 7px 10px; border-color: transparent; background: transparent; }
+.inline-control:hover { background: var(--field); border-color: var(--line); }
+.inline-control:focus { background: var(--card); border-color: var(--accent); }
+.inline-control.overdue { color: var(--alert); font-weight: 600; }
+.save-flash { font-size: 12px; font-weight: 600; color: var(--ok); }
+.detail-section h3 { margin: 26px 4px 10px; font-size: 13px; font-weight: 600; color: var(--dim); }
+.exec-settings { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 16px; }
+.exec-settings > summary { padding: 4px; margin: -4px; }
+.exec-settings[open] > summary { margin-bottom: 12px; }
+.cwd-field { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; font-size: 13px; font-weight: 550; }
+.danger-zone { display: flex; align-items: center; gap: 14px; margin-top: 34px; padding-top: 20px; border-top: 1px solid var(--line); }
+.read-checklist li { display: flex; align-items: center; gap: 8px; }
+.read-checklist li.done .checklist-text { color: var(--dim); text-decoration: line-through; }
+.checklist-text { flex: 1; min-width: 0; min-height: 36px; padding: 5px 8px; border-color: transparent; background: transparent; font-size: 14px; }
+.checklist-text:hover { background: var(--field); }
+.icon-ghost { flex-shrink: 0; width: 34px; min-height: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-color: transparent; background: transparent; color: var(--dim); }
+.icon-ghost .icon { width: 17px; height: 17px; }
+@media (hover: hover) { .icon-ghost:not(:disabled):hover { color: var(--alert); background: var(--alert-bg); border-color: transparent; } }
+.detail-progress { flex-direction: row; }
