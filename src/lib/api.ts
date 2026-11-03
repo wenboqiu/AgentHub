@@ -3,8 +3,8 @@ export type Schedule = { startAt: string | null; dueAt: string | null; remindSta
 export type ChecklistItem = { id: string; text: string; done: boolean };
 export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
-export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
 
 export type Session = {
   id: string;

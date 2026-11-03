@@ -5,7 +5,7 @@ type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null }
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -29,7 +29,7 @@ export function id(raw: unknown): number {
 const iso = (v: Date) => v.toISOString()
 const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
 const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority, doneAt: r.done_at ? iso(r.done_at) : null })
-const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null })
+const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null })
 
 export async function migrateTasks(db: DB) {
   await db.query(`CREATE TABLE IF NOT EXISTS goals (
@@ -45,6 +45,7 @@ export async function migrateTasks(db: DB) {
     agent text CHECK (agent IN ('claude','codex')), machine text, cwd text,
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), done_at timestamptz,
     UNIQUE(user_id,id))`)
+  await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low'))`)
   for (const table of ['goals','tasks']) {
     await db.query(`ALTER TABLE ${table}
       ADD COLUMN IF NOT EXISTS start_at timestamptz,
@@ -111,7 +112,7 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
       return { id: key, text: text(item.text, '清单项', 500), done: item.done }
     }))
   }
-  if (!isTask && 'priority' in b) {
+  if ('priority' in b) {
     if (!['high','medium','low'].includes(b.priority as string)) throw new TaskError('优先级不合法')
     out.priority = b.priority
   }
