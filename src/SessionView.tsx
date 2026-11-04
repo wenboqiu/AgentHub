@@ -70,7 +70,6 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [spawnText, setSpawnText] = useState("");
   const [gaveUp, setGaveUp] = useState(false);
   const [linkingTask,setLinkingTask] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
   /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
   const stick = useRef(true);
   const id = session?.id ?? "";
@@ -152,9 +151,16 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+  // 内容指纹：条数 + 总字数。回复是流式长出来的（同一条消息变长、条数不变），
+  // 只盯条数会在回复变长时漏掉跟随，末尾就会滑到输入框后面。
+  const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0);
   useEffect(() => {
-    if (stick.current) endRef.current?.scrollIntoView({ block: "end" });
-  }, [messages.length, approvals.length]);
+    // 不能用 endRef.scrollIntoView({block:"end"})：输入框是 sticky 悬浮在视口底部的，
+    // 那样只会把"末尾"对齐到视口底，最后一条消息 / 授权卡片正好被输入框盖住
+    // （页面还会差着输入框那一截没滚到底）。滚到文档真正的最底部，
+    // 输入框就会回到它在文档流里的位置，末尾内容自然露在它上方。
+    if (stick.current) window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
+  }, [flowKey, approvals.length]);
 
   if (!session) {
     return (
@@ -334,7 +340,6 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           </div>
         ))}
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
-        <div ref={endRef} />
       </main>
       {(err || note || speech.error) && (
         <div className="toast" role="status">
