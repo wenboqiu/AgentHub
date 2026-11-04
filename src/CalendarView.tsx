@@ -10,6 +10,13 @@ const BUCKET = 5 * 60_000;
 const MERGE_GAP = 10 * 60_000;
 const dateKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const hm = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+/** 毫秒时长转人话：不足 1 分钟 / X 分钟 / X 小时 Y 分 */
+const durLabel = (ms: number) => {
+  const m = Math.round(ms / 60000);
+  if (m < 1) return "不足 1 分钟";
+  if (m < 60) return `${m} 分钟`;
+  return `${Math.floor(m / 60)} 小时${m % 60 ? ` ${m % 60} 分` : ""}`;
+};
 /** 本周周一 0 点 */
 const weekStart = (d: Date) => { const s = new Date(d.getFullYear(), d.getMonth(), d.getDate() - (d.getDay() + 6) % 7); return s; };
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
@@ -178,6 +185,18 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   const sessionItems = useMemo(() => sessions
     .map(sessionItem)
     .filter(e => { const t = itemAt(e); return t >= range.from && t < range.to; }), [sessions, range]);
+
+  // 每个会话在选中日的累计活动时长：片段与当日求交集后求和
+  const dayActiveMs = useMemo(() => {
+    const [y, m, d] = selected.split("-").map(Number);
+    const dayStart = new Date(y, m - 1, d).getTime(), dayEnd = dayStart + DAY;
+    const map = new Map<string, number>();
+    for (const [sid, list] of segments) {
+      const ms = list.reduce((a, sg) => a + Math.max(0, Math.min(dayEnd, sg.end) - Math.max(dayStart, sg.start)), 0);
+      if (ms > 0) map.set(sid, ms);
+    }
+    return map;
+  }, [segments, selected]);
 
   // 每天汇总：执行按开始日期归属，会话按最后活动归属
   const byDay = useMemo(() => {
@@ -506,7 +525,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
             {segs.map(sg => {
               const { left, width } = clampPos(sg.start, Math.min(sg.end, viewEnd));
               return <button key={sg.start} className={`tl-block act${markerState?.cls === "running" ? " running" : ""}`} style={{ left: `${left}%`, width: `${width}%` }}
-                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, viewEnd)).toISOString())} · ${sg.count} 条消息`}
+                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, viewEnd)).toISOString())} · 持续 ${durLabel(Math.min(sg.end, viewEnd) - sg.start)} · ${sg.count} 条消息`}
                 onClick={() => sessionId && onOpenSession(sessionId)} />;
             })}
             {!row.runs.length && !segs.length && row.marker && itemAt(row.marker) >= viewStart && itemAt(row.marker) <= viewEnd && (() => {
@@ -548,7 +567,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         return <li key={e.id}><button className="entity-row" onClick={() => open(e)}>
           <span className="entity-main">
             <strong>{execTitle(e)}</strong>
-            <span className="dim">{timeRange(e)} · {execMeta(e)}{!e.sessionState && st.detail && st.cls !== "failed" ? ` · ${st.detail}` : ""}</span>
+            <span className="dim">{timeRange(e)}{e.sessionState && e.sessionId && dayActiveMs.has(e.sessionId) ? ` · 活动 ${durLabel(dayActiveMs.get(e.sessionId)!)}` : ""} · {execMeta(e)}{!e.sessionState && st.detail && st.cls !== "failed" ? ` · ${st.detail}` : ""}</span>
             {st.detail && st.cls === "failed" && <span className="dim exec-error">{st.detail}</span>}
           </span>
           <span className={`exec-status ${st.cls}`}>{st.label}</span>

@@ -135,6 +135,21 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(user_id, session_id, id)')
   await pool.query('CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(user_id, created_at)')
+  // 会话活动计数：按 5 分钟桶累计消息数。独立于 messages 存活——消息表每个会话只保留
+  // 最近 KEEP_MESSAGES 条，还会被快照整体替换，直接从消息表算活动时长会越算越短。
+  await pool.query(`CREATE TABLE IF NOT EXISTS session_activity (
+    user_id bigint not null references users(id) on delete cascade,
+    session_id text not null,
+    bucket timestamptz not null,
+    count integer not null default 0,
+    primary key (user_id, session_id, bucket)
+  )`)
+  await pool.query('CREATE INDEX IF NOT EXISTS idx_session_activity_time ON session_activity(user_id, bucket)')
+  // 一次性回填：消息表里现存的消息先入账（已入账的桶不重复累计；早已被裁剪掉的历史无法找回）
+  await pool.query(`INSERT INTO session_activity (user_id, session_id, bucket, count)
+    SELECT user_id, session_id, to_timestamp(floor(extract(epoch FROM created_at) / 300) * 300), count(*)::int
+    FROM messages GROUP BY 1, 2, 3
+    ON CONFLICT DO NOTHING`)
   await pool.query(`CREATE TABLE IF NOT EXISTS approvals (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -276,6 +291,7 @@ export async function ackAll(pool: pg.Pool, userId: number): Promise<Session[]> 
 export async function removeSession(pool: pg.Pool, userId: number, id: string): Promise<boolean> {
   const r = await pool.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])
   await pool.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, id])
+  await pool.query('DELETE FROM session_activity WHERE user_id = $1 AND session_id = $2', [userId, id])
   await pool.query('DELETE FROM message_feedback WHERE user_id = $1 AND session_id = $2', [userId, id])
   await pool.query('DELETE FROM approvals WHERE user_id = $1 AND session_id = $2', [userId, id])
   await pool.query('DELETE FROM runs WHERE user_id = $1 AND session_id = $2', [userId, id])
@@ -330,6 +346,11 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
     for (const t of ['runs', 'messages', 'approvals']) {
       await client.query(`UPDATE ${t} SET session_id = $3 WHERE user_id = $1 AND session_id = $2`, [userId, from, to])
     }
+    // 活动计数按桶合并过去（同桶相加），临时行的计数不丢
+    await client.query(`INSERT INTO session_activity(user_id, session_id, bucket, count)
+      SELECT user_id, $3, bucket, count FROM session_activity WHERE user_id = $1 AND session_id = $2
+      ON CONFLICT (user_id, session_id, bucket) DO UPDATE SET count = session_activity.count + excluded.count`, [userId, from, to])
+    await client.query('DELETE FROM session_activity WHERE user_id = $1 AND session_id = $2', [userId, from])
     await client.query(`INSERT INTO message_feedback(user_id,session_id,source_id,rating)
       SELECT user_id,$3,source_id,rating FROM message_feedback WHERE user_id=$1 AND session_id=$2 ON CONFLICT DO NOTHING`,[userId,from,to])
     await client.query('DELETE FROM message_feedback WHERE user_id=$1 AND session_id=$2',[userId,from])
@@ -348,6 +369,9 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
 
 export async function purgeOld(pool: pg.Pool): Promise<number> {
   // 会话和明细保留 30 天（日历执行日志要能翻回去看）；runs 保留 90 天供月度概览
+  // 活动计数跟着会话走：先删掉将过期会话的计数，再顺手清掉会话已不存在的孤儿计数
+  await pool.query("DELETE FROM session_activity WHERE (user_id, session_id) IN (SELECT user_id, id FROM sessions WHERE updated_at < now() - interval '30 days')")
+  await pool.query('DELETE FROM session_activity AS s WHERE NOT EXISTS (SELECT 1 FROM sessions se WHERE se.user_id = s.user_id AND se.id = s.session_id)')
   const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '30 days'")
   await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '90 days'")
   await pool.query("DELETE FROM approvals WHERE created_at < now() - interval '7 days'")
@@ -512,19 +536,18 @@ export async function listExecutions(pool: pg.Pool, userId: number, from: Date, 
   }))
 }
 
-// 会话的真实活动分布：按 5 分钟时间桶统计消息数（只返回有消息的桶）
+// 会话的真实活动分布：按 5 分钟时间桶返回消息数（只返回有消息的桶）。
+// 数据来自 session_activity 计数表：随消息插入累计、随快照重算，不受消息裁剪影响。
 // 会话表只有单个 event_at，画不出真实工作时长；消息时间戳才能反映"干干停停"的节奏
 export type ActivityBucket = { sessionId: string; at: string; count: number }
 export async function listActivity(pool: pg.Pool, userId: number, from: Date, to: Date): Promise<ActivityBucket[]> {
-  const r = await pool.query<{ session_id: string; bucket: Date; n: number }>(
-    `SELECT session_id, to_timestamp(floor(extract(epoch FROM created_at) / 300) * 300) AS bucket, count(*)::int AS n
-     FROM messages
-     WHERE user_id = $1 AND created_at >= $2 AND created_at < $3
-     GROUP BY session_id, bucket
+  const r = await pool.query<{ session_id: string; bucket: Date; count: number }>(
+    `SELECT session_id, bucket, count FROM session_activity
+     WHERE user_id = $1 AND bucket >= $2 AND bucket < $3
      ORDER BY bucket`,
     [userId, from, to],
   )
-  return r.rows.map(row => ({ sessionId: row.session_id, at: row.bucket.toISOString(), count: row.n }))
+  return r.rows.map(row => ({ sessionId: row.session_id, at: row.bucket.toISOString(), count: row.count }))
 }
 
 // 排序按 created_at、id；每个会话只留最近 KEEP_MESSAGES 条
@@ -548,6 +571,10 @@ export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number
     nativeKey(meta.sourceId),
     nativeKey(meta.branchPoint),
   ])
+  await pool.query(`INSERT INTO session_activity (user_id, session_id, bucket, count)
+    VALUES ($1,$2,to_timestamp(floor(extract(epoch FROM $3::timestamptz) / 300) * 300),1)
+    ON CONFLICT (user_id, session_id, bucket) DO UPDATE SET count = session_activity.count + 1`,
+    [userId, sessionId, r.rows[0].created_at])
   await trimMessages(pool, userId, sessionId)
   return toMessage(r.rows[0])
 }
@@ -626,6 +653,11 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
         [userId, sessionId, snapshot[i].role, snapshot[i].text, new Date(times[i]), snapshot[i].sourceId, snapshot[i].branchPoint],
       )
     }
+    // 活动计数按当前消息重算：历史是整体替换的，按增量累计会重复入账
+    await client.query('DELETE FROM session_activity WHERE user_id = $1 AND session_id = $2', [userId, sessionId])
+    await client.query(`INSERT INTO session_activity (user_id, session_id, bucket, count)
+      SELECT user_id, session_id, to_timestamp(floor(extract(epoch FROM created_at) / 300) * 300), count(*)::int
+      FROM messages WHERE user_id = $1 AND session_id = $2 GROUP BY 1, 2, 3`, [userId, sessionId])
     await client.query('COMMIT')
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {})
