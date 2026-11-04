@@ -207,7 +207,8 @@ export class Api {
     this.call<{ runId: string; sessionId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/spawn`, { mode, text, ...(messageId === undefined ? {} : {messageId}) });
   rateMessage = async (sessionId:string,messageId:number,rating:"up"|"down"|null) =>
     (await this.call<{message:Message}>("PATCH",`/sessions/${encodeURIComponent(sessionId)}/messages/${messageId}/feedback`,{rating})).message;
-  send = (sessionId: string, text: string) => this.call<{ runId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/messages`, { text });
+  send = (sessionId: string, text: string, images?: string[]) =>
+    this.call<{ runId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/messages`, { text, ...(images?.length ? { images } : {}) });
   stop = (runId: string) => this.call("POST", `/runs/${encodeURIComponent(runId)}/stop`, {});
   /** 日历：一段时间内的执行记录（ISO 时间） */
   executions = (from: string, to: string) => this.call<{ executions: Execution[] }>("GET", `/runs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);

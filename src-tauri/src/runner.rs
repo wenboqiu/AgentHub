@@ -319,8 +319,99 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeMsg> {
     out
 }
 
-pub fn claude_user_line(text: &str) -> String {
-    json!({"type":"user","message":{"role":"user","content":text}}).to_string()
+/// 用户附图统一走 data URL（`data:image/png;base64,...`），拆成 (media_type, base64)
+pub fn split_data_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    let media = meta.strip_suffix(";base64")?;
+    if !matches!(media, "image/png" | "image/jpeg" | "image/webp" | "image/gif") || data.is_empty() {
+        return None;
+    }
+    Some((media, data))
+}
+
+/// Claude 的 stream-json 用户消息：纯文字走字符串 content，带图时改成 content block 数组
+pub fn claude_user_line(text: &str, images: &[String]) -> String {
+    let parts: Vec<Value> = images
+        .iter()
+        .filter_map(|u| split_data_url(u))
+        .map(|(media, data)| json!({"type":"image","source":{"type":"base64","media_type":media,"data":data}}))
+        .collect();
+    if parts.is_empty() {
+        return json!({"type":"user","message":{"role":"user","content":text}}).to_string();
+    }
+    let mut content = Vec::with_capacity(parts.len() + 1);
+    if !text.is_empty() {
+        content.push(json!({"type":"text","text":text}));
+    }
+    content.extend(parts);
+    json!({"type":"user","message":{"role":"user","content":content}}).to_string()
+}
+
+/// data URL 落成本地临时文件，返回 Codex 能吃的 localImage 输入项 + 待清理的路径。
+/// Codex 的 image 输入有两种：`url`（远程）和 `localImage`（本地路径），后者对本地文件最稳。
+pub fn codex_image_inputs(images: &[String], dir: &Path, tag: &str) -> (Vec<Value>, Vec<PathBuf>) {
+    let mut items = Vec::new();
+    let mut files = Vec::new();
+    for (i, url) in images.iter().enumerate() {
+        let Some((media, data)) = split_data_url(url) else { continue };
+        let ext = match media {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            "image/gif" => "gif",
+            _ => "jpg",
+        };
+        let Some(bytes) = base64_decode(data) else { continue };
+        let _ = std::fs::create_dir_all(dir);
+        let path = dir.join(format!("{tag}-{i}.{ext}"));
+        if std::fs::write(&path, bytes).is_err() {
+            continue;
+        }
+        items.push(json!({"type":"localImage","path":path.to_string_lossy()}));
+        files.push(path);
+    }
+    (items, files)
+}
+
+/// 临时附图文件：运行结束（含各种提前 return）时自动删除
+struct TempFiles(Vec<PathBuf>);
+
+impl Drop for TempFiles {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// 标准 base64 解码（只认 padding 结尾的常规字母表，够 data URL 用）
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut lut = [255u8; 256];
+    for (i, c) in TABLE.iter().enumerate() {
+        lut[*c as usize] = i as u8;
+    }
+    let body = s.trim_end_matches('=');
+    let pad = s.len() - body.len();
+    if pad > 2 || s.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(body.len() * 3 / 4);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for c in body.bytes() {
+        let v = lut[c as usize];
+        if v == 255 {
+            return None;
+        }
+        acc = (acc << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    Some(out)
 }
 
 pub fn claude_control_response(request_id: &str, allow: bool, input: &Value) -> String {
@@ -932,7 +1023,7 @@ fn report(run: &Run, f: Finish) {
     }
 }
 
-fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, branch_point: &str) {
+fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str) {
     let mut cmd = Command::new("claude");
     cmd.args(claude_branch_args(mode, key, branch_point))
     .current_dir(cwd)
@@ -946,7 +1037,7 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, branch_po
     let mut stdin = child.stdin.take();
     let tail = spawn_readers(&mut child, &run.tx);
     run.status("running", "");
-    if !write_line(&mut stdin, &claude_user_line(text)) {
+    if !write_line(&mut stdin, &claude_user_line(text, images)) {
         kill_tree(&mut child);
         return run.fail("写入消息失败");
     }
@@ -1104,7 +1195,13 @@ fn reap(child: &mut Child, wait: Duration) {
     kill_tree(child);
 }
 
-fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str, branch_point: &str) {
+fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str) {
+    // 附图先落到临时文件（Codex 用 localImage 输入读本地路径），函数退出时统一清理
+    let (image_items, image_files) = codex_image_inputs(images, &std::env::temp_dir().join("agenthub-images"), &run.run_id);
+    let _image_cleanup = TempFiles(image_files);
+    let mut input = Vec::with_capacity(image_items.len() + 1);
+    input.push(json!({"type":"text","text":text,"text_elements":[]}));
+    input.extend(image_items);
     let mut cmd = Command::new(exe);
     cmd.arg("app-server").current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match no_window(&mut cmd).spawn() {
@@ -1167,7 +1264,7 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                                     &rpc_request(
                                         ID_TURN,
                                         "turn/start",
-                                        json!({"threadId":thread_id,"input":[{"type":"text","text":text,"text_elements":[]}],"approvalPolicy":"on-request"}),
+                                        json!({"threadId":thread_id,"input":input.clone(),"approvalPolicy":"on-request"}),
                                     ),
                                 );
                             }
@@ -1312,7 +1409,14 @@ impl Runner {
     pub fn handle(&self, msg: &Value) {
         let s = |k: &str| msg.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         match msg.get("type").and_then(|t| t.as_str()) {
-            Some("run.start") => self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), s("mode"), s("branchPoint")),
+            Some("run.start") => {
+                let images = msg
+                    .get("images")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+                    .unwrap_or_default();
+                self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), images, s("mode"), s("branchPoint"));
+            }
             Some("run.stop") => {
                 if let Some(e) = self.runs.lock().unwrap().get(&s("runId")) {
                     let _ = e.tx.send(RunMsg::Stop);
@@ -1348,7 +1452,7 @@ impl Runner {
         }
     }
 
-    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, mode: String, branch_point: String) {
+    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String) {
         let (tx, rx) = mpsc::channel();
         let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone() };
         {
@@ -1363,14 +1467,14 @@ impl Runner {
         let roots = self.config.read().unwrap().allowed_roots.clone();
         let runs = self.runs.clone();
         std::thread::spawn(move || {
-            execute(&run, &roots, &agent, &mode, &key, &cwd, &text, &branch_point);
+            execute(&run, &roots, &agent, &mode, &key, &cwd, &text, &images, &branch_point);
             runs.lock().unwrap().remove(&run.run_id);
         });
     }
 }
 
 /// 前置检查 + 按 agent 分派
-fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, branch_point: &str) {
+fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str) {
     let Some(mode) = Mode::parse(mode) else {
         return run.fail(&format!("不支持的模式：{mode}"));
     };
@@ -1390,16 +1494,20 @@ fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd:
         }
     }
     match agent {
-        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text, branch_point),
+        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text, images, branch_point),
         "claude" => match claude_open_sessions() {
             Ok(open) if open.iter().any(|s| s == key) => {
+                // 终端里开着的会话只能投递文字，图片没有通道，明确报错而不是悄悄丢掉
+                if !images.is_empty() {
+                    return run.fail("这个会话开在终端里，没法附带图片；请在终端关掉它，或换成文字发送");
+                }
                 run_claude_terminal(run, key, cwd, text)
             }
-            Ok(_) => run_claude(run, mode, key, cwd, text, branch_point),
+            Ok(_) => run_claude(run, mode, key, cwd, text, images, branch_point),
             Err(e) => run.fail(&format!("无法确认这个会话是否还开在终端里（claude agents --json：{e}）")),
         },
         "codex" => match default_codex_bin_dir().and_then(|d| find_codex_exe(&d)) {
-            Some(exe) => run_codex(run, mode, &exe, key, cwd, text, branch_point),
+            Some(exe) => run_codex(run, mode, &exe, key, cwd, text, images, branch_point),
             None => run.fail("没找到 Codex Desktop 自带的 codex.exe"),
         },
         other => run.fail(&format!("不认识的 agent：{other}")),
@@ -1629,9 +1737,60 @@ mod tests {
         let deny: Value = serde_json::from_str(&claude_control_response("r1", false, &json!({}))).unwrap();
         assert_eq!(deny["response"]["response"]["behavior"], "deny");
         assert!(deny["response"]["response"]["message"].as_str().unwrap().len() > 0);
-        let u: Value = serde_json::from_str(&claude_user_line("你好")).unwrap();
+        let u: Value = serde_json::from_str(&claude_user_line("你好", &[])).unwrap();
         assert_eq!(u["message"]["content"], "你好");
-        assert!(!claude_user_line("a\nb").contains('\n'), "单行 JSON");
+        assert!(!claude_user_line("a\nb", &[]).contains('\n'), "单行 JSON");
+    }
+
+    #[test]
+    fn claude_user_line_with_images() {
+        let img = "data:image/png;base64,iVBORw0KGgo=".to_string();
+        let u: Value = serde_json::from_str(&claude_user_line("看图", &[img.clone()])).unwrap();
+        let content = u["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2, "文字 + 一张图");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBORw0KGgo=");
+        // 只有图没有文字时不塞空 text block（Claude 会把它当成一条空消息）
+        let only: Value = serde_json::from_str(&claude_user_line("", &[img.clone()])).unwrap();
+        assert_eq!(only["message"]["content"].as_array().unwrap().len(), 1);
+        // 不认识的格式直接忽略，退回纯文字
+        let bad: Value = serde_json::from_str(&claude_user_line("x", &["data:text/plain;base64,QQ==".into()])).unwrap();
+        assert_eq!(bad["message"]["content"], "x");
+    }
+
+    #[test]
+    fn data_url_and_base64() {
+        assert_eq!(split_data_url("data:image/jpeg;base64,/9j/"), Some(("image/jpeg", "/9j/")));
+        assert_eq!(split_data_url("https://x/a.png"), None);
+        assert_eq!(split_data_url("data:image/png,abc"), None, "没有 base64 标记");
+        assert_eq!(split_data_url("data:image/svg+xml;base64,PHN2Zz4="), None, "只认四种位图格式");
+        assert_eq!(base64_decode("aGk=").unwrap(), b"hi");
+        assert_eq!(base64_decode("").unwrap(), b"");
+        assert!(base64_decode("aGk").is_none(), "长度不是 4 的倍数");
+        assert!(base64_decode("a$k=").is_none(), "非法字符");
+        // 1x1 PNG 真图能解出来
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        assert_eq!(base64_decode(png).unwrap().len(), 70);
+    }
+
+    #[test]
+    fn codex_image_inputs_writes_files() {
+        let dir = std::env::temp_dir().join("agenthub-images-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==".to_string();
+        let (items, files) = codex_image_inputs(&[png, "data:image/png;base64,@@@".into()], &dir, "r1");
+        assert_eq!(items.len(), 1, "非法 base64 丢掉，不 panic");
+        assert_eq!(items[0]["type"], "localImage");
+        assert_eq!(files.len(), 1);
+        let path = files[0].to_str().unwrap().to_string();
+        assert!(path.ends_with("r1-0.png"), "{path}");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 70);
+        drop(TempFiles(files));
+        assert!(std::fs::metadata(&path).is_err(), "TempFiles 析构时删掉");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

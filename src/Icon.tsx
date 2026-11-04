@@ -1,4 +1,4 @@
-type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh";
+type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image";
 
 /** Original outline symbols; inherit text colour and remain decorative. */
 export default function Icon({ name }: { name: IconName }) {
@@ -23,6 +23,7 @@ export default function Icon({ name }: { name: IconName }) {
     close: <path d="M6 6l12 12M18 6 6 18" />,
     timer: <><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/></>,
     refresh: <><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 3.5V9H15"/></>,
+    image: <><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m4 18 5-5 4 4 3-2.5 4 3.5"/></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{paths[name]}</svg>;
 }

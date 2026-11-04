@@ -155,6 +155,27 @@ function userInputQuestions(detail: string): { id: string; question: string; opt
   }
 }
 
+/** 用户附图的限制：单张小、张数少，因为要经 WS 转给执行端 */
+const USER_IMAGE_PREFIXES = ['data:image/png;base64,', 'data:image/jpeg;base64,', 'data:image/webp;base64,', 'data:image/gif;base64,']
+const USER_IMAGE_MAX_CHARS = 2_500_000
+const USER_IMAGE_MAX_COUNT = 4
+/** 这条路由要收图，body 上限比全局的 1MB 大 */
+export const MESSAGE_BODY_LIMIT = 12 * 1024 * 1024
+
+/** 清洗用户附图；返回字符串数组，或 { error } 说明为什么不行 */
+function cleanUserImages(raw: unknown): string[] | { error: string } {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) return { error: 'images 必须是数组' }
+  if (raw.length > USER_IMAGE_MAX_COUNT) return { error: `最多附带 ${USER_IMAGE_MAX_COUNT} 张图片` }
+  const out: string[] = []
+  for (const u of raw) {
+    if (typeof u !== 'string' || !USER_IMAGE_PREFIXES.some(p => u.startsWith(p))) return { error: '图片格式不支持，只接受 png / jpeg / webp / gif' }
+    if (u.length > USER_IMAGE_MAX_CHARS) return { error: '单张图片太大了，请压缩后再发' }
+    out.push(u)
+  }
+  return out
+}
+
 /** 审批/提问入库消息的标题 */
 function approvalHeading(tool: string, detail: string): string {
   if (tool !== 'userInput') return `请求授权：${tool} ${detail}`
@@ -587,12 +608,17 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { messages, approvals, run }
   })
 
-  app.post('/sessions/:id/messages', async (req, reply) => {
+  app.post('/sessions/:id/messages', { bodyLimit: MESSAGE_BODY_LIMIT }, async (req, reply) => {
     const userId = req.userId
     const id = (req.params as { id: string }).id
-    const text = (req.body as { text?: unknown } | null)?.text
-    if (typeof text !== 'string' || text.trim().length < 1 || text.length > 8000) return reply.code(400).send({ error: 'text 必须是 1–8000 字符' })
-    const clean = text.replaceAll('\0', '')
+    const body = req.body as { text?: unknown; images?: unknown } | null
+    const images = cleanUserImages(body?.images)
+    if (!Array.isArray(images)) return reply.code(400).send({ error: images.error })
+    const rawText = typeof body?.text === 'string' ? body.text.replaceAll('\0', '') : ''
+    // 只发图不写字也算合法消息
+    if (!rawText.trim() && !images.length) return reply.code(400).send({ error: 'text 必须是 1–8000 字符' })
+    if (rawText.length > 8000) return reply.code(400).send({ error: 'text 必须是 1–8000 字符' })
+    const clean = rawText
     // 检查与建 run 放在同一个串行段里，避免同一会话同时建出两个 run
     const res = await serial(async () => {
       const session = await getSession(pool, userId, id)
@@ -603,7 +629,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running' && !stuckRunning(session)) return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
       const run = await createRun(pool, userId, randomUUID(), id, session.machine)
-      const message = await insertMessage(pool, userId, id, run.id, 'user', clean)
+      const message = await insertMessage(pool, userId, id, run.id, 'user', clean, {}, images.length ? images : null)
       return { code: 200, run, message, session } as const
     })
     if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
@@ -618,6 +644,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       sessionKey: id.slice(id.indexOf(':') + 1),
       cwd: session.cwd,
       text: clean,
+      ...(images.length ? { images } : {}),
       mode: 'resume',
     })
     if (!sent) {

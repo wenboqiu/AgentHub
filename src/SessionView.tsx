@@ -8,6 +8,7 @@ import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
+import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickImageFiles } from "./lib/images";
 import { clockAt, fullAt } from "./lib/time";
 
 const STATE_LABEL: Record<string, string> = {
@@ -89,6 +90,9 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [sheetCollapsed, setSheetCollapsed] = useState(false);
   /** 图片预览浮层：当前放大查看的图片（data URL） */
   const [preview, setPreview] = useState<string | null>(null);
+  /** 待发送的附图（data URL），最多 MAX_IMAGES 张 */
+  const [images, setImages] = useState<string[]>([]);
+  const fileRef = useRef<HTMLInputElement | null>(null);
   /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
   const stick = useRef(true);
   const id = session?.id ?? "";
@@ -101,6 +105,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     setRun(null);
     setLoading(true);
     setErr("");
+    setImages([]); // 附件不跟着串到别的会话
     stick.current = true; // 切换会话后重新跟随底部
     const sync = syncSession(api, id, bus, (data) => {
       setMessages(data.messages);
@@ -227,13 +232,37 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
 
   const send = () => {
     const t = text.trim();
-    if (!t || reason || pending === "send") return;
+    // 只有图片、没有文字也允许发送
+    if ((!t && !images.length) || reason || pending === "send") return;
     stick.current = true; // 发送后跳到最新消息
     guard("send", async () => {
-      await api.send(id, t);
+      await api.send(id, t, images);
       setText("");
+      setImages([]);
       await reload();
     });
+  };
+
+  /** 选图/粘贴进来的文件：逐个压缩成 data URL，超出上限的直接提示 */
+  const addImages = (files: File[]) => {
+    const picked = pickImageFiles(files, images.length);
+    if (picked.error) setNote(picked.error);
+    if (!picked.files.length) return;
+    void (async () => {
+      const added = await Promise.all(
+        picked.files.map(async (f) => {
+          const url = await fileToDataUrl(f).catch(() => "");
+          if (!url) return "";
+          if (!fitsLimit(url)) {
+            setNote("有图片压缩后仍太大，已跳过");
+            return "";
+          }
+          return url;
+        }),
+      );
+      const ok = added.filter(Boolean);
+      if (ok.length) setImages((cur) => [...cur, ...ok].slice(0, MAX_IMAGES));
+    })();
   };
   const startSpawn = () => {
     const t = spawnText.trim();
@@ -461,24 +490,69 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       {!spawnOpen && <footer className="composer">
         {reason && <p className="hint">{reason}</p>}
+        {images.length > 0 && (
+          <div className="composer-images">
+            {images.map((src, i) => (
+              <div className="composer-image" key={i}>
+                <img src={src} alt={`待发送图片 ${i + 1}`} onClick={() => setPreview(src)} />
+                <button
+                  className="image-remove"
+                  aria-label={`移除图片 ${i + 1}`}
+                  disabled={pending === "send"}
+                  onClick={() => setImages((cur) => cur.filter((_, j) => j !== i))}
+                >
+                  <Icon name="close" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
         <textarea
           aria-label="会话消息"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={reason ?? "发消息给这个会话…（Ctrl+Enter 发送）"}
+          placeholder={reason ?? "发消息给这个会话…（Ctrl+Enter 发送，可粘贴图片）"}
           disabled={!!reason}
           rows={2}
+          onPaste={(e) => {
+            // 粘贴板里带图片（截图）时优先当附件，纯文字粘贴保持原样
+            const files = Array.from(e.clipboardData?.files ?? []).filter((f) => ACCEPTED_TYPES.includes(f.type));
+            if (!files.length) return;
+            e.preventDefault();
+            addImages(files);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) send();
           }}
         />
+        <input
+          ref={fileRef}
+          type="file"
+          accept={ACCEPTED_TYPES.join(",")}
+          multiple
+          hidden
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            e.target.value = ""; // 允许连续选同一张
+            addImages(files);
+          }}
+        />
         <div className="btns">
+          <button
+            className="icon-button add-image"
+            aria-label="添加图片"
+            title={images.length >= MAX_IMAGES ? `最多附 ${MAX_IMAGES} 张图片` : `添加图片（最多 ${MAX_IMAGES} 张）`}
+            disabled={!!reason || pending === "send" || images.length >= MAX_IMAGES}
+            onClick={() => fileRef.current?.click()}
+          >
+            <Icon name="image" />
+          </button>
           {active ? (
             <button onClick={stop} disabled={pending === "stop"}>
               {pending === "stop" ? "停止中…" : terminalRun ? "停止跟踪" : "停止"}
             </button>
           ) : null}
-          <button className="primary" onClick={send} disabled={!!reason || pending === "send" || !text.trim()}>
+          <button className="primary" onClick={send} disabled={!!reason || pending === "send" || (!text.trim() && !images.length)}>
             {pending === "send" ? "发送中…" : "发送"}
           </button>
         </div>
