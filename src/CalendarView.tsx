@@ -346,10 +346,16 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
 
     const bySort = (a: TlRow, b: TlRow) => a.sort - b.sort;
     const list = [...rows.values()];
+    // 同一条对话挂了任务后又单独立行，就是时间轴上的重复行：任务行里已经有它的
+    // 执行块和活动分段，凡是会话 id 全被任务行覆盖的会话行都去掉。
+    // 反过来任务行不在视图内时（没计划、没执行）会话行保留，对话不丢。
+    const covered = new Set<string>();
+    for (const r of list) if (r.kind === "task") for (const sid of r.sessionIds) covered.add(sid);
+    const visible = list.filter(r => !(r.kind === "session" && r.sessionIds.length > 0 && r.sessionIds.every(sid => covered.has(sid))));
     return {
       start, span,
       hasGoal: goalRows.length > 0,
-      rows: [...goalRows.sort(bySort), ...list.filter(r => r.kind === "task").sort(bySort), ...list.filter(r => r.kind !== "task").sort(bySort)],
+      rows: [...goalRows.sort(bySort), ...visible.filter(r => r.kind === "task").sort(bySort), ...visible.filter(r => r.kind !== "task").sort(bySort)],
     };
   }, [execs, sessionItems, selected, scale, now, tasks, goals, showDone]);
 
