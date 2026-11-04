@@ -7,8 +7,8 @@ export type Config = {
   notifyDesktop: boolean;
   /** 登录的邮箱（只用于显示；token 是登录后拿到的设备会话 token） */
   email: string;
-  /** 仅桌面：允许手机远程执行的项目目录 */
-  allowedRoots: string[];
+  /** 仅桌面：禁止执行的项目目录（黑名单，留空 = 不限制） */
+  deniedRoots: string[];
   /** 仅桌面：允许手机远程执行 */
   remoteEnabled: boolean;
 };
@@ -46,7 +46,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", allowedRoots: [], remoteEnabled: false };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false };
 
 export async function loadConfig(): Promise<Config> {
   if (isDesktop) return invoke<Config>("get_config");

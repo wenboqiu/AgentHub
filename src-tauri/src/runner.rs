@@ -4,7 +4,7 @@
 //!   --verbose --permission-prompt-tool stdio --permission-mode default`
 //! - Codex：Desktop 自带 codex.exe 的 `app-server`，走 JSON-RPC（stdio）
 //!
-//! 纯函数（解析、白名单、路径查找）都单独写出来并有单测；进程管理在 `Runner` 里。
+//! 纯函数（解析、目录黑名单、路径查找）都单独写出来并有单测；进程管理在 `Runner` 里。
 
 use crate::claude::{home_dir, truncate_chars};
 use crate::config::SharedConfig;
@@ -43,7 +43,7 @@ pub fn norm_path(p: &str) -> String {
     s.to_lowercase()
 }
 
-/// 规范化后的白名单（去掉空项）
+/// 规范化后的黑名单（去掉空项）
 fn clean_roots(roots: &[String]) -> Vec<String> {
     roots.iter().map(|r| norm_path(r)).filter(|r| !r.is_empty()).collect()
 }
@@ -55,13 +55,13 @@ pub enum CwdIssue {
     Empty,
     /// 路径里有 `..`：前缀匹配没意义，统一拒绝
     DotDot,
-    /// 白名单非空，但 cwd 不在任何一项之下（附上当前白名单）
-    Outside(Vec<String>),
+    /// cwd 命中黑名单（等于或落在某一项之下）；附上当前黑名单
+    Denied(Vec<String>),
 }
 
-/// cwd 检查：`..` 一律拒绝；**白名单为空 = 不限制**（只做基本合法性检查）；
-/// 白名单非空时 cwd 必须落在某一项之下（或等于），前缀按目录边界判断。
-pub fn check_cwd(cwd: &str, roots: &[String]) -> Result<(), CwdIssue> {
+/// cwd 检查：`..` 一律拒绝；**黑名单为空 = 不限制**（只做基本合法性检查）；
+/// 黑名单非空时 cwd 不能等于或落在其中任一项之下，前缀按目录边界判断。
+pub fn check_cwd(cwd: &str, denied: &[String]) -> Result<(), CwdIssue> {
     let c = norm_path(cwd);
     if c.is_empty() {
         return Err(CwdIssue::Empty);
@@ -69,23 +69,23 @@ pub fn check_cwd(cwd: &str, roots: &[String]) -> Result<(), CwdIssue> {
     if c.split('\\').any(|seg| seg == "..") {
         return Err(CwdIssue::DotDot);
     }
-    let list = clean_roots(roots);
+    let list = clean_roots(denied);
     if list.is_empty() {
-        return Ok(()); // 没配白名单：不限制目录
+        return Ok(()); // 没配黑名单：不限制目录
     }
     if list.iter().any(|r| c == *r || c.starts_with(&format!("{r}\\"))) {
-        Ok(())
-    } else {
         // 报错里给用户填的原文，不是规范化后的小写
-        let shown = roots.iter().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
-        Err(CwdIssue::Outside(shown))
+        let shown = denied.iter().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+        Err(CwdIssue::Denied(shown))
+    } else {
+        Ok(())
     }
 }
 
 /// 只给单测用的布尔包装：生产路径走 `check_cwd`，需要知道具体是哪种失败
 #[cfg(test)]
-pub fn cwd_allowed(cwd: &str, roots: &[String]) -> bool {
-    check_cwd(cwd, roots).is_ok()
+pub fn cwd_allowed(cwd: &str, denied: &[String]) -> bool {
+    check_cwd(cwd, denied).is_ok()
 }
 
 /// 目录必须真实存在：盘符/名字写错时给一条能看懂的错误，而不是让子进程起不来
@@ -140,16 +140,16 @@ impl Mode {
 }
 
 /// 前置检查（不含「会话还开着」，那个要跑外部命令）
-pub fn precheck(mode: Mode, key: &str, cwd: &str, roots: &[String]) -> Result<(), String> {
+pub fn precheck(mode: Mode, key: &str, cwd: &str, denied: &[String]) -> Result<(), String> {
     if mode.needs_key() && !valid_key(key) {
         return Err("会话 id 格式不对".into());
     }
-    match check_cwd(cwd, roots) {
+    match check_cwd(cwd, denied) {
         Ok(()) => Ok(()),
         Err(CwdIssue::Empty) => Err("项目目录为空：先在任务或会话里填一个项目目录".into()),
         Err(CwdIssue::DotDot) => Err(format!("项目目录不能包含 ..：{cwd}（请填写完整路径）")),
-        Err(CwdIssue::Outside(list)) => Err(format!(
-            "项目目录不在白名单内：{cwd}（白名单：{}；清空电脑端那一栏即不限制目录）",
+        Err(CwdIssue::Denied(list)) => Err(format!(
+            "项目目录在禁止列表里：{cwd}（禁止：{}；从电脑端「禁止执行的目录」里删掉对应那一行即可放行）",
             list.join("; ")
         )),
     }
@@ -1491,21 +1491,21 @@ impl Runner {
             }
             g.insert(run_id.clone(), Entry { session_id, tx });
         }
-        let roots = self.config.read().unwrap().allowed_roots.clone();
+        let denied = self.config.read().unwrap().denied_roots.clone();
         let runs = self.runs.clone();
         std::thread::spawn(move || {
-            execute(&run, &roots, &agent, &mode, &key, &cwd, &text, &images, &branch_point, &model, &instructions);
+            execute(&run, &denied, &agent, &mode, &key, &cwd, &text, &images, &branch_point, &model, &instructions);
             runs.lock().unwrap().remove(&run.run_id);
         });
     }
 }
 
 /// 前置检查 + 按 agent 分派
-fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
+fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
     let Some(mode) = Mode::parse(mode) else {
         return run.fail(&format!("不支持的模式：{mode}"));
     };
-    if let Err(e) = precheck(mode, key, cwd, roots) {
+    if let Err(e) = precheck(mode, key, cwd, denied) {
         return run.fail(&e);
     }
     if let Err(e) = cwd_exists(cwd) {
@@ -1562,24 +1562,25 @@ mod tests {
     }
 
     #[test]
-    fn cwd_whitelist() {
+    fn cwd_blacklist() {
         let r = roots(&["D:\\Work2"]);
-        assert!(cwd_allowed("D:\\Work2", &r));
-        assert!(cwd_allowed("D:\\Work2\\AgentHub", &r));
-        assert!(cwd_allowed("d:/work2/agenthub/", &r), "大小写和斜杠不敏感");
-        assert!(cwd_allowed("D:\\Work2\\x", &roots(&["d:/WORK2/"])));
-        assert!(!cwd_allowed("D:\\Work2Other", &r), "前缀不能误判");
-        assert!(!cwd_allowed("D:\\Work2Other\\a", &r));
+        assert!(!cwd_allowed("D:\\Work2", &r), "禁止目录本身也不能跑");
+        assert!(!cwd_allowed("D:\\Work2\\AgentHub", &r));
+        assert!(!cwd_allowed("d:/work2/agenthub/", &r), "大小写和斜杠不敏感");
+        assert!(!cwd_allowed("D:\\Work2\\x", &roots(&["d:/WORK2/"])));
+        assert!(!cwd_allowed("\\\\?\\D:\\Work2\\a", &r), "长路径前缀同样命中");
+        assert!(!cwd_allowed("D:\\a", &roots(&["D:\\"])), "整盘禁止时该盘都不能跑");
         assert!(!cwd_allowed("D:\\Work2\\..\\Secret", &r), ".. 拒绝");
-        assert!(!cwd_allowed("D:\\Play", &r));
         assert!(!cwd_allowed("", &r));
-        assert!(cwd_allowed("\\\\?\\D:\\Work2\\a", &r));
-        assert!(cwd_allowed("D:\\a", &roots(&["D:\\"])));
+        assert!(cwd_allowed("D:\\Work2Other", &r), "前缀不能误判：隔壁目录不在禁止之列");
+        assert!(cwd_allowed("D:\\Work2Other\\a", &r));
+        assert!(cwd_allowed("D:\\Play", &r));
+        assert!(cwd_allowed("E:\\any", &roots(&["D:\\"])));
         // 空名单 = 不限制（只挡空路径和 ..）
-        assert!(cwd_allowed("D:\\Work2", &[]), "没配白名单不限制目录");
+        assert!(cwd_allowed("D:\\Work2", &[]), "没配黑名单不限制目录");
         assert!(cwd_allowed("E:\\any\\where", &[]));
         assert!(cwd_allowed("D:\\Work2", &roots(&["", "  "])), "全空项等同没配");
-        assert!(!cwd_allowed("D:\\a\\..\\b", &[]), "没配白名单时 .. 仍然拒绝");
+        assert!(!cwd_allowed("D:\\a\\..\\b", &[]), "没配黑名单时 .. 仍然拒绝");
         assert!(!cwd_allowed("", &[]));
     }
 
@@ -1610,39 +1611,40 @@ mod tests {
 
     #[test]
     fn precheck_by_mode() {
-        let r = roots(&["D:\\Work2"]);
+        let r = roots(&["D:\\Play"]);
         assert!(precheck(Mode::Fresh, "", "D:\\Work2\\a", &r).is_ok(), "Fresh 不要求 key");
         assert!(precheck(Mode::Fresh, "bad key", "D:\\Work2\\a", &r).is_ok());
         assert!(precheck(Mode::Resume, "", "D:\\Work2\\a", &r).is_err());
         assert!(precheck(Mode::Fork, "a b", "D:\\Work2\\a", &r).is_err());
         assert!(precheck(Mode::Fork, "abc-1", "D:\\Work2\\a", &r).is_ok());
         for m in [Mode::Resume, Mode::Fork, Mode::Fresh] {
-            let e = precheck(m, "abc", "D:\\Play", &r).unwrap_err();
-            assert!(e.starts_with("项目目录不在白名单内"), "{e}");
-            assert!(e.contains("D:\\Work2"), "报错带上白名单原文：{e}");
+            let e = precheck(m, "abc", "D:\\Play\\x", &r).unwrap_err();
+            assert!(e.starts_with("项目目录在禁止列表里"), "{e}");
+            assert!(e.contains("D:\\Play"), "报错带上黑名单原文：{e}");
         }
     }
 
     #[test]
     fn precheck_tells_apart_why_cwd_is_bad() {
         // 三种失败各说各的，手机上能直接判断该改配置还是改路径
-        let r = roots(&["D:\\Work2"]);
+        let r = roots(&["D:\\Play"]);
         let empty = precheck(Mode::Fresh, "", "  ", &r).unwrap_err();
         assert!(empty.starts_with("项目目录为空"), "{empty}");
 
         let dotdot = precheck(Mode::Fresh, "", "D:\\Work2\\..\\Secret", &r).unwrap_err();
         assert!(dotdot.starts_with("项目目录不能包含 .."), "{dotdot}");
 
-        let outside = precheck(Mode::Fresh, "", "E:\\Play", &r).unwrap_err();
-        assert!(outside.starts_with("项目目录不在白名单内"), "{outside}");
-        assert!(outside.contains("E:\\Play") && outside.contains("白名单：D:\\Work2"), "{outside}");
-        assert!(outside.contains("清空"), "给出解法：{outside}");
+        let denied = precheck(Mode::Fresh, "", "D:\\Play\\demo", &r).unwrap_err();
+        assert!(denied.starts_with("项目目录在禁止列表里"), "{denied}");
+        assert!(denied.contains("D:\\Play\\demo") && denied.contains("禁止：D:\\Play"), "{denied}");
+        assert!(denied.contains("删掉"), "给出解法：{denied}");
 
-        // 没配白名单时只有「空」和「..」两种失败
-        assert!(precheck(Mode::Fresh, "", "E:\\Play", &[]).is_ok());
+        // 没配黑名单时只有「空」和「..」两种失败
+        assert!(precheck(Mode::Fresh, "", "D:\\Play", &[]).is_ok());
         assert!(check_cwd("E:\\Play", &[]).is_ok());
         assert_eq!(check_cwd("", &[]).unwrap_err(), CwdIssue::Empty);
         assert_eq!(check_cwd("E:\\a\\..\\b", &[]).unwrap_err(), CwdIssue::DotDot);
+        assert_eq!(check_cwd("D:\\Play", &roots(&["D:\\Play"])).unwrap_err(), CwdIssue::Denied(roots(&["D:\\Play"])));
     }
 
     #[test]

@@ -13,8 +13,10 @@ pub struct Config {
     pub notify_desktop: bool,
     /// 登录的邮箱（只用于显示；token 是登录后拿到的设备会话 token）
     pub email: String,
-    /// 项目目录白名单（可选）：为空表示不限制目录；非空时会话 cwd 必须在其中某一项之下
-    pub allowed_roots: Vec<String>,
+    /// 项目目录黑名单（可选）：为空表示不限制目录；非空时会话 cwd 落在其中某一项之下（含该项本身）就拒绝执行
+    /// 旧版这里是 allowedRoots 白名单，语义相反，因此不兼容旧键：老配置读进来等于「黑名单为空」，
+    /// 不会因为升级就把原来的工作目录全部封掉。
+    pub denied_roots: Vec<String>,
     /// 总开关：关闭时不连服务端的执行器通道
     pub remote_enabled: bool,
 }
@@ -27,7 +29,7 @@ impl Default for Config {
             machine: hostname(),
             notify_desktop: true,
             email: String::new(),
-            allowed_roots: Vec::new(),
+            denied_roots: Vec::new(),
             remote_enabled: false,
         }
     }
@@ -107,7 +109,7 @@ mod tests {
             machine: "m".into(),
             notify_desktop: false,
             email: "a@b.c".into(),
-            allowed_roots: vec!["D:/Tmp".into()],
+            denied_roots: vec!["D:/Tmp".into()],
             remote_enabled: true,
         };
         save(&p, &c).unwrap();
@@ -118,7 +120,10 @@ mod tests {
         assert_eq!(d.server_url, "http://y");
         assert!(d.notify_desktop);
         assert!(!d.remote_enabled);
-        assert!(d.allowed_roots.is_empty() && d.email.is_empty());
+        assert!(d.denied_roots.is_empty() && d.email.is_empty());
+        // 旧配置的 allowedRoots（白名单）不会被当成黑名单读进来，避免升级后把工作目录封死
+        std::fs::write(&p, r#"{"serverUrl":"http://w","allowedRoots":["D:/Work2"]}"#).unwrap();
+        assert!(load(&p).denied_roots.is_empty());
         assert!(!d.machine.is_empty());
         // 旧版配置里的 controlToken 等多余字段直接忽略
         std::fs::write(&p, r#"{"serverUrl":"http://z","token":"t","controlToken":"old"}"#).unwrap();

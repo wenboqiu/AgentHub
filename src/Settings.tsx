@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api, type Device, type NotifyKind, type NotifySettings } from "./lib/api";
 import Profiles from "./Profiles";
 import Roles from "./Roles";
 import Projects from "./Projects";
+import Icon from "./Icon";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
 export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
@@ -18,6 +19,7 @@ const KIND_LABELS: { key: NotifyKind; label: string }[] = [
   { key: "aborted", label: "失败 / 中断" },
   { key: "reminder", label: "时间提醒" },
 ];
+const PRIORITY_LABEL: Record<NotifySettings["minPriority"], string> = { low: "不限优先级", medium: "中及以上", high: "仅高优先级" };
 
 /** 登录时上报的设备名：桌面「<machine>（电脑）」，Android「<机型>（手机）」 */
 export function deviceName(cfg: Config): string {
@@ -37,6 +39,27 @@ const fmtTime = (iso: string) => {
   return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
 
+/** 设置页的一级条目：点进去才改细节，列表上先给一句现状 */
+function SettingsRow({ icon, title, summary, badge, onClick }: { icon: Parameters<typeof Icon>[0]["name"]; title: string; summary: string; badge?: string; onClick(): void }) {
+  return (
+    <li>
+      <button className="settings-row" onClick={onClick}>
+        <span className="sr-icon">
+          <Icon name={icon} />
+        </span>
+        <span className="sr-main">
+          <span className="sr-title">
+            <strong>{title}</strong>
+            {badge && <span className="sr-badge">{badge}</span>}
+          </span>
+          <span className="sr-sum">{summary}</span>
+        </span>
+        <Icon name="chevron" />
+      </button>
+    </li>
+  );
+}
+
 type Props = {
   cfg: Config;
   /** 已登录时的 API（401 时会通知 App 回到登录页） */
@@ -44,24 +67,41 @@ type Props = {
   /** 登录页上方的提示（比如「登录已过期，请重新登录」） */
   notice?: string;
   onClose(): void;
-  onSaved(c: Config): void;
+  /** keepOpen：保存设置后留在设置页，不回到主界面 */
+  onSaved(c: Config, opts?: { keepOpen?: boolean }): void;
+};
+
+/** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
+type Page = "root" | "account" | "notify" | "roles" | "projects" | "profiles" | "desktop" | "android";
+
+const PAGE_TITLE: Record<Exclude<Page, "root">, string> = {
+  account: "账号与安全",
+  notify: "通知规则",
+  roles: "角色",
+  projects: "项目",
+  profiles: "项目配置",
+  desktop: "本机执行与采集",
+  android: "Android 后台提醒",
 };
 
 export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) {
   const loggedIn = !!cfg.token.trim();
+  const [page, setPage] = useState<Page>("root");
   const [form, setForm] = useState<Config>(cfg);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const [hooks, setHooks] = useState<HooksStatus | null>(null);
   const [info, setInfo] = useState<CollectorInfo | null>(null);
   const [remote, setRemote] = useState<RemoteInfo | null>(null);
-  const [rootsText, setRootsText] = useState((cfg.allowedRoots ?? []).join("\n"));
+  const [deniedText, setDeniedText] = useState((cfg.deniedRoots ?? []).join("\n"));
   const [autostart, setAutostart] = useState(false);
   const [bg, setBg] = useState(false);
   const [notif, setNotif] = useState(true);
   // 账号级通知规则（Fast Path 过滤管线）
   const [ns, setNs] = useState<NotifySettings | null>(null);
   const [nsMsg, setNsMsg] = useState("");
+  // 一级列表上的计数（角色 / 项目 / 配置各自改完后回来会变）
+  const [counts, setCounts] = useState<{ roles: number; projects: number; profiles: number } | null>(null);
 
   // 登录表单
   const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
@@ -108,6 +148,22 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     if (!api) return;
     api.notifySettings().then(setNs).catch(() => {});
   }, [api]);
+
+  // 列表上的条数：回到一级列表时重取，改完角色 / 项目 / 配置能立刻看到
+  useEffect(() => {
+    if (!api || page !== "root") return;
+    let dead = false;
+    Promise.all([api.roles(), api.projects(), api.profiles()]).then(
+      ([roles, projects, profiles]) => {
+        if (!dead) setCounts({ roles: roles.length, projects: projects.length, profiles: profiles.length });
+      },
+      () => {},
+    );
+    return () => {
+      dead = true;
+    };
+  }, [api, page]);
+
   const saveNs = async (next: NotifySettings) => {
     setNs(next);
     if (!api) return;
@@ -186,6 +242,17 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     }
   };
 
+  // 黑名单路径按行拆；空列表 = 不限制目录
+  const denied = useMemo(
+    () => deniedText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
+    [deniedText],
+  );
+  const dirty =
+    form.machine.trim() !== cfg.machine.trim() ||
+    form.notifyDesktop !== cfg.notifyDesktop ||
+    form.remoteEnabled !== cfg.remoteEnabled ||
+    JSON.stringify(denied) !== JSON.stringify(cfg.deniedRoots ?? []);
+
   const save = async () => {
     // 只改设置页管理的字段；服务器地址、token、邮箱以 App 里最新的 cfg 为准
     const c: Config = {
@@ -193,14 +260,14 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       machine: form.machine.trim(),
       notifyDesktop: form.notifyDesktop,
       remoteEnabled: form.remoteEnabled,
-      allowedRoots: rootsText
-        .split(/\r?\n/)
-        .map((l) => l.trim())
-        .filter(Boolean),
+      deniedRoots: denied,
     };
     try {
       await saveConfig(c);
-      onSaved(c);
+      // 留在本页，改动「保存」后不用再点回来
+      onSaved(c, { keepOpen: true });
+      setMsg("已保存");
+      window.setTimeout(() => setMsg(""), 2500);
     } catch (e) {
       setMsg(`保存失败：${String(e)}`);
     }
@@ -278,68 +345,140 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     );
   }
 
+  // ---------- 一级列表上的现状摘要 ----------
+  const host = (() => {
+    try {
+      return new URL(cfg.serverUrl).host;
+    } catch {
+      return cfg.serverUrl;
+    }
+  })();
+  const mutedAgents = ns ? AGENT_LABELS.filter(({ key }) => !ns.agents[key]).length : 0;
+  const quiet = ns?.quiet.enabled ? `免打扰 ${ns.quiet.start}–${ns.quiet.end}` : "免打扰关闭";
+  const notifySummary = ns
+    ? [mutedAgents > 0 ? `静音 ${mutedAgents} 个 agent` : "全部 agent 提醒", quiet, PRIORITY_LABEL[ns.minPriority]].join(" · ")
+    : "加载中…";
+  const desktopSummary = [
+    form.remoteEnabled ? "远程执行已开启" : "远程执行关闭",
+    denied.length > 0 ? `禁止 ${denied.length} 个目录` : "目录不限制",
+    hooks ? (hooks.installed ? "hook 已安装" : "hook 未安装") : "hook …",
+  ].join(" · ");
+  const countText = (n: number | undefined, unit: string) => (counts ? `${n} ${unit}` : "");
+
+  // 返回固定在左边（和任务 / 会话详情页一致）：一级列表回主界面，子页面回列表
+  const back = (
+    <button className="back-button" onClick={() => (page === "root" ? onClose() : (setPage("root"), setMsg("")))}>
+      <Icon name="back" />
+      返回
+    </button>
+  );
+
   return (
     <div className="app settings">
       <header>
-        <h1>设置</h1>
-        <span className="spacer" />
-        <button onClick={onClose}>返回</button>
+        {back}
+        <h1>{page === "root" ? "设置" : PAGE_TITLE[page]}</h1>
       </header>
       <main>
-        <section className="box">
-          <h2>账号</h2>
-          <p className="kv">
-            邮箱：<b>{cfg.email || "（未知）"}</b>
-          </p>
-          <p className="kv">
-            服务器：<b>{cfg.serverUrl}</b>
-          </p>
-          <div className="btns">
-            <button onClick={logout} disabled={busy}>
-              退出登录
-            </button>
-          </div>
-          <h3>修改密码</h3>
-          <label>
-            旧密码
-            <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
-          </label>
-          <label>
-            新密码（8 位以上）
-            <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
-          </label>
-          <label>
-            再输一次新密码
-            <input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} autoComplete="new-password" />
-          </label>
-          <div className="btns">
-            <button onClick={changePassword} disabled={busy || !oldPw || !newPw}>
-              修改密码
-            </button>
-          </div>
-          <h3>已登录设备</h3>
-          {devices === null && <p className="hint">加载中…</p>}
-          <ul className="devices">
-            {(devices ?? []).map((d) => (
-              <li key={d.id}>
-                <span className="dev-name">
-                  {d.device || "未知设备"}
-                  {d.current && <span className="tag claude">本机</span>}
-                </span>
-                <span className="dev-time">最近使用 {fmtTime(d.lastUsedAt)}</span>
-                {!d.current && (
-                  <button className="link" onClick={() => removeDevice(d)}>
-                    移除
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
+        {notice && <p className="msg bad">{notice}</p>}
 
-        {loggedIn && (
+        {page === "root" && (
+          <>
+            <h2>账号</h2>
+            <ul className="settings-list">
+              <SettingsRow icon="user" title="账号与安全" summary={`${cfg.email || "（未知邮箱）"} · ${host}`} badge="已登录" onClick={() => setPage("account")} />
+              <SettingsRow icon="bell" title="通知规则" summary={notifySummary} onClick={() => setPage("notify")} />
+            </ul>
+
+            <h2>派活</h2>
+            <ul className="settings-list">
+              <SettingsRow icon="people" title="角色" summary="执行工具、模型与上下文，按项目攒经验" badge={countText(counts?.roles, "个")} onClick={() => setPage("roles")} />
+              <SettingsRow icon="folder" title="项目" summary="项目说明与约定，派活时带给执行端" badge={countText(counts?.projects, "个")} onClick={() => setPage("projects")} />
+              <SettingsRow icon="sliders" title="项目配置" summary="电脑、目录、默认优先级与检查项模板" badge={countText(counts?.profiles, "个")} onClick={() => setPage("profiles")} />
+            </ul>
+
+            {(isDesktop || isAndroid) && (
+              <>
+                <h2>本机</h2>
+                <ul className="settings-list">
+                  {isDesktop && <SettingsRow icon="desktop" title="本机执行与采集" summary={desktopSummary} onClick={() => setPage("desktop")} />}
+                  {isAndroid && (
+                    <SettingsRow
+                      icon="phone"
+                      title="Android 后台提醒"
+                      summary={`${bg ? "后台提醒已开启" : "后台提醒已关闭"} · 通知权限${notif ? "已允许" : "未允许"}`}
+                      onClick={() => setPage("android")}
+                    />
+                  )}
+                </ul>
+              </>
+            )}
+          </>
+        )}
+
+        {page === "account" && (
+          <>
+            <section className="box">
+              <p className="kv">
+                邮箱：<b>{cfg.email || "（未知）"}</b>
+              </p>
+              <p className="kv">
+                服务器：<b>{cfg.serverUrl}</b>
+              </p>
+              <div className="btns">
+                <button onClick={logout} disabled={busy}>
+                  退出登录
+                </button>
+              </div>
+            </section>
+
+            <section className="box">
+              <h2>修改密码</h2>
+              <label>
+                旧密码
+                <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
+              </label>
+              <label>
+                新密码（8 位以上）
+                <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
+              </label>
+              <label>
+                再输一次新密码
+                <input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} autoComplete="new-password" />
+              </label>
+              <div className="btns">
+                <button className="primary" onClick={changePassword} disabled={busy || !oldPw || !newPw}>
+                  修改密码
+                </button>
+              </div>
+              {msg && <p className="msg">{msg}</p>}
+            </section>
+
+            <section className="box">
+              <h2>已登录设备</h2>
+              {devices === null && <p className="hint">加载中…</p>}
+              <ul className="devices">
+                {(devices ?? []).map((d) => (
+                  <li key={d.id}>
+                    <span className="dev-name">
+                      {d.device || "未知设备"}
+                      {d.current && <span className="tag claude">本机</span>}
+                    </span>
+                    <span className="dev-time">最近使用 {fmtTime(d.lastUsedAt)}</span>
+                    {!d.current && (
+                      <button className="link" onClick={() => removeDevice(d)}>
+                        移除
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          </>
+        )}
+
+        {page === "notify" && (
           <section className="box">
-            <h2>通知规则（账号级）</h2>
             <p className="hint">在服务端统一过滤要弹的通知，对所有设备生效；等待授权和审批请求永远提醒，不受规则影响。</p>
             {!ns ? (
               <p className="hint">加载中…</p>
@@ -414,75 +553,92 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
           </section>
         )}
 
-        {loggedIn && api && <Roles api={api} />}
+        {page === "roles" && api && <Roles api={api} />}
 
-        {loggedIn && api && <Projects api={api} />}
+        {page === "projects" && api && <Projects api={api} />}
 
-        {loggedIn && api && <Profiles api={api} />}
+        {page === "profiles" && api && <Profiles api={api} />}
 
-        {isDesktop && (
-          <label>
-            本机名称（machine；下次登录时作为设备名）
-            <input value={form.machine} onChange={(e) => set("machine", e.target.value)} />
-          </label>
+        {page === "desktop" && isDesktop && (
+          <>
+            <section className="box">
+              <h2>本机</h2>
+              <label>
+                本机名称（machine；下次登录时作为设备名）
+                <input value={form.machine} onChange={(e) => set("machine", e.target.value)} />
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={form.notifyDesktop} onChange={(e) => set("notifyDesktop", e.target.checked)} />
+                会话完成 / 等待授权时弹桌面通知
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={autostart} onChange={(e) => toggleAutostart(e.target.checked)} />
+                开机自启（静默启动到托盘）
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={form.remoteEnabled} onChange={(e) => set("remoteEnabled", e.target.checked)} />
+                允许手机远程执行（每次授权仍要在手机上确认）
+              </label>
+
+              <h3>禁止执行的目录（黑名单）</h3>
+              <p className="hint">
+                当前是<b>黑名单</b>模式：留空 = 不限制目录，任何目录都能派活；填了则列在这里的目录<b>及其子目录</b>一律拒绝执行，其它目录正常。
+              </p>
+              <textarea
+                value={deniedText}
+                onChange={(e) => setDeniedText(e.target.value)}
+                rows={3}
+                placeholder={"每行一个目录，留空不限制；例如 D:\\Work2\\Secret"}
+                spellCheck={false}
+              />
+              <p className="hint">
+                {denied.length > 0 ? `已禁止 ${denied.length} 个目录：这些目录下的任务和会话会被执行端直接拒绝。` : "当前目录不限制：没有任何目录被禁止。"}
+              </p>
+
+              <div className="btns">
+                <button className="primary" onClick={save} disabled={!dirty}>
+                  保存
+                </button>
+              </div>
+              <p className="hint">改动保存后立即生效；执行器会在几秒内用新配置重连。</p>
+              {msg && <p className="msg">{msg}</p>}
+            </section>
+
+            <section className="box">
+              <h2>运行状态</h2>
+              <p className="kv">
+                远程执行器：
+                <b className={remote?.lastError ? "bad" : ""}>
+                  {remote ? (remote.connected ? "已连接" : remote.lastError ? `未连接（${remote.lastError}）` : form.remoteEnabled ? "连接中…" : "未启用") : "…"}
+                </b>
+              </p>
+              <p className="kv">
+                Claude Code hook：<b>{hooks ? (hooks.installed ? "已安装" : "未安装") : "…"}</b>
+              </p>
+              <div className="btns">
+                <button onClick={() => hookAction(true)}>{hooks?.installed ? "重新安装" : "安装 Claude Code hook"}</button>
+                <button onClick={() => hookAction(false)} disabled={!hooks?.installed && !hooks?.scriptExists}>
+                  卸载
+                </button>
+              </div>
+              <p className="kv">
+                采集端口 {info?.port ?? 47821}：<b className={info?.collectorError ? "bad" : ""}>{info ? (info.collectorError ?? "正常") : "…"}</b>
+              </p>
+              <p className="kv">
+                上报队列：{info?.forward.queued ?? 0} 条待发{info?.forward.lastError ? `（${info.forward.lastError}）` : ""}
+              </p>
+            </section>
+
+            <section className="box">
+              <h2>采集说明</h2>
+              <p className="hint">豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。</p>
+              <p className="hint">WorkBuddy 会话监听随 AgentHub 自动启动。只读 <code>%USERPROFILE%\.workbuddy\projects</code> 下的会话记录，每 2 秒检查一次，可显示对话标题、目录、运行中与完成状态；完成状态在「回复结束 + 无未完成工具调用 + 静默确认」后判定，暂不支持授权、远程续聊和读取完整对话。</p>
+            </section>
+          </>
         )}
-        {isDesktop && (
-          <div className="btns">
-            <button className="primary" onClick={save}>
-              保存
-            </button>
-          </div>
-        )}
-        {msg && <p className="msg">{msg}</p>}
 
-        {isDesktop && (
+        {page === "android" && isAndroid && (
           <section className="box">
-            <h2>桌面端</h2>
-            <label className="check">
-              <input type="checkbox" checked={form.notifyDesktop} onChange={(e) => set("notifyDesktop", e.target.checked)} />
-              会话完成 / 等待授权时弹桌面通知（保存后生效）
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={autostart} onChange={(e) => toggleAutostart(e.target.checked)} />
-              开机自启（静默启动到托盘）
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={form.remoteEnabled} onChange={(e) => set("remoteEnabled", e.target.checked)} />
-              允许手机远程执行（保存后生效；每次授权仍要在手机上确认）
-            </label>
-            <label>
-              项目目录白名单（可选，每行一个；<b>留空 = 不限制目录</b>，填了才只允许这些目录下的会话）
-              <textarea value={rootsText} onChange={(e) => setRootsText(e.target.value)} rows={3} placeholder={"留空不限制，例如 D:\\Work2"} spellCheck={false} />
-            </label>
-            <p className="kv">
-              远程执行器：
-              <b className={remote?.lastError ? "bad" : ""}>
-                {remote ? (remote.connected ? "已连接" : remote.lastError ? `未连接（${remote.lastError}）` : form.remoteEnabled ? "连接中…" : "未启用") : "…"}
-              </b>
-            </p>
-            <p className="kv">
-              Claude Code hook：<b>{hooks ? (hooks.installed ? "已安装" : "未安装") : "…"}</b>
-            </p>
-            <div className="btns">
-              <button onClick={() => hookAction(true)}>{hooks?.installed ? "重新安装" : "安装 Claude Code hook"}</button>
-              <button onClick={() => hookAction(false)} disabled={!hooks?.installed && !hooks?.scriptExists}>
-                卸载
-              </button>
-            </div>
-            <p className="kv">
-              采集端口 {info?.port ?? 47821}：<b className={info?.collectorError ? "bad" : ""}>{info ? (info.collectorError ?? "正常") : "…"}</b>
-            </p>
-            <p className="kv">
-              上报队列：{info?.forward.queued ?? 0} 条待发{info?.forward.lastError ? `（${info.forward.lastError}）` : ""}
-            </p>
-            <p className="hint">豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。</p>
-            <p className="hint">WorkBuddy 会话监听随 AgentHub 自动启动。只读 <code>%USERPROFILE%\.workbuddy\projects</code> 下的会话记录，每 2 秒检查一次，可显示对话标题、目录、运行中与完成状态；完成状态在「回复结束 + 无未完成工具调用 + 静默确认」后判定，暂不支持授权、远程续聊和读取完整对话。</p>
-          </section>
-        )}
-
-        {isAndroid && (
-          <section className="box">
-            <h2>Android 后台提醒</h2>
             <label className="check">
               <input type="checkbox" checked={bg} onChange={(e) => toggleBg(e.target.checked)} />
               开启后台提醒（前台服务保持连接，完成 / 等待授权时弹通知）
@@ -494,6 +650,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               <button onClick={() => native()?.openBatterySettings()}>电池优化设置</button>
             </div>
             <p className="hint">建议把 AgentHub 设为「不限制」电池使用，否则系统可能在后台杀掉连接。</p>
+            {msg && <p className="msg">{msg}</p>}
           </section>
         )}
       </main>

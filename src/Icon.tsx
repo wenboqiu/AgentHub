@@ -1,4 +1,4 @@
-type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image";
+type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "phone";
 
 /** Original outline symbols; inherit text colour and remain decorative. */
 export default function Icon({ name }: { name: IconName }) {
@@ -24,6 +24,13 @@ export default function Icon({ name }: { name: IconName }) {
     timer: <><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/></>,
     refresh: <><path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1"/><path d="M20.5 3.5V9H15"/></>,
     image: <><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m4 18 5-5 4 4 3-2.5 4 3.5"/></>,
+    user: <><circle cx="12" cy="8" r="4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></>,
+    bell: <><path d="M18 9a6 6 0 1 0-12 0c0 5-2 6.5-2 6.5h16S18 14 18 9Z"/><path d="M10 20a2.2 2.2 0 0 0 4 0"/></>,
+    people: <><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.8a3.5 3.5 0 0 1 0 6.4M17.5 20c0-2.4-.8-4.4-2.1-5.9"/></>,
+    folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h6a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>,
+    sliders: <><path d="M4 7h9M19 7h1M4 17h4M14 17h6"/><circle cx="15.5" cy="7" r="2"/><circle cx="10.5" cy="17" r="2"/></>,
+    desktop: <><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/></>,
+    phone: <><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{paths[name]}</svg>;
 }

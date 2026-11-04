@@ -421,10 +421,11 @@ export default function App() {
         api={api}
         notice={notice}
         onClose={() => setView("list")}
-        onSaved={(c) => {
+        onSaved={(c, opts) => {
           setCfg(c);
           setNotice("");
-          setView("list");
+          // 设置页里点「保存」只是改本机配置，留在原地；登录 / 退出才回主界面
+          if (!opts?.keepOpen) setView("list");
         }}
       />
     );
