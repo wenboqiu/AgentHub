@@ -7,6 +7,7 @@ import Icon from "./Icon";
 import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
+import { clockAt, fullAt } from "./lib/time";
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -307,6 +308,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>
               <div className={`msg ${m.role}`}>{m.text}</div>
+              <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
               {m.role==="assistant" && <MessageActions message={m} api={api}
                 branchReason={active || session.state==="running" ? "请等待会话运行结束" : !agents.includes(session.machine) ? "电脑端不在线" : !m.branchPoint ? "请刷新记录，或等待完整回复结束后再分支" : ""}
                 onRated={updated=>setMessages(items=>items.map(item=>item.id===updated.id ? updated : item))}
@@ -317,7 +319,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         {approvals.map((a) => (
           <div key={a.id} className="approval-card">
             <div className="approval-head">
-              请求授权：<b>{a.tool}</b>
+              <span>请求授权：<b>{a.tool}</b></span>
+              <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
             </div>
             <pre>{a.detail}</pre>
             <div className="btns">
