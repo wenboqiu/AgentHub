@@ -9,7 +9,7 @@ export type NotifySettings = {
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
 export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
 /** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
@@ -147,7 +147,10 @@ export class Api {
   decideReviewItem = (taskId: number, itemId: number, status: "pending" | "pass" | "fail", note = "") => this.call<{ item: ReviewItem }>("PATCH", `/tasks/${taskId}/review/${itemId}`, { status, note });
   thread = (id: number, limit = 200) => this.call<{ events: ThreadEvent[] }>("GET", `/threads/task/${id}?limit=${limit}`);
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
-  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId: string; sessionId: string; task: Task}>("POST", `/tasks/${id}/start`, input);
+  /** 派活：电脑在线时返回 runId/sessionId；离线时入队，返回 queued 和带 queuedAt 的任务 */
+  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task}>("POST", `/tasks/${id}/start`, input);
+  /** 取消排队：不再等那台电脑上线 */
+  unqueueTask = async (id: number) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/queue`)).task;
   /** 手动计时：不依赖会话，直接给任务记一次执行 */
   startTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/start`, {})).task;
   stopTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/stop`, {})).task;

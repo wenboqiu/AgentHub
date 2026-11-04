@@ -67,7 +67,9 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const done = task.status === "done";
   const machine = task.machine || (agents.length === 1 ? agents[0] : "");
   const listenOnly = isListenOnly(task.agent);
-  const reason = !task.agent ? "请选择执行工具" : listenOnly ? `${agentName(task.agent ?? "")} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上` : !task.cwd ? "请填写项目目录" : !machine ? "请选择电脑" : !agents.includes(machine) ? "电脑端不在线" : "";
+  // 电脑离线不再拦住派活：改成入队，等那台电脑上线自动开始
+  const offline = !!machine && !agents.includes(machine);
+  const reason = !task.agent ? "请选择执行工具" : listenOnly ? `${agentName(task.agent ?? "")} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上` : !task.cwd ? "请填写项目目录" : !machine ? "请选择电脑" : "";
   const machines = [...new Set([...agents, ...(task.machine ? [task.machine] : [])])];
   const items = task.checklist ?? [];
   const goalTitle = goals.find(g => g.id === task.goalId)?.title;
@@ -220,12 +222,16 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {task.timerStartedAt
           ? <><button disabled={busy} onClick={() => void guard(async () => onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
           : <button disabled={busy || done} onClick={() => void guard(async () => onSaved(await api.startTimer(task.id)))}><Icon name="timer" />开始计时</button>}
-        <button className="primary" disabled={busy || !!reason} onClick={() => { setMessage(task.notes || task.title); setStarting(true); }}>{task.sessionIds.length ? "再开一个会话" : "开始执行"}</button>
-        {reason && <span className="dim">{reason}</span>}
+        <button className="primary" disabled={busy || !!reason} onClick={() => { setMessage(task.notes || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "再开一个会话" : "开始执行"}</button>
+        {reason ? <span className="dim">{reason}</span> : offline ? <span className="dim">{machine} 离线，开始后会在它上线时自动派发</span> : null}
       </div>
-      {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task); onSession(r.sessionId); }); }}>
+      {task.queuedAt && <p className="hint queue-hint" role="status">
+        已排队 · 等 {task.machine || machine} 上线后自动开始（{new Date(task.queuedAt).toLocaleString()} 入队）
+        <button className="link" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unqueueTask(task.id)))}>取消排队</button>
+      </p>}
+      {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task); if (r.sessionId) onSession(r.sessionId); else setStarting(false); }); }}>
         <label>第一条消息<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
-        <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>确认开始</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
+        <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
       </form>}
       <details className="exec-settings" open={!task.agent || !task.cwd}>
         <summary>执行设置（工具 / 电脑 / 目录）</summary>

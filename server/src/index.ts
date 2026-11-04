@@ -16,6 +16,10 @@ export type AppConfig = {
   stallAfterMs?: number
   abortSpreeCount?: number
   abortSpreeWindowMs?: number
+  queueTtlMs?: number
+  queueDrainLimit?: number
+  queueMaxAttempts?: number
+  queueSweepIntervalMs?: number
 }
 
 // 构造应用（测试里直接用，不 listen）

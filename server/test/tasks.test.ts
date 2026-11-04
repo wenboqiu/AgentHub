@@ -102,7 +102,9 @@ describe('目标与任务', () => {
     const t=await newTask();assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
     await call('PATCH',`/tasks/${t.id}`,{agent:'claude'});assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
     await call('PATCH',`/tasks/${t.id}`,{cwd:'D:\\TaskTest'});assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
-    assert.equal((await call('POST',`/tasks/${t.id}/start`,{machine:'离线'})).status,409);assert.equal((await get(t.id)).status,'todo')
+    const off=await call('POST',`/tasks/${t.id}/start`,{machine:'离线'});assert.equal(off.status,200)
+    assert.equal(off.body.queued,true);assert.ok(off.body.task.queuedAt);assert.equal((await get(t.id)).status,'todo')
+    await call('DELETE',`/tasks/${t.id}/queue`);await call('PATCH',`/tasks/${t.id}`,{machine:null})
     const ex=await connect('role=agent&machine=任务测试机')
     for(const [body,expected] of [[{},'测试任务'],[{text:' 只回\0 OK '},'只回 OK']] as const){
       const r=await call('POST',`/tasks/${t.id}/start`,body);assert.equal(r.status,200)
@@ -156,7 +158,7 @@ describe('目标与任务', () => {
     assert.ok(va.msgs.find(m=>m.type==='task'&&m.task.id===t.id&&m.task.goalId===null))
     assert.equal(vb.msgs.filter(m=>m.type!=='snapshot').length,0)
   })
-  it('执行器发送失败：409、运行 failed、临时会话 aborted、任务 doing 且保留挂接',async()=>{
+  it('执行器发送失败：409、运行 failed、临时会话 aborted、任务退回待办并保留挂接',async()=>{
     const ex=await connect('role=agent&machine=发送失败测试机'),t=await newTask({agent:'claude',machine:'发送失败测试机',cwd:'D:\\TaskTest'})
     const originals=[...app.websocketServer.clients].map(ws=>({ws,send:ws.send}))
     for(const {ws,send} of originals) ws.send=function(this:typeof ws,data:any,...args:any[]){
@@ -165,7 +167,7 @@ describe('目标与任务', () => {
     } as typeof ws.send
     try {
       const r=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(r.status,409)
-      const updated=await get(t.id);assert.equal(updated.status,'doing');assert.equal(updated.sessionIds.length,1)
+      const updated=await get(t.id);assert.equal(updated.status,'todo');assert.equal(updated.sessionIds.length,1)
       const sid=updated.sessionIds[0], messages=(await call('GET',`/sessions/${sid}/messages`)).body
       assert.equal(messages.run.status,'failed')
       assert.equal((await call('GET','/sessions')).body.sessions.find((s:any)=>s.id===sid).state,'aborted')

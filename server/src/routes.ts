@@ -54,6 +54,7 @@ import { buildFailureDigest, buildReviewDigest, getDigests } from './digest.ts'
 import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } from './watchdog.ts'
 import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
+import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -73,6 +74,11 @@ export type RouteOptions = {
   stallAfterMs?: number
   abortSpreeCount?: number
   abortSpreeWindowMs?: number
+  // 派活排队：排队项存活时间、一次上线最多投递几条、失败多少次后放弃、过期清扫间隔
+  queueTtlMs?: number
+  queueDrainLimit?: number
+  queueMaxAttempts?: number
+  queueSweepIntervalMs?: number
 }
 
 type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
@@ -123,6 +129,10 @@ const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions = {}): Kick {
   const historyTimeoutMs = opts.historyTimeoutMs ?? 10_000
   const stallAfterMs = opts.stallAfterMs ?? 45 * 60_000
+  // 排队项 24 小时后作废；一次上线最多投递 3 条，失败 3 次放弃
+  const queueTtlMs = opts.queueTtlMs ?? 24 * 3600_000
+  const queueDrainLimit = opts.queueDrainLimit ?? 3
+  const queueMaxAttempts = opts.queueMaxAttempts ?? 3
   // 反复失败计数（内存态，服务重启清零）
   const spree = new AbortSpreeTracker(opts.abortSpreeCount ?? 3, opts.abortSpreeWindowMs ?? 2 * 3600_000)
   const clients = new Set<Conn>()
@@ -217,9 +227,36 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
       if (failed) pushRun(userId,failed)
       await abortPending(userId,pendingId,'电脑端不在线')
+      // 电脑恰好在这一瞬间掉线：任务已被改成 doing，但没有对应的运行，退回 todo
+      if (taskId !== undefined) {
+        const reverted = await saveTask(pool,userId,{status:'todo'},taskId).catch(() => undefined)
+        if (reverted) pushTask(userId,reverted)
+      }
       throw new TaskError('电脑端不在线',409)
     }
     return {runId,sessionId:pendingId,...(task ? {task} : {})}
+  }
+
+  // 电脑上线后把排队的活按入队顺序投递；失败累计次数，超过上限就放弃并记录
+  async function drainQueue(userId: number, machine: string) {
+    for (const item of await queuedFor(pool, userId, machine, queueDrainLimit)) {
+      if (!executors.has(execKey(userId, machine))) return
+      let ok = false
+      try {
+        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, 'fresh', '', item.taskId)
+        ok = true
+      } catch (e) {
+        const attempts = await bumpAttempts(pool, userId, item.taskId)
+        app.log.warn({ taskId: item.taskId, attempts, err: String(e) }, '排队派发失败')
+        if (attempts >= queueMaxAttempts) {
+          await dequeueDispatch(pool, userId, item.taskId)
+          app.log.warn({ taskId: item.taskId }, '排队派发连续失败，已放弃')
+        }
+      }
+      if (ok) await dequeueDispatch(pool, userId, item.taskId)
+      const task = await getTask(pool, userId, item.taskId).catch(() => undefined)
+      if (task) pushTask(userId, task)
+    }
   }
 
   // 执行器掉线（或被新连接顶掉）：它名下的 run 标 failed，pending 授权标 expired
@@ -425,8 +462,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const online = agentList(req.userId)
     const machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''),'电脑名',4000)
     const text = taskText(b.text ?? (task.notes || task.title),'第一条消息',8000)
-    if (!executors.has(execKey(req.userId,machine))) throw new TaskError('电脑端不在线',409)
+    // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么都定下来了）
+    if (!executors.has(execKey(req.userId,machine))) {
+      await enqueueDispatch(pool, req.userId, task.id, { machine, agent, cwd, text })
+      const queued = await saveTask(pool, req.userId, { agent, machine, cwd }, task.id)
+      pushTask(req.userId, queued)
+      return { queued: true, task: queued }
+    }
+    // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
+    if (await dequeueDispatch(pool, req.userId, task.id)) pushTask(req.userId, await getTask(pool, req.userId, task.id))
     return startSession(req.userId,{agent,machine,cwd},task.title,text,'fresh','',task.id)
+  }))
+  app.delete('/tasks/:id/queue', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    await dequeueDispatch(pool,req.userId,id)
+    const task = await getTask(pool,req.userId,id)
+    pushTask(req.userId,task); return {task}
   }))
 
   app.post('/sessions/ack-all', async req => {
@@ -773,6 +825,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       executors.set(key, me)
       registered = true
       pushAgents(userId)
+      void serial(() => drainQueue(userId, machine)).catch(e => app.log.error(e, '投递排队派发失败'))
       for (const d of queue.splice(0)) handle(d)
       return
     }
@@ -826,10 +879,21 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     })().catch(e => app.log.error(e, 'Watchdog 检查失败'))
   }, opts.watchdogIntervalMs ?? 60_000)
   watchdogTimer.unref()
+  // 排队项过期清扫：电脑一直不上线时，不能让一周后的一次上线喷出几十个会话
+  const queueTimer = setInterval(() => {
+    void (async () => {
+      for (const d of await expireQueued(pool, queueTtlMs)) {
+        const task = await getTask(pool, d.userId, d.taskId).catch(() => undefined)
+        if (task) pushTask(d.userId, task)
+      }
+    })().catch(e => app.log.error(e, '清理过期排队派发失败'))
+  }, opts.queueSweepIntervalMs ?? 60_000)
+  queueTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
     clearInterval(reminderTimer)
     clearInterval(watchdogTimer)
+    clearInterval(queueTimer)
     for (const c of clients) c.sock.close()
     for (const c of executors.values()) c.sock.close()
   })

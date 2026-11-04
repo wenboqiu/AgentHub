@@ -509,3 +509,6 @@ header h1 { white-space: nowrap; }
 .review-standards { margin-top: 10px; }
 .review-standards p { margin: 0 0 4px; font-size: 13px; }
 .review-standards li { font-size: 13px; color: var(--dim); }
+
+/* 派活排队：等目标电脑上线 */
+.queue-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); font-size: 13px; }
