@@ -138,6 +138,9 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .entity-form > .primary { justify-self: start; min-width: 100px; }
 .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 22px; }
 .action-bar, .task-links { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0; }
+/* 派活时的角色选择：贴在开始按钮左边，选完直接开跑 */
+.role-pick { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--dim); }
+.role-pick select { width: auto; max-width: 220px; min-height: 40px; padding: 8px 12px; }
 .entity-form .action-bar { margin: 0; }
 [role="status"] { font-size: 13px; }
 .form-error, .run-error, .bad { color: var(--alert); overflow-wrap: anywhere; }
@@ -561,3 +564,19 @@ header h1 { white-space: nowrap; }
 .profile-card { margin: 12px 0; padding: 16px; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 12px; }
 .profile-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .profile-card label { font-size: 13px; }
+
+/* 角色记忆：一条条经验，带来源与用量，可手写可删 */
+.memory-block { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.memory-head { display: flex; align-items: baseline; gap: 10px; }
+.memory-head strong { font-size: 13px; }
+.memory-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+.memory-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.memory-text { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.memory-add { display: flex; gap: 8px; margin-top: 8px; }
+.memory-add input { flex: 1; min-width: 0; }
+.memory-add select { width: auto; max-width: 180px; }
+@media (max-width: 560px) {
+  .memory-add { flex-wrap: wrap; }
+  .memory-add input { flex-basis: 100%; }
+  .memory-add select { flex: 1; max-width: none; }
+}

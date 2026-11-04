@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import { listMessages } from './db.ts'
 import { TaskError, getTask, type ChecklistItem, type Task } from './tasks.ts'
+import { addMemory } from './memories.ts'
 
 // 验收检查项与证据链（思路来自 LobeHub 的 Acceptance：把需求拆成看得见的检查项，
 // 逐项跑并附证据，人整体通过或部分打回，打回原因沉淀成下次交付前的标准）。
@@ -120,13 +121,27 @@ export async function addReviewItem(db: DB, userId: number, taskId: number, titl
 }
 
 // 判定检查项：打回时带原因，原因同时沉淀为账号级标准（重复出现只累加次数）
+// 任务指定了角色时，这条原因还会记进「该员工在这个项目上的经验」，下次派活自动带上
 export async function decideReviewItem(db: DB, userId: number, taskId: number, itemId: number, status: ItemStatus, note: string): Promise<ReviewItem> {
   const r = await db.query(
     'UPDATE review_items SET status=$4, note=$5, updated_at=now() WHERE user_id=$1 AND task_id=$2 AND id=$3 RETURNING *',
     [userId, taskId, itemId, status, note.slice(0, 500)],
   )
   if (!r.rows[0]) throw new TaskError('检查项不存在', 404)
-  if (status === 'fail' && note.trim()) await addStandard(db, userId, taskId, note.trim())
+  if (status === 'fail' && note.trim()) {
+    await addStandard(db, userId, taskId, note.trim())
+    const t = await db.query<{ role_id: number | null; project_id: number | null }>(
+      'SELECT role_id, project_id FROM tasks WHERE user_id=$1 AND id=$2',
+      [userId, taskId],
+    )
+    const roleId = t.rows[0]?.role_id, projectId = t.rows[0]?.project_id
+    // 记忆入库失败不能挡住验收本身：经验是加分项，打回才是用户要的结果
+    if (roleId) {
+      try {
+        await addMemory(db, userId, Number(roleId), projectId === null || projectId === undefined ? null : Number(projectId), note.trim(), 'review')
+      } catch { /* 记忆条数到上限等情况忽略 */ }
+    }
+  }
   return item(r.rows[0])
 }
 

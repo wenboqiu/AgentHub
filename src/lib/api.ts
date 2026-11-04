@@ -9,11 +9,21 @@ export type NotifySettings = {
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; profileId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
-export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "profileId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "profileId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
 /** 项目配置：一组执行环境 + 默认优先级 + 检查项模板，起个名字复用 */
 export type Profile = { id: number; name: string; agent: Task["agent"]; machine: string | null; cwd: string | null; priority: Task["priority"]; checklist: string[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProfileInput = Partial<Omit<Profile, "id" | "tasks" | "createdAt" | "updatedAt">>;
+/** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文），可再挂一个默认配置 */
+export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; profileId: number | null; tasks: number; createdAt: string; updatedAt: string };
+export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updatedAt">>;
+
+/** 项目：一个代码库的身份与背景知识，可指向一套默认执行配置 */
+export type Project = { id: number; name: string; brief: string; profileId: number | null; tasks: number; createdAt: string; updatedAt: string };
+export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
+
+/** 角色记忆：projectId 为空 = 跨项目的通用经验 */
+export type Memory = { id: number; roleId: number; projectId: number | null; content: string; source: "manual" | "review"; weight: number; uses: number; lastUsedAt: string | null; createdAt: string; updatedAt: string };
 export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
 /** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
 export type EvidenceKind = "file" | "command" | "test" | "shot" | "log";
@@ -169,6 +179,22 @@ export class Api {
   createProfile = async (input: ProfileInput & { name: string }) => (await this.call<{ profile: Profile }>("POST", "/profiles", input)).profile;
   updateProfile = async (id: number, input: ProfileInput) => (await this.call<{ profile: Profile }>("PATCH", `/profiles/${id}`, input)).profile;
   deleteProfile = (id: number) => this.call("DELETE", `/profiles/${id}`);
+  roles = async () => (await this.call<{ roles: Role[] }>("GET", "/roles")).roles;
+  /** projectId 传 undefined = 全部；传 null = 只列跨项目的通用经验 */
+  memories = async (roleId: number, projectId?: number | null) =>
+    (await this.call<{ memories: Memory[] }>("GET", `/roles/${roleId}/memories${projectId === undefined ? "" : `?projectId=${projectId ?? ""}`}`)).memories;
+  addMemory = async (roleId: number, content: string, projectId: number | null) =>
+    (await this.call<{ memory: Memory }>("POST", `/roles/${roleId}/memories`, { content, projectId })).memory;
+  updateMemory = async (roleId: number, memoryId: number, content: string) =>
+    (await this.call<{ memory: Memory }>("PATCH", `/roles/${roleId}/memories/${memoryId}`, { content })).memory;
+  deleteMemory = (roleId: number, memoryId: number) => this.call("DELETE", `/roles/${roleId}/memories/${memoryId}`);
+  projects = async () => (await this.call<{ projects: Project[] }>("GET", "/projects")).projects;
+  createProject = async (input: ProjectInput & { name: string }) => (await this.call<{ project: Project }>("POST", "/projects", input)).project;
+  updateProject = async (id: number, input: ProjectInput) => (await this.call<{ project: Project }>("PATCH", `/projects/${id}`, input)).project;
+  deleteProject = (id: number) => this.call("DELETE", `/projects/${id}`);
+  createRole = async (input: RoleInput & { name: string }) => (await this.call<{ role: Role }>("POST", "/roles", input)).role;
+  updateRole = async (id: number, input: RoleInput) => (await this.call<{ role: Role }>("PATCH", `/roles/${id}`, input)).role;
+  deleteRole = (id: number) => this.call("DELETE", `/roles/${id}`);
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
   digests = (id: number) => this.call<TaskDigests>("GET", `/tasks/${id}/digest`);
   review = (id: number) => this.call<Review>("GET", `/tasks/${id}/review`);
@@ -177,7 +203,7 @@ export class Api {
   thread = (id: number, limit = 200) => this.call<{ events: ThreadEvent[] }>("GET", `/threads/task/${id}?limit=${limit}`);
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
   /** 派活：电脑在线时返回 runId/sessionId；离线时入队，返回 queued 和带 queuedAt 的任务 */
-  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task}>("POST", `/tasks/${id}/start`, input);
+  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task; /** 电脑端太旧：角色里的模型与上下文被忽略 */ roleDegraded?: boolean}>("POST", `/tasks/${id}/start`, input);
   /** 取消排队：不再等那台电脑上线 */
   unqueueTask = async (id: number) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/queue`)).task;
   /** 派活看板：排队中 / 在跑 / 卡住的任务聚合 */

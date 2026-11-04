@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Api, type Device, type NotifyKind, type NotifySettings } from "./lib/api";
 import Profiles from "./Profiles";
+import Roles from "./Roles";
+import Projects from "./Projects";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
 export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
@@ -411,6 +413,10 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             )}
           </section>
         )}
+
+        {loggedIn && api && <Roles api={api} />}
+
+        {loggedIn && api && <Projects api={api} />}
 
         {loggedIn && api && <Profiles api={api} />}
 

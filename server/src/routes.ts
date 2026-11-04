@@ -57,6 +57,9 @@ import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
 import { applyProfile, deleteProfile, findProfile, getProfile, listProfiles, saveProfile } from './profiles.ts'
+import { applyRole, deleteRole, findRole, getRole, listRoles, roleModel, saveRole } from './roles.ts'
+import { deleteProject, findProject, getProject, listProjects, saveProject } from './projects.ts'
+import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -92,7 +95,7 @@ function bearer(req: FastifyRequest) {
 
 // 一个 WS 连接：属于哪个账号、哪个设备会话（踢设备时按它们关闭）
 type Conn = { sock: Sock; userId: number; authSessionId: number }
-type Exec = Conn & { machine: string; replyBranch: boolean }
+type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean }
 const INVALID_LOGIN = 4401
 
 // Codex Desktop 结束一轮时不一定会写终态（直接关窗口、进程被杀都只留下 task_started），
@@ -247,6 +250,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
 
   const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
+  // 选了角色：补齐空着的执行工具，并把角色挂的默认配置一并套上（只补空字段，优先级跟着配置走）
+  const roleDefaults = async (userId: number, task: Task, b: Record<string, unknown>): Promise<Task> => {
+    if (!('roleId' in b) || task.roleId === null) return task
+    const role = await getRole(pool, userId, task.roleId)
+    const patch = await applyRole(pool, userId, task, role)
+    if (!('priority' in b) && role.profileId !== null) {
+      const p = await findProfile(pool, userId, role.profileId)
+      if (p && p.priority !== 'medium') patch.priority = p.priority
+    }
+    return saveTask(pool, userId, patch, task.id)
+  }
+  // 选了项目而任务还没挂配置：用项目的默认配置补齐执行环境（角色挂的配置优先，已填字段不覆盖）
+  const projectDefaults = async (userId: number, task: Task, b: Record<string, unknown>): Promise<Task> => {
+    if (!('projectId' in b) || task.projectId === null || task.profileId !== null) return task
+    const project = await findProject(pool, userId, task.projectId)
+    if (!project || project.profileId === null) return task
+    return saveTask(pool, userId, { profileId: project.profileId }, task.id)
+  }
   // 通知过滤管线：提醒广播和快照里的提醒都带 notify（静音的照常入列，只是不弹通知）
   const checkReminders = async (user?: number) => {
     for (const r of await collectReminders(pool,user)) {
@@ -266,7 +287,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
   }
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string) {
+  // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }) {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
@@ -283,7 +305,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
     pushSession(userId,pending,false); pushRun(userId,run); pushMessage(userId,message)
     if (task) pushTask(userId,task)
-    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text,mode,...(branchPoint ? {branchPoint} : {})})) {
+    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {})})) {
       const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
       if (failed) pushRun(userId,failed)
       await abortPending(userId,pendingId,'电脑端不在线')
@@ -303,7 +325,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!executors.has(execKey(userId, machine))) return
       let ok = false
       try {
-        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, 'fresh', '', item.taskId)
+        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, 'fresh', '', item.taskId, undefined, { model: item.model, instructions: item.instructions })
         ok = true
       } catch (e) {
         const attempts = await bumpAttempts(pool, userId, item.taskId)
@@ -432,6 +454,60 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     for (const taskId of affected) pushTask(req.userId, await getTask(pool, req.userId, taskId))
     return { ok: true }
   }))
+  // 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文），可再挂一个默认配置
+  app.get('/roles', async req => serial(async () => ({ roles: await listRoles(pool, req.userId) })))
+  app.post('/roles', async req => serial(async () => ({ role: await saveRole(pool, req.userId, req.body) })))
+  app.patch('/roles/:id', async req => serial(async () => ({
+    role: await saveRole(pool, req.userId, req.body, entityId((req.params as {id:string}).id)),
+  })))
+  app.delete('/roles/:id', async req => serial(async () => {
+    // 角色删掉后任务上的角色引用被置空（执行工具 / 电脑 / 目录都留着），这些任务要推一次
+    const affected = await deleteRole(pool, req.userId, entityId((req.params as {id:string}).id))
+    for (const taskId of affected) pushTask(req.userId, await getTask(pool, req.userId, taskId))
+    return { ok: true }
+  }))
+  // 角色记忆：员工的经验条目。projectId 不传 = 全部；传 null = 只列跨项目的通用经验
+  app.get('/roles/:id/memories', async req => serial(async () => {
+    const roleId = entityId((req.params as {id:string}).id)
+    await getRole(pool, req.userId, roleId)
+    const q = (req.query ?? {}) as { projectId?: string }
+    const scope = q.projectId === undefined ? undefined : q.projectId === '' || q.projectId === 'null' ? null : entityId(q.projectId)
+    return { memories: await listMemories(pool, req.userId, roleId, scope) }
+  }))
+  app.post('/roles/:id/memories', async req => serial(async () => {
+    const roleId = entityId((req.params as {id:string}).id)
+    await getRole(pool, req.userId, roleId)
+    const b = object(req.body ?? {})
+    const projectId = b.projectId === undefined || b.projectId === null ? null : entityId(b.projectId)
+    const memory = await addMemory(pool, req.userId, roleId, projectId, b.content as string, 'manual')
+    return { memory }
+  }))
+  app.patch('/roles/:id/memories/:memoryId', async req => serial(async () => {
+    const p = req.params as {id:string;memoryId:string}
+    return { memory: await updateMemory(pool, req.userId, entityId(p.id), entityId(p.memoryId), req.body) }
+  }))
+  app.delete('/roles/:id/memories/:memoryId', async req => serial(async () => {
+    const p = req.params as {id:string;memoryId:string}
+    await deleteMemory(pool, req.userId, entityId(p.id), entityId(p.memoryId))
+    return { ok: true }
+  }))
+  // 项目：一个代码库的身份与背景知识，可指向一套默认执行配置
+  app.get('/projects', async req => serial(async () => ({ projects: await listProjects(pool, req.userId) })))
+  app.post('/projects', async req => serial(async () => ({ project: await saveProject(pool, req.userId, req.body) })))
+  app.patch('/projects/:id', async req => serial(async () => ({
+    project: await saveProject(pool, req.userId, req.body, entityId((req.params as {id:string}).id)),
+  })))
+  app.delete('/projects/:id', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    // 项目删掉后任务上的归属被置空，这些任务要推一次才能看到变化
+    const affected = (await listTasks(pool, req.userId)).filter(t => t.projectId === id).map(t => t.id)
+    await deleteProject(pool, req.userId, id)
+    for (const taskId of affected) pushTask(req.userId, await getTask(pool, req.userId, taskId))
+    return { ok: true }
+  }))
+  app.get('/projects/:id', async req => serial(async () => ({
+    project: await getProject(pool, req.userId, entityId((req.params as {id:string}).id)),
+  })))
   app.post('/goals', async req => serial(async () => {
     const goal = await saveGoal(pool,req.userId,req.body)
     broadcast(req.userId,{type:'goal',goal}); return {goal}
@@ -451,6 +527,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.post('/tasks', async req => serial(async () => {
     const b = object(req.body ?? {})
     let task = await saveTask(pool,req.userId,req.body)
+    // 选了角色：角色决定执行工具，并可带出自己的默认配置
+    task = await roleDefaults(req.userId, task, b)
+    // 选了项目而没挂配置：用项目的默认配置补上，下面这段就会把它展开
+    task = await projectDefaults(req.userId, task, b)
     // 建任务时选了配置：空着的执行字段由配置补齐，检查项模板并入清单（优先级只在没显式指定时跟随）
     if (task.profileId !== null) {
       const profile = await getProfile(pool, req.userId, task.profileId)
@@ -464,8 +544,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const id = entityId((req.params as {id:string}).id)
     const b = object(req.body ?? {})
     let task = await saveTask(pool,req.userId,req.body,id)
-    // 只有这次请求显式改了配置才套用，避免每次编辑任务都重算一遍检查项
-    if ('profileId' in b && task.profileId !== null) {
+    // 只有这次请求显式换了角色才套用，避免每次编辑都重算
+    task = await roleDefaults(req.userId, task, b)
+    task = await projectDefaults(req.userId, task, b)
+    // 只有这次请求显式改了配置 / 项目才套用，避免每次编辑任务都重算一遍检查项
+    if (('profileId' in b || 'projectId' in b) && task.profileId !== null) {
       const profile = await getProfile(pool, req.userId, task.profileId)
       task = await saveTask(pool, req.userId, await applyProfile(pool, req.userId, task, profile), task.id)
     }
@@ -543,25 +626,43 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }))
   app.post('/tasks/:id/start', async req => serial(async () => {
     const task = await getTask(pool,req.userId,entityId((req.params as {id:string}).id)), b = object(req.body ?? {})
-    // 任务关联了配置但字段还空着（比如配置是后改的）：派活时用配置兜底
+    // 任务是「谁来做」优先按角色定：角色可以指定执行工具、模型和上下文
+    const role = await findRole(pool, req.userId, task.roleId)
+    // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
+    const project = await findProject(pool, req.userId, task.projectId)
+    // 任务关联了配置但字段还空着（比如配置是后改的）：派活时用配置兜底；任务没选配置就用角色/项目挂的那个
     const profile = await findProfile(pool, req.userId, task.profileId)
-    const agent = b.agent ?? task.agent ?? profile?.agent
+      ?? await findProfile(pool, req.userId, role?.profileId ?? null)
+      ?? await findProfile(pool, req.userId, project?.profileId ?? null)
+    const agent = b.agent ?? role?.agent ?? task.agent ?? profile?.agent
     if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex') throw new TaskError('请选择 Claude 或 Codex')
     const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录',4000)
     const online = agentList(req.userId)
     const machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''),'电脑名',4000)
     const text = taskText(b.text ?? (task.notes || task.title),'第一条消息',8000)
+    // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
+    const memories = role ? await pickMemories(pool, req.userId, role.id, task.projectId) : []
+    const instructions = composeInstructions({
+      role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
+      project,
+      memories: memories.map(m => m.content),
+    })
+    const dispatch = { model: roleModel(role), instructions }
     // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么都定下来了）
     if (!executors.has(execKey(req.userId,machine))) {
-      await enqueueDispatch(pool, req.userId, task.id, { machine, agent, cwd, text })
+      await enqueueDispatch(pool, req.userId, task.id, { machine, agent, cwd, text, ...dispatch })
       const queued = await saveTask(pool, req.userId, { agent, machine, cwd }, task.id)
       pushTask(req.userId, queued)
       return { queued: true, task: queued }
     }
     // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
     if (await dequeueDispatch(pool, req.userId, task.id)) pushTask(req.userId, await getTask(pool, req.userId, task.id))
-    return startSession(req.userId,{agent,machine,cwd},task.title,text,'fresh','',task.id)
+    const res = await startSession(req.userId,{agent,machine,cwd},task.title,text,'fresh','',task.id,undefined,dispatch)
+    // 执行器太旧：模型和上下文会随 run.start 发过去但被忽略，得让用户知道角色没真正生效
+    const degraded = !executors.get(execKey(req.userId,machine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
+    if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
+    return degraded ? { ...res, roleDegraded: true } : res
   }))
   app.delete('/tasks/:id/queue', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
@@ -925,7 +1026,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         return
       }
       const key = execKey(userId, machine)
-      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch:q.get('capabilities')==='reply-branch-v1' }
+      // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）
+      const caps = new Set((q.get('capabilities') ?? '').split(',').map(s => s.trim()).filter(Boolean))
+      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1') }
       let registered = false
       const queue: unknown[] = []
       const handle = (data: unknown) => {

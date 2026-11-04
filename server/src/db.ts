@@ -6,6 +6,9 @@ import { migrateWatchdog } from './watchdog.ts'
 import { migrateReview } from './review.ts'
 import { migrateQueue } from './queue.ts'
 import { migrateProfiles } from './profiles.ts'
+import { migrateRoles } from './roles.ts'
+import { migrateProjects } from './projects.ts'
+import { migrateMemories } from './memories.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -151,10 +154,16 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_session_activity_time ON session_activity(user_id, bucket)')
   // 一次性回填：消息表里现存的消息先入账（已入账的桶不重复累计；早已被裁剪掉的历史无法找回）
-  await pool.query(`INSERT INTO session_activity (user_id, session_id, bucket, count)
-    SELECT user_id, session_id, to_timestamp(floor(extract(epoch FROM created_at) / 300) * 300), count(*)::int
-    FROM messages GROUP BY 1, 2, 3
-    ON CONFLICT DO NOTHING`)
+  // messages 与 users 都是 on delete cascade，但并发删账号时回填可能读到刚被删掉的那一行，
+  // 触发 FK 报错把整个启动打挂——回填是尽力而为，FK 冲突直接跳过。
+  try {
+    await pool.query(`INSERT INTO session_activity (user_id, session_id, bucket, count)
+      SELECT user_id, session_id, to_timestamp(floor(extract(epoch FROM created_at) / 300) * 300), count(*)::int
+      FROM messages GROUP BY 1, 2, 3
+      ON CONFLICT DO NOTHING`)
+  } catch (e) {
+    if ((e as { code?: string })?.code !== '23503') throw e
+  }
   await pool.query(`CREATE TABLE IF NOT EXISTS approvals (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -182,6 +191,12 @@ export async function migrate(pool: pg.Pool) {
     await migrateReview(client)
     await migrateQueue(client)
     await migrateProfiles(client)
+    // 项目引用 profiles（默认配置），必须排在它后面
+    await migrateProjects(client)
+    // 角色引用 profiles，必须排在它后面
+    await migrateRoles(client)
+    // 记忆引用 roles 与 projects，必须排在两者后面
+    await migrateMemories(client)
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Api, EvidenceKind, Goal, Profile, Review, ReviewItem, Session, Task, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import type { Api, EvidenceKind, Goal, Profile, Project, Review, ReviewItem, Role, Session, Task, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
 import { localDateTime } from "./ScheduleFields";
@@ -29,6 +29,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const [timeline, setTimeline] = useState<ThreadEvent[] | null>(null);
   const [review, setReview] = useState<Review | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [failing, setFailing] = useState<number | null>(null), [note, setNote] = useState(""), [newItem, setNewItem] = useState("");
   const flashTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
@@ -43,8 +45,14 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     api.review(task.id).then(r => { if (alive) setReview(r); }).catch(() => { if (alive) setReview(null); });
     return () => { alive = false; };
   }, [api, task.id, task.updatedAt]);
-  // 项目配置只在打开详情时拉一次（改动不频繁）
-  useEffect(() => { let alive = true; api.profiles().then(p => { if (alive) setProfiles(p); }).catch(() => {}); return () => { alive = false; }; }, [api]);
+  // 项目配置与角色只在打开详情时拉一次（改动不频繁）
+  useEffect(() => {
+    let alive = true;
+    api.profiles().then(p => { if (alive) setProfiles(p); }).catch(() => {});
+    api.roles().then(r => { if (alive) setRoles(r); }).catch(() => {});
+    api.projects().then(p => { if (alive) setProjects(p); }).catch(() => {});
+    return () => { alive = false; };
+  }, [api]);
   const digest: TaskDigests | null = liveDigest ?? fetchedDigest;
   const flash = () => { setSaved(true); window.clearTimeout(flashTimer.current); flashTimer.current = window.setTimeout(() => setSaved(false), 1600); };
   const elapsed = (iso: string) => { const s = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} 小时 ${m} 分` : `${m} 分 ${s % 60} 秒`; };
@@ -67,6 +75,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     .map(k => ({ k, label: (review?.evidence ?? []).find(e => e.kind === k)?.label ?? k, list: (review?.evidence ?? []).filter(e => e.kind === k) }))
     .filter(g => g.list.length > 0);
 
+  const currentRole = task.roleId === null ? null : roles.find(r => r.id === task.roleId) ?? null;
+  const currentProject = task.projectId === null ? null : projects.find(p => p.id === task.projectId) ?? null;
   const done = task.status === "done";
   const machine = task.machine || (agents.length === 1 ? agents[0] : "");
   const listenOnly = isListenOnly(task.agent);
@@ -225,6 +235,9 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {task.timerStartedAt
           ? <><button disabled={busy} onClick={() => void guard(async () => onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
           : <button disabled={busy || done} onClick={() => void guard(async () => onSaved(await api.startTimer(task.id)))}><Icon name="timer" />开始计时</button>}
+        {roles.length > 0 && <label className="role-pick">角色
+          <select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">不指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select>
+        </label>}
         <button className="primary" disabled={busy || !!reason} onClick={() => { setMessage(task.notes || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "再开一个会话" : "开始执行"}</button>
         {reason ? <span className="dim">{reason}</span> : offline ? <span className="dim">{machine} 离线，开始后会在它上线时自动派发</span> : null}
       </div>
@@ -232,18 +245,24 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         已排队 · 等 {task.machine || machine} 上线后自动开始（{new Date(task.queuedAt).toLocaleString()} 入队）
         <button className="link" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unqueueTask(task.id)))}>取消排队</button>
       </p>}
-      {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task); if (r.sessionId) onSession(r.sessionId); else setStarting(false); }); }}>
+      {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task);
+              if (r.roleDegraded) setErr("电脑端版本较旧：角色里的模型与上下文没有生效，升级电脑端后重新派发即可");
+              if (r.sessionId) onSession(r.sessionId); else setStarting(false); }); }}>
         <label>第一条消息<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
         <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
       </form>}
       <details className="exec-settings" open={!task.agent || !task.cwd}>
-        <summary>执行设置（配置 / 工具 / 电脑 / 目录）</summary>
+        <summary>执行设置（角色 / 项目 / 配置 / 工具 / 电脑 / 目录）</summary>
         <div className="form-grid">
+          <label>角色<select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select></label>
+          <label>项目<select value={task.projectId ?? ""} disabled={busy} onChange={e => patch({ projectId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
           <label>项目配置<select value={task.profileId ?? ""} disabled={busy} onChange={e => patch({ profileId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
           <label>执行工具<select value={task.agent ?? ""} disabled={busy} onChange={e => patch({ agent: (e.target.value || null) as Task["agent"] })}><option value="">无（普通待办）</option>{AGENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></label>
           <label>电脑<select value={task.machine ?? ""} disabled={busy} onChange={e => patch({ machine: e.target.value || null })}><option value="">开始时自动选择</option>{machines.map(m => <option key={m} value={m}>{m}{agents.includes(m) ? "" : "（离线）"}</option>)}</select></label>
         </div>
         <label className="cwd-field">项目目录<InlineField value={task.cwd ?? ""} ariaLabel="项目目录" placeholder={"例如 D:\\Work2\\项目"} maxLength={4000} required={false} disabled={busy} onSave={cwd => patch({ cwd: cwd || null })} /></label>
+        {currentProject && <p className="hint">项目「{currentProject.name}」{currentProject.brief ? `：${currentProject.brief.slice(0, 80)}${currentProject.brief.length > 80 ? "…" : ""}` : "（还没写项目说明）"}；派活时项目说明和该角色在这个项目上的记忆会一起下发。</p>}
+        {currentRole && <p className="hint">角色「{currentRole.name}」：{currentRole.agent ? AGENT_LABEL[currentRole.agent] ?? currentRole.agent : "执行工具未定"}{currentRole.model ? ` · 模型 ${currentRole.model}` : " · 用执行端默认模型"}{currentRole.context ? ` · 上下文 ${currentRole.context.length} 字` : " · 没有上下文"}；派活时随第一条消息一起下发。</p>}
         {task.profileId !== null && <p className="hint">选了配置只补空着的字段，已填的不覆盖；配置的检查项模板会并入下面的清单，自动成为验收检查项。</p>}
       </details>
     </section>

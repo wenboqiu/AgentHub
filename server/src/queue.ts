@@ -13,6 +13,9 @@ export type QueuedDispatch = {
   agent: string
   cwd: string
   text: string
+  /** 角色带来的模型与上下文：入队时一并存下，否则电脑上线时角色可能已经被改掉 */
+  model: string | null
+  instructions: string
   attempts: number
   createdAt: string
 }
@@ -25,11 +28,17 @@ export async function migrateQueue(db: DB) {
     agent text NOT NULL,
     cwd text NOT NULL DEFAULT '',
     text text NOT NULL,
+    model text,
+    instructions text NOT NULL DEFAULT '',
     attempts integer NOT NULL DEFAULT 0,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, task_id),
     FOREIGN KEY (user_id, task_id) REFERENCES tasks(user_id, id) ON DELETE CASCADE)`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_dispatch_queue_machine ON task_dispatch_queue(user_id, machine, created_at)')
+  // 老库补列（新库建表时已经带了）
+  await db.query(`ALTER TABLE task_dispatch_queue
+    ADD COLUMN IF NOT EXISTS model text,
+    ADD COLUMN IF NOT EXISTS instructions text NOT NULL DEFAULT ''`)
 }
 
 const toQueued = (r: any): QueuedDispatch => ({
@@ -40,19 +49,22 @@ const toQueued = (r: any): QueuedDispatch => ({
   agent: r.agent,
   cwd: r.cwd,
   text: r.text,
+  model: r.model ?? null,
+  instructions: r.instructions ?? '',
   attempts: Number(r.attempts),
   createdAt: new Date(r.created_at).toISOString(),
 })
 
 // 同一任务重复排队时覆盖旧的那次（用户改了第一条消息或换了电脑，以最新为准）
-export async function enqueueDispatch(db: DB, userId: number, taskId: number, d: { machine: string; agent: string; cwd: string; text: string }) {
+export async function enqueueDispatch(db: DB, userId: number, taskId: number, d: { machine: string; agent: string; cwd: string; text: string; model?: string | null; instructions?: string }) {
   await db.query(
-    `INSERT INTO task_dispatch_queue(user_id,task_id,machine,agent,cwd,text)
-     VALUES($1,$2,$3,$4,$5,$6)
+    `INSERT INTO task_dispatch_queue(user_id,task_id,machine,agent,cwd,text,model,instructions)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8)
      ON CONFLICT (user_id,task_id) DO UPDATE
        SET machine=excluded.machine,agent=excluded.agent,cwd=excluded.cwd,text=excluded.text,
+           model=excluded.model,instructions=excluded.instructions,
            attempts=0,created_at=now()`,
-    [userId, taskId, d.machine, d.agent, d.cwd, d.text],
+    [userId, taskId, d.machine, d.agent, d.cwd, d.text, d.model ?? null, d.instructions ?? ''],
   )
 }
 

@@ -155,6 +155,29 @@ pub fn precheck(mode: Mode, key: &str, cwd: &str, roots: &[String]) -> Result<()
     }
 }
 
+/// 角色带来的模型与上下文：空字符串表示「不覆盖执行端默认」。
+/// claude 有真正的系统提示钩子，直接追加到命令行；上下文不会混进用户消息里。
+pub fn claude_role_args(args: &mut Vec<String>, model: &str, instructions: &str) {
+    if !model.is_empty() {
+        args.push("--model".into());
+        args.push(model.into());
+    }
+    if !instructions.is_empty() {
+        args.push("--append-system-prompt".into());
+        args.push(instructions.into());
+    }
+}
+
+/// Codex 没有等价的系统提示钩子：上下文放在首条消息前面，用分隔线隔开。
+pub fn codex_role_text(text: &str, instructions: &str) -> String {
+    if instructions.is_empty() { text.to_string() } else { format!("{instructions}\n\n---\n\n{text}") }
+}
+
+/// Codex 的模型是进程级配置：`codex -c model="xxx" app-server`（每个 run 一个进程，互不影响）
+pub fn codex_model_args(model: &str) -> Vec<String> {
+    if model.is_empty() { vec![] } else { vec!["-c".into(), format!("model=\"{model}\"")] }
+}
+
 /// claude 命令行参数
 pub fn claude_args(mode: Mode, key: &str) -> Vec<String> {
     let mut a: Vec<String> = vec!["-p".into()];
@@ -1023,9 +1046,11 @@ fn report(run: &Run, f: Finish) {
     }
 }
 
-fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str) {
+fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
     let mut cmd = Command::new("claude");
-    cmd.args(claude_branch_args(mode, key, branch_point))
+    let mut args = claude_branch_args(mode, key, branch_point);
+    claude_role_args(&mut args, model, instructions);
+    cmd.args(args)
     .current_dir(cwd)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
@@ -1195,15 +1220,16 @@ fn reap(child: &mut Child, wait: Duration) {
     kill_tree(child);
 }
 
-fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str) {
+fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
     // 附图先落到临时文件（Codex 用 localImage 输入读本地路径），函数退出时统一清理
     let (image_items, image_files) = codex_image_inputs(images, &std::env::temp_dir().join("agenthub-images"), &run.run_id);
     let _image_cleanup = TempFiles(image_files);
+    let body = codex_role_text(text, instructions);
     let mut input = Vec::with_capacity(image_items.len() + 1);
-    input.push(json!({"type":"text","text":text,"text_elements":[]}));
+    input.push(json!({"type":"text","text":body,"text_elements":[]}));
     input.extend(image_items);
     let mut cmd = Command::new(exe);
-    cmd.arg("app-server").current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(codex_model_args(model)).arg("app-server").current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match no_window(&mut cmd).spawn() {
         Ok(c) => c,
         Err(e) => return run.fail(&format!("启动 codex 失败：{e}")),
@@ -1415,7 +1441,8 @@ impl Runner {
                     .and_then(|v| v.as_array())
                     .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
                     .unwrap_or_default();
-                self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), images, s("mode"), s("branchPoint"));
+                // 角色带来的模型与上下文：老服务端不发这两个字段，空串就是「用执行端默认」
+                self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), images, s("mode"), s("branchPoint"), s("model"), s("instructions"));
             }
             Some("run.stop") => {
                 if let Some(e) = self.runs.lock().unwrap().get(&s("runId")) {
@@ -1452,7 +1479,7 @@ impl Runner {
         }
     }
 
-    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String) {
+    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String, model: String, instructions: String) {
         let (tx, rx) = mpsc::channel();
         let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone() };
         {
@@ -1467,14 +1494,14 @@ impl Runner {
         let roots = self.config.read().unwrap().allowed_roots.clone();
         let runs = self.runs.clone();
         std::thread::spawn(move || {
-            execute(&run, &roots, &agent, &mode, &key, &cwd, &text, &images, &branch_point);
+            execute(&run, &roots, &agent, &mode, &key, &cwd, &text, &images, &branch_point, &model, &instructions);
             runs.lock().unwrap().remove(&run.run_id);
         });
     }
 }
 
 /// 前置检查 + 按 agent 分派
-fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str) {
+fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
     let Some(mode) = Mode::parse(mode) else {
         return run.fail(&format!("不支持的模式：{mode}"));
     };
@@ -1494,7 +1521,7 @@ fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd:
         }
     }
     match agent {
-        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text, images, branch_point),
+        "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text, images, branch_point, model, instructions),
         "claude" => match claude_open_sessions() {
             Ok(open) if open.iter().any(|s| s == key) => {
                 // 终端里开着的会话只能投递文字，图片没有通道，明确报错而不是悄悄丢掉
@@ -1503,11 +1530,11 @@ fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd:
                 }
                 run_claude_terminal(run, key, cwd, text)
             }
-            Ok(_) => run_claude(run, mode, key, cwd, text, images, branch_point),
+            Ok(_) => run_claude(run, mode, key, cwd, text, images, branch_point, model, instructions),
             Err(e) => run.fail(&format!("无法确认这个会话是否还开在终端里（claude agents --json：{e}）")),
         },
         "codex" => match default_codex_bin_dir().and_then(|d| find_codex_exe(&d)) {
-            Some(exe) => run_codex(run, mode, &exe, key, cwd, text, images, branch_point),
+            Some(exe) => run_codex(run, mode, &exe, key, cwd, text, images, branch_point, model, instructions),
             None => run.fail("没找到 Codex Desktop 自带的 codex.exe"),
         },
         other => run.fail(&format!("不认识的 agent：{other}")),
@@ -1676,6 +1703,31 @@ mod tests {
         assert!(!valid_key("a b"));
         assert!(!valid_key("..\\x"));
         assert!(!valid_key("a\"b"));
+    }
+
+    #[test]
+    fn role_args_ride_along_with_the_rest() {
+        // 空角色不改变任何命令行：行为和没有角色时完全一致
+        let mut none = claude_args(Mode::Fresh, "k1");
+        let before = none.clone();
+        claude_role_args(&mut none, "", "");
+        assert_eq!(none, before);
+
+        // 有角色：模型和系统提示追加在末尾，原有参数一个不少
+        let mut with = claude_args(Mode::Fresh, "k1");
+        claude_role_args(&mut with, "opus", "只改测试，不动实现");
+        let tail = &with[with.len() - 4..];
+        assert_eq!(tail, ["--model", "opus", "--append-system-prompt", "只改测试，不动实现"]);
+        assert_eq!(&with[..before.len()], &before[..]);
+    }
+
+    #[test]
+    fn codex_role_channel() {
+        // 模型走进程级配置覆盖；上下文走首条消息，空上下文时一个字都不多加
+        assert_eq!(codex_model_args(""), Vec::<String>::new());
+        assert_eq!(codex_model_args("gpt-5-codex"), vec!["-c".to_string(), "model=\"gpt-5-codex\"".to_string()]);
+        assert_eq!(codex_role_text("修一个 bug", ""), "修一个 bug");
+        assert_eq!(codex_role_text("修一个 bug", "先写测试"), "先写测试\n\n---\n\n修一个 bug");
     }
 
     #[test]
