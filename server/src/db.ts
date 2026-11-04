@@ -5,6 +5,7 @@ import { migrateDigests } from './digest.ts'
 import { migrateWatchdog } from './watchdog.ts'
 import { migrateReview } from './review.ts'
 import { migrateQueue } from './queue.ts'
+import { migrateProfiles } from './profiles.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -178,6 +179,7 @@ export async function migrate(pool: pg.Pool) {
     await migrateWatchdog(client)
     await migrateReview(client)
     await migrateQueue(client)
+    await migrateProfiles(client)
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()

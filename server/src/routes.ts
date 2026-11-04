@@ -55,6 +55,7 @@ import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } fro
 import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
+import { applyProfile, deleteProfile, findProfile, getProfile, listProfiles, saveProfile } from './profiles.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -358,6 +359,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     broadcast(req.userId, { type: 'notify.settings', settings })
     return { settings }
   }))
+  // 项目配置：一组执行环境（agent / 电脑 / 目录）+ 默认优先级 + 检查项模板，起个名字复用
+  app.get('/profiles', async req => serial(async () => ({ profiles: await listProfiles(pool, req.userId) })))
+  app.post('/profiles', async req => serial(async () => ({ profile: await saveProfile(pool, req.userId, req.body) })))
+  app.patch('/profiles/:id', async req => serial(async () => ({
+    profile: await saveProfile(pool, req.userId, req.body, entityId((req.params as {id:string}).id)),
+  })))
+  app.delete('/profiles/:id', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    // 配置删掉后任务上的执行字段留着，只是不再指向任何配置；这些任务要推一次才能看到变化
+    const affected = (await listTasks(pool, req.userId)).filter(t => t.profileId === id).map(t => t.id)
+    await deleteProfile(pool, req.userId, id)
+    for (const taskId of affected) pushTask(req.userId, await getTask(pool, req.userId, taskId))
+    return { ok: true }
+  }))
   app.post('/goals', async req => serial(async () => {
     const goal = await saveGoal(pool,req.userId,req.body)
     broadcast(req.userId,{type:'goal',goal}); return {goal}
@@ -375,12 +390,26 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return {ok:true}
   }))
   app.post('/tasks', async req => serial(async () => {
-    const task = await saveTask(pool,req.userId,req.body)
+    const b = object(req.body ?? {})
+    let task = await saveTask(pool,req.userId,req.body)
+    // 建任务时选了配置：空着的执行字段由配置补齐，检查项模板并入清单（优先级只在没显式指定时跟随）
+    if (task.profileId !== null) {
+      const profile = await getProfile(pool, req.userId, task.profileId)
+      const patch = await applyProfile(pool, req.userId, task, profile)
+      if (!('priority' in b) && profile.priority !== 'medium') patch.priority = profile.priority
+      task = await saveTask(pool, req.userId, patch, task.id)
+    }
     pushTask(req.userId,task); return {task}
   }))
   app.patch('/tasks/:id', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
-    const task = await saveTask(pool,req.userId,req.body,id)
+    const b = object(req.body ?? {})
+    let task = await saveTask(pool,req.userId,req.body,id)
+    // 只有这次请求显式改了配置才套用，避免每次编辑任务都重算一遍检查项
+    if ('profileId' in b && task.profileId !== null) {
+      const profile = await getProfile(pool, req.userId, task.profileId)
+      task = await saveTask(pool, req.userId, await applyProfile(pool, req.userId, task, profile), task.id)
+    }
     // 标记完成时收尾手动计时的执行记录，日历才能看到真实的结束时间
     if ((req.body as {status?:unknown}|null)?.status === 'done')
       for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
@@ -455,10 +484,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }))
   app.post('/tasks/:id/start', async req => serial(async () => {
     const task = await getTask(pool,req.userId,entityId((req.params as {id:string}).id)), b = object(req.body ?? {})
-    const agent = b.agent ?? task.agent
+    // 任务关联了配置但字段还空着（比如配置是后改的）：派活时用配置兜底
+    const profile = await findProfile(pool, req.userId, task.profileId)
+    const agent = b.agent ?? task.agent ?? profile?.agent
     if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex') throw new TaskError('请选择 Claude 或 Codex')
-    const cwd = taskText(b.cwd ?? task.cwd ?? '', '项目目录',4000)
+    const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录',4000)
     const online = agentList(req.userId)
     const machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''),'电脑名',4000)
     const text = taskText(b.text ?? (task.notes || task.title),'第一条消息',8000)
@@ -831,6 +862,16 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
 
     const me: Conn = { sock: socket, userId, authSessionId }
+    // 前端心跳：应用层 ping/pong。协议层 ping 浏览器/WebView 里看不到，
+    // 没法用来判断"假连接"（手机切网后 socket 看着还开着，其实早就收不到消息了）
+    socket.on('message', (data: unknown) => {
+      try {
+        if ((JSON.parse(String(data)) as { type?: string } | null)?.type !== 'ping') return
+        if (socket.readyState === 1) socket.send('{"type":"pong"}')
+      } catch {
+        /* 非法消息忽略 */
+      }
+    })
     socket.on('close', () => clients.delete(me))
     socket.on('error', () => clients.delete(me))
     await serial(async () => {

@@ -521,3 +521,8 @@ header h1 { white-space: nowrap; }
 
 /* 派活排队：等目标电脑上线 */
 .queue-hint { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0 0; padding: 8px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); font-size: 13px; }
+
+/* 项目配置：一条配置 = 一组执行环境 + 检查项模板 */
+.profile-card { margin: 12px 0; padding: 16px; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 12px; }
+.profile-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.profile-card label { font-size: 13px; }

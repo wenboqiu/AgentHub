@@ -9,8 +9,11 @@ export type NotifySettings = {
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
-export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; profileId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "profileId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
+/** 项目配置：一组执行环境 + 默认优先级 + 检查项模板，起个名字复用 */
+export type Profile = { id: number; name: string; agent: Task["agent"]; machine: string | null; cwd: string | null; priority: Task["priority"]; checklist: string[]; tasks: number; createdAt: string; updatedAt: string };
+export type ProfileInput = Partial<Omit<Profile, "id" | "tasks" | "createdAt" | "updatedAt">>;
 export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
 /** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
 export type EvidenceKind = "file" | "command" | "test" | "shot" | "log";
@@ -140,6 +143,10 @@ export class Api {
   createTask = async (input: TaskInput & {title: string}) => (await this.call<{task: Task}>("POST", "/tasks", input)).task;
   updateTask = async (id: number, input: TaskInput) => (await this.call<{task: Task}>("PATCH", `/tasks/${id}`, input)).task;
   deleteTask = (id: number) => this.call("DELETE", `/tasks/${id}`);
+  profiles = async () => (await this.call<{ profiles: Profile[] }>("GET", "/profiles")).profiles;
+  createProfile = async (input: ProfileInput & { name: string }) => (await this.call<{ profile: Profile }>("POST", "/profiles", input)).profile;
+  updateProfile = async (id: number, input: ProfileInput) => (await this.call<{ profile: Profile }>("PATCH", `/profiles/${id}`, input)).profile;
+  deleteProfile = (id: number) => this.call("DELETE", `/profiles/${id}`);
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
   digests = (id: number) => this.call<TaskDigests>("GET", `/tasks/${id}/digest`);
   review = (id: number) => this.call<Review>("GET", `/tasks/${id}/review`);
