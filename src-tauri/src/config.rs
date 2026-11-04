@@ -13,7 +13,7 @@ pub struct Config {
     pub notify_desktop: bool,
     /// 登录的邮箱（只用于显示；token 是登录后拿到的设备会话 token）
     pub email: String,
-    /// 允许手机远程执行的项目目录（会话 cwd 必须在其中某一项之下）
+    /// 项目目录白名单（可选）：为空表示不限制目录；非空时会话 cwd 必须在其中某一项之下
     pub allowed_roots: Vec<String>,
     /// 总开关：关闭时不连服务端的执行器通道
     pub remote_enabled: bool,

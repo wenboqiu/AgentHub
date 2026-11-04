@@ -38,16 +38,56 @@ pub fn norm_path(p: &str) -> String {
     s.to_lowercase()
 }
 
-/// cwd 必须在 roots 某一项之下（或等于）；`..` 一律拒绝；前缀按目录边界判断
-pub fn cwd_allowed(cwd: &str, roots: &[String]) -> bool {
+/// 规范化后的白名单（去掉空项）
+fn clean_roots(roots: &[String]) -> Vec<String> {
+    roots.iter().map(|r| norm_path(r)).filter(|r| !r.is_empty()).collect()
+}
+
+/// cwd 检查失败的原因。分成几种报，手机上才能一眼看出是「配置问题」还是「路径写错」
+#[derive(Debug, PartialEq)]
+pub enum CwdIssue {
+    /// 没填目录
+    Empty,
+    /// 路径里有 `..`：前缀匹配没意义，统一拒绝
+    DotDot,
+    /// 白名单非空，但 cwd 不在任何一项之下（附上当前白名单）
+    Outside(Vec<String>),
+}
+
+/// cwd 检查：`..` 一律拒绝；**白名单为空 = 不限制**（只做基本合法性检查）；
+/// 白名单非空时 cwd 必须落在某一项之下（或等于），前缀按目录边界判断。
+pub fn check_cwd(cwd: &str, roots: &[String]) -> Result<(), CwdIssue> {
     let c = norm_path(cwd);
-    if c.is_empty() || c.split('\\').any(|seg| seg == "..") {
-        return false;
+    if c.is_empty() {
+        return Err(CwdIssue::Empty);
     }
-    roots.iter().any(|r| {
-        let r = norm_path(r);
-        !r.is_empty() && (c == r || c.starts_with(&format!("{r}\\")))
-    })
+    if c.split('\\').any(|seg| seg == "..") {
+        return Err(CwdIssue::DotDot);
+    }
+    let list = clean_roots(roots);
+    if list.is_empty() {
+        return Ok(()); // 没配白名单：不限制目录
+    }
+    if list.iter().any(|r| c == *r || c.starts_with(&format!("{r}\\"))) {
+        Ok(())
+    } else {
+        // 报错里给用户填的原文，不是规范化后的小写
+        let shown = roots.iter().map(|r| r.trim().to_string()).filter(|r| !r.is_empty()).collect();
+        Err(CwdIssue::Outside(shown))
+    }
+}
+
+pub fn cwd_allowed(cwd: &str, roots: &[String]) -> bool {
+    check_cwd(cwd, roots).is_ok()
+}
+
+/// 目录必须真实存在：盘符/名字写错时给一条能看懂的错误，而不是让子进程起不来
+pub fn cwd_exists(cwd: &str) -> Result<(), String> {
+    if Path::new(cwd.trim()).is_dir() {
+        Ok(())
+    } else {
+        Err(format!("项目目录不存在：{cwd}（检查盘符和路径是否写错）"))
+    }
 }
 
 /// sessionKey 会拼进命令行和文件名，只允许字母数字和 `-` `_`
@@ -97,10 +137,15 @@ pub fn precheck(mode: Mode, key: &str, cwd: &str, roots: &[String]) -> Result<()
     if mode.needs_key() && !valid_key(key) {
         return Err("会话 id 格式不对".into());
     }
-    if !cwd_allowed(cwd, roots) {
-        return Err(format!("项目目录不在允许列表里：{cwd}"));
+    match check_cwd(cwd, roots) {
+        Ok(()) => Ok(()),
+        Err(CwdIssue::Empty) => Err("项目目录为空：先在任务或会话里填一个项目目录".into()),
+        Err(CwdIssue::DotDot) => Err(format!("项目目录不能包含 ..：{cwd}（请填写完整路径）")),
+        Err(CwdIssue::Outside(list)) => Err(format!(
+            "项目目录不在白名单内：{cwd}（白名单：{}；清空电脑端那一栏即不限制目录）",
+            list.join("; ")
+        )),
     }
-    Ok(())
 }
 
 /// claude 命令行参数
@@ -1227,6 +1272,9 @@ fn execute(run: &Run, roots: &[String], agent: &str, mode: &str, key: &str, cwd:
     if let Err(e) = precheck(mode, key, cwd, roots) {
         return run.fail(&e);
     }
+    if let Err(e) = cwd_exists(cwd) {
+        return run.fail(&e);
+    }
     if !branch_point.is_empty() {
         if mode != Mode::Fork || !valid_key(branch_point) {
             return run.fail("分支节点格式或运行模式不正确");
@@ -1285,10 +1333,27 @@ mod tests {
         assert!(!cwd_allowed("D:\\Work2\\..\\Secret", &r), ".. 拒绝");
         assert!(!cwd_allowed("D:\\Play", &r));
         assert!(!cwd_allowed("", &r));
-        assert!(!cwd_allowed("D:\\Work2", &[]), "空名单全部拒绝");
-        assert!(!cwd_allowed("D:\\Work2", &roots(&[""])));
         assert!(cwd_allowed("\\\\?\\D:\\Work2\\a", &r));
         assert!(cwd_allowed("D:\\a", &roots(&["D:\\"])));
+        // 空名单 = 不限制（只挡空路径和 ..）
+        assert!(cwd_allowed("D:\\Work2", &[]), "没配白名单不限制目录");
+        assert!(cwd_allowed("E:\\any\\where", &[]));
+        assert!(cwd_allowed("D:\\Work2", &roots(&["", "  "])), "全空项等同没配");
+        assert!(!cwd_allowed("D:\\a\\..\\b", &[]), "没配白名单时 .. 仍然拒绝");
+        assert!(!cwd_allowed("", &[]));
+    }
+
+    #[test]
+    fn cwd_must_exist() {
+        let dir = std::env::temp_dir().join(format!("agenthub-cwd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(cwd_exists(dir.to_str().unwrap()).is_ok());
+        assert!(cwd_exists(&format!("{}\\no-such-sub-dir", dir.display())).is_err());
+        let missing = format!("{}\\nope", dir.display());
+        let e = cwd_exists(&missing).unwrap_err();
+        assert!(e.starts_with(&format!("项目目录不存在：{missing}")), "{e}");
+        assert!(e.contains("检查盘符"), "给出可操作的提示：{e}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1313,8 +1378,31 @@ mod tests {
         assert!(precheck(Mode::Fork, "abc-1", "D:\\Work2\\a", &r).is_ok());
         for m in [Mode::Resume, Mode::Fork, Mode::Fresh] {
             let e = precheck(m, "abc", "D:\\Play", &r).unwrap_err();
-            assert!(e.starts_with("项目目录不在允许列表里"), "{e}");
+            assert!(e.starts_with("项目目录不在白名单内"), "{e}");
+            assert!(e.contains("D:\\Work2"), "报错带上白名单原文：{e}");
         }
+    }
+
+    #[test]
+    fn precheck_tells_apart_why_cwd_is_bad() {
+        // 三种失败各说各的，手机上能直接判断该改配置还是改路径
+        let r = roots(&["D:\\Work2"]);
+        let empty = precheck(Mode::Fresh, "", "  ", &r).unwrap_err();
+        assert!(empty.starts_with("项目目录为空"), "{empty}");
+
+        let dotdot = precheck(Mode::Fresh, "", "D:\\Work2\\..\\Secret", &r).unwrap_err();
+        assert!(dotdot.starts_with("项目目录不能包含 .."), "{dotdot}");
+
+        let outside = precheck(Mode::Fresh, "", "E:\\Play", &r).unwrap_err();
+        assert!(outside.starts_with("项目目录不在白名单内"), "{outside}");
+        assert!(outside.contains("E:\\Play") && outside.contains("白名单：D:\\Work2"), "{outside}");
+        assert!(outside.contains("清空"), "给出解法：{outside}");
+
+        // 没配白名单时只有「空」和「..」两种失败
+        assert!(precheck(Mode::Fresh, "", "E:\\Play", &[]).is_ok());
+        assert!(check_cwd("E:\\Play", &[]).is_ok());
+        assert_eq!(check_cwd("", &[]).unwrap_err(), CwdIssue::Empty);
+        assert_eq!(check_cwd("E:\\a\\..\\b", &[]).unwrap_err(), CwdIssue::DotDot);
     }
 
     #[test]

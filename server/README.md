@@ -71,7 +71,7 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | DELETE | `/tasks/:id/sessions/:sessionId` | `{task}`；会话清理后仍可取消挂接 |
 | POST | `/tasks/:id/start` | `{agent?, machine?, cwd?, text?}` → `{runId, sessionId, task}`；agent 只能是 claude / codex |
 
-开始任务时，body 优先于任务默认设置；没有 machine 且只有一台在线电脑时自动选用它。text 默认备注或标题（1–8000 字符）。离线预检查返回 409 且任务不变。创建运行、临时会话、首条消息、挂接关系和 doing 状态在事务内完成；提交后发送 `mode:'fresh'`。发送失败返回 409，保留 doing 状态和 aborted 临时会话。执行器仍负责目录白名单和授权。
+开始任务时，body 优先于任务默认设置；没有 machine 且只有一台在线电脑时自动选用它。text 默认备注或标题（1–8000 字符）。离线预检查返回 409 且任务不变。创建运行、临时会话、首条消息、挂接关系和 doing 状态在事务内完成；提交后发送 `mode:'fresh'`。发送失败返回 409，保留 doing 状态和 aborted 临时会话。执行器仍负责目录检查和授权。
 
 目标与任务的 POST/PATCH 均支持 `startAt`、`dueAt`（含时区的 ISO 日期时间或 null）及 `remindStart`、`remindDue`（boolean，默认 true）。返回时间归一化为 UTC；截止时间不得早于开始时间，部分更新也按合并后的时间校验。任务另支持 `checklist: [{id,text,done}]`，最多 100 项，id 唯一且最多 100 字符，text 为 1–500 字符，done 为 boolean；PATCH 替换整个清单，默认空数组。
 
@@ -89,7 +89,7 @@ viewer 的 snapshot 增加 `goals`、`tasks` 数组。新增同账号广播：`{
 
 新表（启动时 `CREATE TABLE IF NOT EXISTS`）：`runs`、`messages`（每会话只留最近 200 条）、`approvals`；`runs` / `approvals` 随清理任务一起清 7 天前的。
 
-控制类接口没有单独的密钥，和其它接口一样用设备会话 token；兜底是电脑端「允许手机远程执行」开关 + 项目目录白名单 + 每次授权都要在手机上确认。
+控制类接口没有单独的密钥，和其它接口一样用设备会话 token；兜底是电脑端「允许手机远程执行」开关 + 每次授权都要在手机上确认（项目目录白名单可选，留空不限制）。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|

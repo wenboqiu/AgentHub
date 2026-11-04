@@ -442,8 +442,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               允许手机远程执行（保存后生效；每次授权仍要在手机上确认）
             </label>
             <label>
-              允许的项目目录（每行一个；只有位于这些目录下的会话才能被远程接着跑）
-              <textarea value={rootsText} onChange={(e) => setRootsText(e.target.value)} rows={3} placeholder={"D:\\Work2"} spellCheck={false} />
+              项目目录白名单（可选，每行一个；<b>留空 = 不限制目录</b>，填了才只允许这些目录下的会话）
+              <textarea value={rootsText} onChange={(e) => setRootsText(e.target.value)} rows={3} placeholder={"留空不限制，例如 D:\\Work2"} spellCheck={false} />
             </label>
             <p className="kv">
               远程执行器：
