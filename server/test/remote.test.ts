@@ -169,6 +169,26 @@ describe('远程控制', () => {
     assert.equal(r.status, 409)
   })
 
+  it('Codex 状态卡在 running 但久无事件时放行（Desktop 关窗没写终态）', async () => {
+    const machine = uniq('pc')
+    await executor(machine)
+    const sessionId = uniq('s')
+    // 两小时前的 task_started，之后再没有任何事件
+    const at = new Date(Date.now() - 2 * 60 * 60_000).toISOString()
+    assert.equal((await call('POST', '/events', { events: [{ agent: 'codex', sessionId, machine, cwd: 'D:\\Work2\\Demo', state: 'running', at }] })).status, 200)
+    const id = `codex:${sessionId}`
+    const r = await call('POST', `/sessions/${encodeURIComponent(id)}/messages`, { text: '继续' })
+    assert.equal(r.status, 200)
+    assert.ok(r.body.runId)
+  })
+
+  it('浏览器端 app 级 ping 会收到 pong（用于识别假连接）', async () => {
+    const v = await viewer()
+    const before = v.msgs.length
+    v.ws.send(JSON.stringify({ type: 'ping' }))
+    await waitFor(() => v.msgs.slice(before).some(m => m.type === 'pong'))
+  })
+
   it('授权：run.approval → viewer 收到 notify → 决定 → 执行器收到；重复决定 409；停止转发', async () => {
     const machine = uniq('pc')
     const v = await viewer()
@@ -205,6 +225,69 @@ describe('远程控制', () => {
     sendJson(ex, { type: 'run.status', runId, status: 'stopped' })
     await waitFor(() => find(v, 'run', m => m.run.id === runId && m.run.status === 'stopped'))
     assert.equal((await call('POST', `/runs/${runId}/stop`, {})).status, 409)
+  })
+
+  it('Codex 提问：tool=userInput → 提交答案 → 执行器收到 answers；缺答案 400；deny 跳过', async () => {
+    const machine = uniq('pc')
+    const v = await viewer()
+    const ex = await executor(machine)
+    const { id } = await newSession(machine)
+    const runId = (await call('POST', `/sessions/${encodeURIComponent(id)}/messages`, { text: '生成图标' })).body.runId
+    await waitFor(() => find(ex, 'run.start'))
+    sendJson(ex, { type: 'run.status', runId, status: 'running' })
+    const questions = [
+      { header: '图标', id: 'q1', question: '你想新建哪种图标？', options: [{ label: 'MailDesk 应用图标', description: '桌面图标' }, { label: '新建按钮图标', description: '' }] },
+    ]
+    sendJson(ex, { type: 'run.approval', runId, localId: 9, tool: 'userInput', detail: JSON.stringify(questions) })
+    const created = await waitFor(() => find(ex, 'approval.created'))
+    const pushed = await waitFor(() => find(v, 'approval', m => m.approval.id === created.approvalId))
+    assert.equal(pushed.approval.tool, 'userInput')
+    assert.equal(pushed.notify, true)
+    // 入库消息给人看问题文本，不是原始 JSON
+    const asked = (await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)).body.messages.find((m: any) => m.role === 'approval')
+    assert.ok(asked.text.startsWith('Codex 提问：你想新建哪种图标'), asked.text)
+
+    // allow 但没带答案 → 400
+    assert.equal((await call('POST', `/approvals/${created.approvalId}`, { decision: 'allow' })).status, 400)
+    // 答案格式错 → 400
+    assert.equal((await call('POST', `/approvals/${created.approvalId}`, { decision: 'allow', answers: { q1: '不是数组' } })).status, 400)
+    // 正确提交 → 执行器收到 answers
+    assert.equal((await call('POST', `/approvals/${created.approvalId}`, { decision: 'allow', answers: { q1: ['MailDesk 应用图标'] } })).status, 200)
+    const decide = await waitFor(() => find(ex, 'approval.decide'))
+    assert.equal(decide.decision, 'allow')
+    assert.deepEqual(decide.answers, { q1: ['MailDesk 应用图标'] })
+    const answered = await waitFor(() => find(v, 'approval', m => m.approval.id === created.approvalId && m.approval.status === 'allowed'))
+    assert.equal(answered.notify, false)
+    const q = (await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)).body
+    assert.ok(q.messages.some((m: any) => m.role === 'approval' && m.text.includes('已回答') && m.text.includes('MailDesk 应用图标')))
+
+    // 第二个提问：deny = 跳过
+    sendJson(ex, { type: 'run.approval', runId, localId: 10, tool: 'userInput', detail: JSON.stringify(questions) })
+    const created2 = await waitFor(() => find(ex, 'approval.created', m => m.approvalId !== created.approvalId))
+    assert.equal((await call('POST', `/approvals/${created2.approvalId}`, { decision: 'deny' })).status, 200)
+    const decide2 = await waitFor(() => find(ex, 'approval.decide', m => m.approvalId === created2.approvalId))
+    assert.equal(decide2.decision, 'deny')
+    assert.equal(decide2.answers, undefined)
+    const skipped = await waitFor(() => find(v, 'approval', m => m.approval.id === created2.approvalId && m.approval.status === 'denied'))
+    assert.ok(skipped)
+    const q2 = (await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)).body
+    assert.ok(q2.messages.some((m: any) => m.role === 'approval' && m.text.startsWith('已跳过 Codex 提问')))
+  })
+
+  it('run.message 带 images：data URL 存库并广播；非法/超大图片被过滤', async () => {
+    const machine = uniq('pc')
+    const v = await viewer()
+    const ex = await executor(machine)
+    const { id } = await newSession(machine)
+    const runId = (await call('POST', `/sessions/${encodeURIComponent(id)}/messages`, { text: '生成图片' })).body.runId
+    await waitFor(() => find(ex, 'run.start'))
+    sendJson(ex, { type: 'run.status', runId, status: 'running' })
+    sendJson(ex, { type: 'run.message', runId, role: 'assistant', text: '图片：a.png', images: ['data:image/png;base64,AAAA', 'javascript:alert(1)', 42, `data:image/png;base64,${'B'.repeat(9_000_001)}`] })
+    const pushed = await waitFor(() => find(v, 'message', m => m.message.text === '图片：a.png'))
+    assert.deepEqual(pushed.message.images, ['data:image/png;base64,AAAA'])
+    const q = (await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)).body
+    const stored = q.messages.find((m: any) => m.text === '图片：a.png')
+    assert.deepEqual(stored.images, ['data:image/png;base64,AAAA'])
   })
 
   it('授权超时立即广播 expired，运行继续；隔离其它机器/运行，重复通知幂等', async () => {

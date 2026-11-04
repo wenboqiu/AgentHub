@@ -52,7 +52,7 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | POST | `/sessions/:id/ack` | 标为已处理并广播 |
 | POST | `/sessions/ack-all` | 全部标为已处理并广播 |
 | DELETE | `/sessions/:id` | 删除并广播 `{type:'removed', id}` |
-| GET (WS) | `/ws?token=` | 连上先发 `{type:'snapshot', sessions}`；之后每次变化发 `{type:'session', session, notify}`；服务端每 30 秒发 ping |
+| GET (WS) | `/ws?token=` | 连上先发 `{type:'snapshot', sessions}`；之后每次变化发 `{type:'session', session, notify}`；服务端每 30 秒发协议层 ping。客户端可发应用层 `{type:'ping'}` 探活，服务端回 `{type:'pong'}`（协议层 ping 在浏览器 / WebView 的 JS 里不可见，判断假连接只能用这一层） |
 
 ### 目标与任务（0.5.0）
 

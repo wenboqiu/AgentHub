@@ -33,6 +33,28 @@ export type ThreadEvent =
   | { type: "reminder"; at: string; kind: "start" | "due"; title: string; acked: boolean }
   | { type: "digest"; at: string; kind: "review" | "failure"; text: string };
 
+/** 派活看板条目：排队中 / 在跑 / 卡住（进行中却没有任何在跑的执行）的任务 */
+export type BoardRun = { id: string; sessionId: string | null; status: "queued" | "running"; startedAt: string };
+export type BoardEntry = {
+  taskId: number;
+  title: string;
+  status: "todo" | "doing";
+  agent: Task["agent"];
+  machine: string | null;
+  cwd: string | null;
+  priority: Task["priority"];
+  queued: boolean;
+  attempts: number;
+  queuedAt: string | null;
+  run: BoardRun | null;
+  waitingApproval: boolean;
+  lastActivityAt: string | null;
+  machineOnline: boolean;
+  stuck: boolean;
+  updatedAt: string;
+};
+export type Board = { entries: BoardEntry[]; agents: string[]; generatedAt: string };
+
 export type Session = {
   id: string;
   agent: "claude" | "codex" | "doubao" | "workbuddy";
@@ -56,7 +78,7 @@ export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbudd
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
 export type ActivityBucket = { sessionId: string; at: string; count: number };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";
-export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null };
+export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null }
 export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
 export type Approval = {
   id: string;
@@ -158,6 +180,8 @@ export class Api {
   startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task}>("POST", `/tasks/${id}/start`, input);
   /** 取消排队：不再等那台电脑上线 */
   unqueueTask = async (id: number) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/queue`)).task;
+  /** 派活看板：排队中 / 在跑 / 卡住的任务聚合 */
+  dispatchBoard = () => this.call<Board>("GET", "/dispatch/board");
   /** 手动计时：不依赖会话，直接给任务记一次执行 */
   startTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/start`, {})).task;
   stopTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/stop`, {})).task;
@@ -188,7 +212,8 @@ export class Api {
   /** 日历：一段时间内的执行记录（ISO 时间） */
   executions = (from: string, to: string) => this.call<{ executions: Execution[] }>("GET", `/runs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
   activity = (from: string, to: string) => this.call<{ activity: ActivityBucket[] }>("GET", `/activity?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
-  decide = (approvalId: string, decision: "allow" | "deny") => this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision });
+  decide = (approvalId: string, decision: "allow" | "deny", answers?: Record<string, string[]>) =>
+    this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision, ...(answers ? { answers } : {}) });
   history = (sessionId: string) => this.call<{ messages: Message[] }>("POST", `/sessions/${encodeURIComponent(sessionId)}/history`, {});
 }
 
@@ -218,30 +243,80 @@ export type Handlers = {
   onAuthExpired(): void;
 };
 
-/** WebSocket 客户端，断线自动重连（1s -> 30s 退避） */
+/** 心跳间隔；发了 ping 这么久还没 pong 就认定这条连接已经死了 */
+const HEARTBEAT_MS = 20000;
+const HEARTBEAT_TIMEOUT_MS = 15000;
+
+/**
+ * WebSocket 客户端，断线自动重连（1s -> 30s 退避）。
+ * 光靠 onclose 不够：手机切网、后台被冻结时，socket 常常"看起来还开着"却再也收不到消息，
+ * onclose 永远不来，界面就停在旧快照上（例如会话早已结束还显示"运行中"、消息按钮一直灰着）。
+ * 所以另加两条：① app 级 ping/pong 探活，超时主动重连；② 回到前台/网络恢复时强制重连，
+ * 服务端在连接建立时会推一份 snapshot，等于一次全量刷新。
+ */
 export function connect(url: string, token: string, h: Handlers) {
   let ws: WebSocket | null = null;
   let stopped = false;
   let delay = 1000;
   let timer: number | undefined;
+  let beat: number | undefined;
+  /** 已发出、还在等 pong 的时间点；0 表示当前没有在等 */
+  let waiting = 0;
+  /** 累计的 ping/pong 计数（跨重连保留）：一次 pong 都没收到过，说明服务端还不支持 app 级 ping，
+   *  这时就别再靠心跳判断死活了，免得旧服务端把连接反复掐断 */
+  let pings = 0;
+  let pongs = 0;
+  /** 回前台强制重连的节流，避免窗口来回切换时刷爆服务端 */
+  let lastResume = 0;
+
+  const retry = () => {
+    if (stopped) return;
+    window.clearTimeout(timer);
+    timer = window.setTimeout(open, delay);
+    delay = Math.min(delay * 2, 30000);
+  };
 
   const open = () => {
     if (stopped) return;
+    window.clearTimeout(timer);
     h.onState("connecting");
     const wsUrl = base(url).replace(/^http/, "ws") + `/ws?token=${encodeURIComponent(token.trim())}`;
+    let sock: WebSocket;
     try {
-      ws = new WebSocket(wsUrl);
+      sock = new WebSocket(wsUrl);
     } catch {
       retry();
       return;
     }
-    ws.onopen = () => {
+    ws = sock;
+    waiting = 0;
+    window.clearInterval(beat);
+    beat = window.setInterval(() => {
+      if (ws !== sock || sock.readyState !== WebSocket.OPEN) return;
+      if (waiting && Date.now() - waiting > HEARTBEAT_TIMEOUT_MS) {
+        waiting = 0;
+        // 从没收到过 pong 且已经发了 3 次：服务端不支持 app 级 ping，停掉心跳（断线仍有 onclose 兜底）
+        if (pongs === 0 && pings >= 3) {
+          window.clearInterval(beat);
+          return;
+        }
+        // 之前 pong 正常、这次超时：连接已经死了（手机切网/后台冻结），主动重连
+        try { sock.close(); } catch { /* 忽略 */ }
+        return;
+      }
+      waiting = Date.now();
+      pings++;
+      try { sock.send('{"type":"ping"}'); } catch { /* 忽略 */ }
+    }, HEARTBEAT_MS);
+    sock.onopen = () => {
+      if (ws !== sock) return;
       delay = 1000;
       h.onState("open");
     };
-    ws.onmessage = (e) => {
+    sock.onmessage = (e) => {
       try {
         const m = JSON.parse(String(e.data));
+        if (m.type === "pong") { waiting = 0; pongs++; return; }
         if (m.type === "snapshot") h.onSnapshot(m.sessions, m.agents ?? [], m.approvals ?? [], m.goals ?? [], m.tasks ?? [], m.reminders ?? []);
         else if (m.type === "reminder") h.onReminder(m.reminder);
         else if (m.type === "reminder.acked") h.onReminderAck(m.id);
@@ -262,7 +337,9 @@ export function connect(url: string, token: string, h: Handlers) {
         /* 忽略坏消息 */
       }
     };
-    ws.onclose = (e) => {
+    sock.onclose = (e) => {
+      if (ws !== sock) return; // 已被新连接顶替，别动新连接的心跳
+      window.clearInterval(beat);
       ws = null;
       h.onState("closed");
       if (e.code === 4401) {
@@ -272,17 +349,31 @@ export function connect(url: string, token: string, h: Handlers) {
       }
       retry();
     };
-    ws.onerror = () => ws?.close();
+    sock.onerror = () => { try { sock.close(); } catch { /* 忽略 */ } };
   };
-  const retry = () => {
+
+  /** 回到前台 / 网络恢复：直接换一条连接，拿服务端的 snapshot 全量刷新 */
+  const resume = () => {
     if (stopped) return;
-    timer = window.setTimeout(open, delay);
-    delay = Math.min(delay * 2, 30000);
+    if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+    if (Date.now() - lastResume < 5000) return;
+    lastResume = Date.now();
+    delay = 1000;
+    const old = ws;
+    ws = null; // 先摘掉引用，旧连接的 onclose 就不会再触发退避重连
+    try { old?.close(); } catch { /* 忽略 */ }
+    open();
   };
+
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", resume);
+  if (typeof window !== "undefined") window.addEventListener("online", resume);
   open();
   return () => {
     stopped = true;
     window.clearTimeout(timer);
+    window.clearInterval(beat);
+    if (typeof document !== "undefined") document.removeEventListener("visibilitychange", resume);
+    if (typeof window !== "undefined") window.removeEventListener("online", resume);
     ws?.close();
   };
 }

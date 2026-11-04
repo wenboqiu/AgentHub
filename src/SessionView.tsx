@@ -7,6 +7,7 @@ import Icon from "./Icon";
 import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
+import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
 import { clockAt, fullAt } from "./lib/time";
 
 const STATE_LABEL: Record<string, string> = {
@@ -39,19 +40,31 @@ type Props = {
   onTaskSaved(task:Task):void;
 };
 
-/** 不能发消息的原因；null 表示可以发 */
-export const isPendingSession = (id: string) => id.includes(":pending-");
-
-export function sendBlockReason(p: { session: Session; agents: string[]; running: boolean }): string | null {
-  if (isListenOnly(p.session.agent)) return `${agentName(p.session.agent)} 目前支持状态监听，请在 ${agentName(p.session.agent)} 中继续对话`;
-  if (isPendingSession(p.session.id)) return p.session.state === "running" ? "新会话正在启动…" : "这个新会话没能启动";
-  if (!p.agents.includes(p.session.machine)) return "电脑端不在线";
-  if (p.running) return "这个会话正在运行";
-  if (p.session.agent === "codex" && p.session.state === "running") return "这个 Codex 会话正在 Desktop 里运行，等它结束后再发";
-  return null;
-}
+/** 不能发消息的原因与各种阻塞判定，见 lib/sendBlock（纯逻辑，单独测试） */
+export { isPendingSession, sendBlockReason, isStuckRunning, STALE_RUNNING_MS } from "./lib/sendBlock";
 
 const NOT_FOUND_GRACE_MS = 5000;
+
+/** Codex 提问（request_user_input）的 questions，存在 approval.detail 里（JSON 字符串） */
+type UserQuestion = { id: string; question: string; options: { label: string; description?: string }[] };
+const parseQuestions = (detail: string): UserQuestion[] | null => {
+  try {
+    const v = JSON.parse(detail);
+    if (!Array.isArray(v) || !v.length) return null;
+    const out = v
+      .filter((q): q is Record<string, unknown> => !!q && typeof q === "object" && typeof (q as { id?: unknown }).id === "string")
+      .map((q) => ({
+        id: String(q.id),
+        question: typeof q.question === "string" ? q.question : String(q.header ?? ""),
+        options: Array.isArray(q.options)
+          ? q.options.filter((o): o is { label: string; description?: string } => !!o && typeof o === "object" && typeof (o as { label?: unknown }).label === "string")
+          : [],
+      }));
+    return out.length ? out : null;
+  } catch {
+    return null;
+  }
+};
 
 export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -61,6 +74,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
+  /** Codex 提问卡片里每个问题的已选项：questionId → 选项 label 数组（可多选，对应协议 answers 数组） */
+  const [picks, setPicks] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [note, setNote] = useState("");
   const [spawnOpen, setSpawnOpen] = useState(false);
@@ -70,6 +85,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [spawnText, setSpawnText] = useState("");
   const [gaveUp, setGaveUp] = useState(false);
   const [linkingTask,setLinkingTask] = useState(false);
+  /** 底部确认面板是否被用户收起（只影响展开状态，不影响审批本身） */
+  const [sheetCollapsed, setSheetCollapsed] = useState(false);
+  /** 图片预览浮层：当前放大查看的图片（data URL） */
+  const [preview, setPreview] = useState<string | null>(null);
   /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
   const stick = useRef(true);
   const id = session?.id ?? "";
@@ -130,17 +149,32 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     setLinkingTask(false);
   }, [sessionId]);
 
-  // Esc 关闭浮层面板（分支/新建会话、关联任务）
+  // Esc 关闭浮层面板（分支/新建会话、关联任务、图片预览、底部确认面板）
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       setSpawnOpen(false);
       setBranchMessage(null);
       setLinkingTask(false);
+      setPreview(null);
+      setSheetCollapsed(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // 待确认请求到达时自动展开底部确认面板；用户可收起，浮动徽标可再展开
+  const sheetOpen = approvals.length > 0 && !sheetCollapsed;
+  useEffect(() => {
+    if (approvals.length > 0) setSheetCollapsed(false);
+  }, [approvals.length]);
+  // 浮层打开时锁定背景滚动
+  useEffect(() => {
+    if (!sheetOpen && !preview) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => { document.body.style.overflow = prev; };
+  }, [sheetOpen, preview]);
 
   // 跟随滚动：只有本来就停在底部附近时才自动滚到最新消息
   useEffect(() => {
@@ -240,13 +274,20 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     setDeciding(a.id);
     setErr("");
     try {
-      await api.decide(a.id, d);
+      const qs = a.tool === "userInput" ? parseQuestions(a.detail) : null;
+      await api.decide(a.id, d, qs ? Object.fromEntries(qs.map((q) => [q.id, picks[q.id] ?? []])) : undefined);
+      if (qs) setPicks((p) => Object.fromEntries(Object.entries(p).filter(([k]) => !qs.some((q) => q.id === k))));
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
       setDeciding(null);
     }
   };
+  const togglePick = (qid: string, label: string) =>
+    setPicks((p) => {
+      const cur = p[qid] ?? [];
+      return { ...p, [qid]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
+    });
 
   return (
     <div className="app session-view">
@@ -313,7 +354,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>
-              <div className={`msg ${m.role}`}>{m.text}</div>
+              <div className={`msg ${m.role}`}>
+                {m.text}
+                {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
+              </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
               {m.role==="assistant" && <MessageActions message={m} api={api}
                 branchReason={active || session.state==="running" ? "请等待会话运行结束" : !agents.includes(session.machine) ? "电脑端不在线" : !m.branchPoint ? "请刷新记录，或等待完整回复结束后再分支" : ""}
@@ -322,25 +366,93 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
             </li>
           ))}
         </ul>
-        {approvals.map((a) => (
-          <div key={a.id} className="approval-card">
-            <div className="approval-head">
-              <span>请求授权：<b>{a.tool}</b></span>
-              <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
-            </div>
-            <pre>{a.detail}</pre>
-            <div className="btns">
-              <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
-                {deciding === a.id ? "处理中…" : "允许"}
-              </button>
-              <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
-                {deciding === a.id ? "处理中…" : "拒绝"}
-              </button>
-            </div>
-          </div>
-        ))}
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
       </main>
+      {/* 底部确认面板：待确认请求从屏幕底部弹出（参考 WorkBuddy），可收起为浮动徽标 */}
+      {approvals.length > 0 && !sheetOpen && (
+        <button className="approval-pill" onClick={() => setSheetCollapsed(false)}>
+          {approvals.length} 项待确认，点击展开
+        </button>
+      )}
+      {sheetOpen && (
+        <>
+          <div className="sheet-backdrop" onClick={() => setSheetCollapsed(true)} />
+          <section className="approval-sheet" role="dialog" aria-modal="true" aria-label="待确认">
+            <span className="sheet-grabber" aria-hidden="true" />
+            <header className="sheet-head">
+              <strong>待确认</strong>
+              <button className="toast-close" aria-label="收起确认面板" onClick={() => setSheetCollapsed(true)}><Icon name="close" /></button>
+            </header>
+            {approvals.map((a) => {
+              const qs = a.tool === "userInput" ? parseQuestions(a.detail) : null;
+              if (!qs) return (
+                <div key={a.id} className="approval-card">
+                  <div className="approval-head">
+                    <span>请求授权：<b>{a.tool}</b></span>
+                    <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
+                  </div>
+                  <pre>{a.detail}</pre>
+                  <div className="btns">
+                    <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
+                      {deciding === a.id ? "处理中…" : "允许"}
+                    </button>
+                    <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
+                      {deciding === a.id ? "处理中…" : "拒绝"}
+                    </button>
+                  </div>
+                </div>
+              );
+              return (
+                <div key={a.id} className="approval-card user-input-card">
+                  <div className="approval-head">
+                    <span>Codex 提问</span>
+                    <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
+                  </div>
+                  {qs.map((q) => (
+                    <fieldset key={q.id} className="question-block">
+                      <legend>{q.question}</legend>
+                      {q.options.length > 0 && (
+                        <div className="option-list">
+                          {q.options.map((o) => {
+                            const on = (picks[q.id] ?? []).includes(o.label);
+                            return (
+                              <button
+                                key={o.label}
+                                className="option-btn"
+                                aria-pressed={on}
+                                disabled={deciding === a.id}
+                                onClick={() => togglePick(q.id, o.label)}
+                              >
+                                <span className="option-label">{o.label}</span>
+                                {o.description && <small>{o.description}</small>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </fieldset>
+                  ))}
+                  <div className="btns">
+                    <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
+                      {deciding === a.id ? "提交中…" : "提交回答"}
+                    </button>
+                    <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
+                      {deciding === a.id ? "处理中…" : "跳过"}
+                    </button>
+                  </div>
+                  <p className="hint">不选直接提交会把空答案告诉 Codex；跳过后它会按自己的默认继续。</p>
+                </div>
+              );
+            })}
+          </section>
+        </>
+      )}
+      {/* 图片预览浮层：点击消息里的图片打开，点击任意处或 Esc 关闭 */}
+      {preview && (
+        <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片预览" onClick={() => setPreview(null)}>
+          <img src={preview} alt="图片预览" />
+        </div>
+      )}
       {(err || note || speech.error) && (
         <div className="toast" role="status">
           <span className="toast-text">{err || note || speech.error}</span>

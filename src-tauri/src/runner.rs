@@ -8,6 +8,7 @@
 
 use crate::claude::{home_dir, truncate_chars};
 use crate::config::SharedConfig;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -23,6 +24,10 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 const HISTORY_COUNT: usize = 50;
 const TEXT_MAX: usize = 4000;
+/// request_user_input 的消息图片太大就放弃附带（base64 后约 5.3MB，WS 和移动端都能承受）
+const IMAGE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Codex 的用户输入请求（request_user_input 工具）：不是审批，是带选项的提问
+const USER_INPUT_METHOD: &str = "item/tool/requestUserInput";
 
 // ---------------------------------------------------------------- 纯函数
 
@@ -360,6 +365,8 @@ pub fn parse_codex_line(line: &str) -> CodexIn {
 pub enum CodexEvent {
     Agent(String),
     Command(String),
+    /// 生成/展示的图片落在了本机（imageGeneration 的 savedPath / imageView 的 path）
+    Image(String),
     TurnStarted(String),
     TurnDone { status: String },
 }
@@ -374,6 +381,9 @@ pub fn codex_event(method: &str, params: &Value) -> Option<CodexEvent> {
                     (!t.trim().is_empty()).then(|| CodexEvent::Agent(t.to_string()))
                 }
                 "commandExecution" => item.get("command").and_then(|c| c.as_str()).map(|c| CodexEvent::Command(c.to_string())),
+                // 生成失败（没有 savedPath / 带 failure）不算图片事件
+                "imageGeneration" => item.get("savedPath").and_then(|p| p.as_str()).filter(|_| item.get("failure").is_none()).map(|p| CodexEvent::Image(p.to_string())),
+                "imageView" => item.get("path").and_then(|p| p.as_str()).map(|p| CodexEvent::Image(p.to_string())),
                 _ => None,
             }
         }
@@ -423,6 +433,46 @@ pub fn codex_decision(method: &str, allow: bool) -> Value {
         (true, false) => "denied",
     };
     json!({ "decision": d })
+}
+
+/// 用户输入请求（item/tool/requestUserInput）→ 提取 questions 数组；不是这类请求返回 None。
+/// params 里还有 isBlocking / threadId / turnId，服务端暂时用不到，先不转发。
+pub fn codex_user_input<'a>(method: &str, params: &'a Value) -> Option<&'a Value> {
+    if method != USER_INPUT_METHOD {
+        return None;
+    }
+    params.get("questions").filter(|q| q.is_array())
+}
+
+/// 把 UI 提交的 {"问题id": ["选项", ...]} 转成协议要求的 {"answers": {"问题id": {"answers": [...]}}}；
+/// 空/非法输入按「全部跳过」回空对象，Codex 会走自己的默认处理。
+pub fn codex_input_response(answers: &Value) -> Value {
+    let mut wrapped = serde_json::Map::new();
+    if let Some(o) = answers.as_object() {
+        for (k, v) in o {
+            if v.is_array() {
+                wrapped.insert(k.clone(), json!({ "answers": v }));
+            }
+        }
+    }
+    json!({ "answers": wrapped })
+}
+
+/// 图片文件转 data URL：读不到、超过大小上限或不是常见图片格式时返回 None
+pub fn image_data_url(path: &str) -> Option<String> {
+    let mime = match path.rsplit('.').next()?.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => return None,
+    };
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > IMAGE_MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)))
 }
 
 fn rpc_request(id: i64, method: &str, params: Value) -> String {
@@ -700,6 +750,8 @@ pub enum RunMsg {
     /// 连接断开：静默结束进程，不再上报
     Shutdown,
     Decide { approval_id: String, allow: bool },
+    /// 用户输入请求的答案（request_user_input）；answers 形如 {"问题id": ["选项"]}
+    Answer { approval_id: String, answers: Value },
     Created { local_id: u64, approval_id: String },
     Line(String),
     Eof,
@@ -732,6 +784,11 @@ impl Approvals {
         let _ = out.send(json!({"type":"run.approval","runId":run_id,"localId":local_id,"tool":tool,"detail":detail}));
     }
 
+    /// 用户输入请求：detail 放 questions 的 JSON（服务端原样存进 approvals.detail，UI 解析渲染）
+    fn add_input(&mut self, out: &Sender<Value>, run_id: &str, questions: &Value, key: Value) {
+        self.add(out, run_id, "userInput", &questions.to_string(), key, USER_INPUT_METHOD, Value::Null);
+    }
+
     fn created(&mut self, local_id: u64, approval_id: String, out: &Sender<Value>, run_id: &str) -> Option<(Pending, bool)> {
         if self.expired_local.remove(&local_id) {
             self.early.remove(&approval_id);
@@ -755,6 +812,15 @@ impl Approvals {
             self.early.insert(approval_id.to_string(), allow);
         }
         None
+    }
+
+    /// 用户输入请求的答案。UI 只能看到 approval.created 之后的 approvalId，所以不需要 early 暂存
+    fn answer(&mut self, approval_id: &str, answers: &Value) -> Option<Pending> {
+        let local = self.by_local.iter().find(|(_, p)| p.approval_id.as_deref() == Some(approval_id) && p.method == USER_INPUT_METHOD).map(|(k, _)| *k);
+        local.and_then(|l| self.by_local.remove(&l)).map(|mut p| {
+            p.input = answers.clone();
+            p
+        })
     }
 
     fn report_expired(out: &Sender<Value>, run_id: &str, approval_id: &str) {
@@ -793,6 +859,11 @@ impl Run {
 
     fn message(&self, role: &str, text: &str) {
         let _ = self.out.send(json!({"type":"run.message","runId":self.run_id,"role":role,"text":clip(text)}));
+    }
+
+    /// 带图片的消息（Codex 生成的图片，data URL 形式）
+    fn message_images(&self, text: &str, images: Vec<String>) {
+        let _ = self.out.send(json!({"type":"run.message","runId":self.run_id,"role":"assistant","text":clip(text),"images":images}));
     }
 
     fn message_at(&self, text: &str, source: Option<&str>, point: Option<&str>) {
@@ -946,6 +1017,8 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, branch_po
                     answer_claude(&mut stdin, &p, allow);
                 }
             }
+            // Claude 没有用户输入请求；答案只会派给 Codex 运行
+            Ok(RunMsg::Answer { .. }) => {}
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => finish = Some(Finish::Silent),
         }
@@ -1114,6 +1187,13 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                         run.message_at(&t, source, point);
                     },
                     Some(CodexEvent::Command(c)) => run.message("tool", &format!("命令：{c}")),
+                    Some(CodexEvent::Image(path)) => {
+                        let name = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("图片").to_string();
+                        match image_data_url(&path) {
+                            Some(url) => run.message_images(&format!("图片：{name}"), vec![url]),
+                            None => run.message("system", &format!("生成了图片但无法读取：{path}")),
+                        }
+                    }
                     Some(CodexEvent::TurnStarted(id)) => turn_id = Some(id),
                     Some(CodexEvent::TurnDone { status }) => {
                         finish = Some(match status.as_str() {
@@ -1124,13 +1204,16 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                     }
                     None => {}
                 },
-                CodexIn::Request { id, method, params } => match codex_approval(&method, &params) {
-                    Some((tool, detail)) => approvals.add(&run.out, &run.run_id, &tool, &detail, id, &method, Value::Null),
-                    None => {
+                CodexIn::Request { id, method, params } => {
+                    if let Some(questions) = codex_user_input(&method, &params) {
+                        approvals.add_input(&run.out, &run.run_id, questions, id);
+                    } else if let Some((tool, detail)) = codex_approval(&method, &params) {
+                        approvals.add(&run.out, &run.run_id, &tool, &detail, id, &method, Value::Null);
+                    } else {
                         run.message("system", &format!("不支持的请求：{method}"));
                         write_line(&mut stdin, &rpc_response(&id, json!({"decision":"decline"})));
                     }
-                },
+                }
                 CodexIn::Other => {}
             },
             Ok(RunMsg::Eof) => {
@@ -1155,6 +1238,11 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                     answer_codex(&mut stdin, &p, allow);
                 }
             }
+            Ok(RunMsg::Answer { approval_id, answers }) => {
+                if let Some(p) = approvals.answer(&approval_id, &answers) {
+                    write_line(&mut stdin, &rpc_response(&p.key, codex_input_response(&answers)));
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => finish = Some(Finish::Silent),
         }
@@ -1162,8 +1250,13 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
             finish = Some(Finish::Stopped);
         }
         for p in approvals.expired(Instant::now(), &run.out, &run.run_id) {
-            run.message("system", "授权等待超时，已拒绝");
-            answer_codex(&mut stdin, &p, false);
+            if p.method == USER_INPUT_METHOD {
+                run.message("system", "提问等待超时，已跳过");
+                write_line(&mut stdin, &rpc_response(&p.key, codex_input_response(&Value::Null)));
+            } else {
+                run.message("system", "授权等待超时，已拒绝");
+                answer_codex(&mut stdin, &p, false);
+            }
         }
     }
     let f = finish.unwrap();
@@ -1177,6 +1270,11 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
 }
 
 fn answer_codex(stdin: &mut Option<ChildStdin>, p: &Pending, allow: bool) {
+    // 用户输入请求不吃 decision：allow/deny 都按「空答案」回（Codex 会走自己的默认处理）
+    if p.method == USER_INPUT_METHOD {
+        write_line(stdin, &rpc_response(&p.key, codex_input_response(&Value::Null)));
+        return;
+    }
     write_line(stdin, &rpc_response(&p.key, codex_decision(&p.method, allow)));
 }
 
@@ -1228,8 +1326,13 @@ impl Runner {
             }
             Some("approval.decide") => {
                 let approval_id = s("approvalId");
-                let allow = s("decision") == "allow";
-                self.to_all(|| RunMsg::Decide { approval_id: approval_id.clone(), allow });
+                match msg.get("answers").filter(|a| a.is_object()) {
+                    Some(answers) => self.to_all(|| RunMsg::Answer { approval_id: approval_id.clone(), answers: answers.clone() }),
+                    None => {
+                        let allow = s("decision") == "allow";
+                        self.to_all(|| RunMsg::Decide { approval_id: approval_id.clone(), allow });
+                    }
+                }
             }
             Some("history.request") => {
                 let (out, request_id, agent, key, cwd) = (self.out.clone(), s("requestId"), s("agent"), s("sessionKey"), s("cwd"));
@@ -1589,6 +1692,69 @@ mod tests {
         assert_eq!(codex_decision("item/fileChange/requestApproval", false), json!({"decision":"decline"}));
         assert_eq!(codex_decision("execCommandApproval", true), json!({"decision":"approved"}));
         assert_eq!(codex_decision("applyPatchApproval", false), json!({"decision":"denied"}));
+    }
+
+    #[test]
+    fn codex_user_input_questions() {
+        let p = json!({"isBlocking":true,"itemId":"i1","threadId":"t1","turnId":"u1","questions":[{"header":"图标","id":"q1","question":"你想新建哪种图标？","options":[{"label":"应用图标","description":"桌面图标"}]}]});
+        assert_eq!(codex_user_input("item/tool/requestUserInput", &p), Some(&p["questions"]));
+        assert_eq!(codex_user_input("item/tool/requestUserInput", &json!({"questions":"x"})), None);
+        assert_eq!(codex_user_input("item/commandExecution/requestApproval", &p), None);
+    }
+
+    #[test]
+    fn codex_input_response_wraps_answers() {
+        let a = json!({"q1": ["应用图标"], "bad": "not-array"});
+        assert_eq!(codex_input_response(&a), json!({"answers":{"q1":{"answers":["应用图标"]}}}));
+        assert_eq!(codex_input_response(&Value::Null), json!({"answers":{}}));
+    }
+
+    #[test]
+    fn image_data_url_reads_local_files() {
+        let d = tmpdir("img");
+        let f = d.join("pic.png");
+        std::fs::write(&f, [0x89, b'P', b'N', b'G']).unwrap();
+        let url = image_data_url(f.to_str().unwrap()).unwrap();
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
+        assert!(image_data_url(d.join("nope.png").to_str().unwrap()).is_none());
+        assert!(image_data_url(d.join("pic.txt").to_str().unwrap()).is_none(), "不认识的扩展名不读");
+        let big = d.join("big.png");
+        std::fs::write(&big, vec![0u8; (IMAGE_MAX_BYTES + 1) as usize]).unwrap();
+        assert!(image_data_url(big.to_str().unwrap()).is_none(), "超过大小上限不读");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn codex_events_image_items() {
+        let p = json!({"item":{"type":"imageGeneration","id":"i1","status":"completed","savedPath":"C:\\x\\a.png"}});
+        assert_eq!(codex_event("item/completed", &p), Some(CodexEvent::Image("C:\\x\\a.png".into())));
+        let failed = json!({"item":{"type":"imageGeneration","id":"i1","status":"failed","failure":{"type":"usageLimitExceeded","limitId":"l"}}});
+        assert_eq!(codex_event("item/completed", &failed), None, "失败不报图片");
+        let view = json!({"item":{"type":"imageView","id":"i2","path":"C:\\x\\b.png"}});
+        assert_eq!(codex_event("item/completed", &view), Some(CodexEvent::Image("C:\\x\\b.png".into())));
+    }
+
+    #[test]
+    fn user_input_answer_flow() {
+        let (tx, rx) = mpsc::channel();
+        let mut a = Approvals::default();
+        a.add_input(&tx, "run", &json!([{"id":"q1","question":"哪种图标？"}]), json!(7));
+        let sent = rx.try_recv().unwrap();
+        assert_eq!(sent["tool"], "userInput");
+        assert_eq!(sent["detail"], r#"[{"id":"q1","question":"哪种图标？"}]"#);
+        let local = sent["localId"].as_u64().unwrap();
+        a.created(local, "ap1".into(), &tx, "run");
+        let p = a.answer("ap1", &json!({"q1":["应用图标"]})).unwrap();
+        assert_eq!(p.key, json!(7));
+        assert_eq!(p.method, USER_INPUT_METHOD);
+        assert_eq!(codex_input_response(&p.input), json!({"answers":{"q1":{"answers":["应用图标"]}}}));
+        // 答案找不到对应的 pending（已超时/已处理）：静默忽略
+        assert!(a.answer("ap1", &json!({})).is_none());
+        // decide 只作用于普通授权，不会误答提问
+        a.add_input(&tx, "run", &json!([]), json!(8));
+        let local = rx.try_recv().unwrap()["localId"].as_u64().unwrap();
+        a.created(local, "ap2".into(), &tx, "run");
+        assert!(a.decide("ap2", true).is_some(), "decide 仍按 allow 提交（服务端不会对 userInput 发纯 decide，这里只验证不 panic）");
     }
 
     #[test]

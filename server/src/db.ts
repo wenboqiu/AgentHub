@@ -131,6 +131,8 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     created_at timestamptz not null default now()
   )`)
   await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS source_id text, ADD COLUMN IF NOT EXISTS branch_point text')
+  // Codex 生成/展示的图片：执行器读成本地文件后转 data URL 随消息存储（小图才存，防止表膨胀）
+  await pool.query('ALTER TABLE messages ADD COLUMN IF NOT EXISTS images jsonb')
   await pool.query(`CREATE TABLE IF NOT EXISTS message_feedback (
     user_id bigint not null references users(id) on delete cascade,
     session_id text not null, source_id text not null, rating text not null,
@@ -400,7 +402,7 @@ export const KEEP_MESSAGES = 200
 
 export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string }
 export type MessageMeta = { sourceId?: string; branchPoint?: string }
-export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; createdAt: string }
+export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string }
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired'
 export type Approval = {
   id: string
@@ -414,7 +416,7 @@ export type Approval = {
 }
 
 type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; created_at: Date; updated_at: Date }
-type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
+type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; images?: string[] | null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
 type ApprovalRow = {
   id: string
   run_id: string
@@ -440,6 +442,7 @@ const toRun = (r: RunRow): Run => ({
 const toMessage = (r: MessageRow): Message => ({
   ...(r.source_id ? {sourceId:r.source_id,rating:r.rating ?? null} : {}),
   ...(r.branch_point ? {branchPoint:r.branch_point} : {}),
+  ...(Array.isArray(r.images) && r.images.length ? {images:r.images} : {}),
   id: Number(r.id),
   sessionId: r.session_id,
   runId: r.run_id,
@@ -565,10 +568,10 @@ async function trimMessages(pool: Pick<pg.Pool, 'query'>, userId: number, sessio
   )
 }
 
-export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string, meta: MessageMeta = {}): Promise<Message> {
+export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string, runId: string | null, role: MessageRole, text: string, meta: MessageMeta = {}, images: string[] | null = null): Promise<Message> {
   // 数据库主机校时时可能回拨；新消息不能排到已有消息之前（同时间用 id 排序）。
-  const r = await pool.query<MessageRow>(`INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
-    VALUES ($5,$1,$2,$3,$4,$6,$7,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE user_id = $5 AND session_id = $1))) RETURNING *`, [
+  const r = await pool.query<MessageRow>(`INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, images, created_at)
+    VALUES ($5,$1,$2,$3,$4,$6,$7,$8,GREATEST(now(), (SELECT max(created_at) FROM messages WHERE user_id = $5 AND session_id = $1))) RETURNING *`, [
     sessionId,
     runId,
     role,
@@ -576,6 +579,7 @@ export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number
     userId,
     nativeKey(meta.sourceId),
     nativeKey(meta.branchPoint),
+    images && images.length ? JSON.stringify(images) : null,
   ])
   await pool.query(`INSERT INTO session_activity (user_id, session_id, bucket, count)
     VALUES ($1,$2,to_timestamp(floor(extract(epoch FROM $3::timestamptz) / 300) * 300),1)
@@ -698,9 +702,10 @@ export async function listMessages(pool: pg.Pool, userId: number, sessionId: str
 }
 
 export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string): Promise<Approval> {
+  // userInput 的 detail 是 questions 的 JSON，放宽上限才能让 UI 渲染完整选项
   const r = await pool.query<ApprovalRow>(
     "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status) VALUES ($1,$6,$2,$3,$4,$5,'pending') RETURNING *",
-    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 1000), userId],
+    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId],
   )
   return toApproval(r.rows[0])
 }

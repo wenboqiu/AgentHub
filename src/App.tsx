@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests } from "./lib/api";
+import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests, type BoardEntry } from "./lib/api";
 import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
 import { onNotificationClick, pushNotification, type NotifyTarget } from "./lib/desktopNotify";
 import SessionView from "./SessionView";
@@ -12,10 +12,12 @@ import GoalsPanel from "./GoalsPanel";
 import TaskView from "./TaskView";
 import GoalView from "./GoalView";
 import CalendarView from "./CalendarView";
+import BoardPanel from "./BoardPanel";
 import Icon from "./Icon";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
-type Tab = "sessions"|"tasks"|"goals"|"calendar";
+type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar";
+const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历" } as const;
 
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
@@ -153,6 +155,8 @@ export default function App() {
   const [tasks,setTasks] = useState<Map<number,Task>>(new Map());
   // 投机预摘要：taskId -> {review, failure}，由 WS task.digest 实时更新
   const [digests,setDigests] = useState<Map<number,TaskDigests>>(new Map());
+  // 派活看板：排队 / 在跑 / 卡住 的聚合视图
+  const [board,setBoard] = useState<{entries: BoardEntry[]; agents: string[]} | null>(null);
   const openId = detail?.kind === "session" ? detail.id : null;
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   const [agents, setAgents] = useState<string[]>([]);
@@ -190,6 +194,14 @@ export default function App() {
     setToast(m);
     window.setTimeout(() => setToast(""), 3500);
   }, []);
+
+  // 派活看板：任务推进一步或 run 状态变化时重取（卡住判断依赖活跃 run）
+  const refreshBoard = useCallback(() => {
+    if (!api) { setBoard(null); return; }
+    api.dispatchBoard().then(b=>setBoard({entries:b.entries,agents:b.agents}),()=>{});
+  }, [api]);
+  const boardSignature = useMemo(() => [...tasks.values()].map(t=>`${t.id}:${t.status}:${t.updatedAt}`).join(","), [tasks]);
+  useEffect(() => { refreshBoard(); }, [refreshBoard, boardSignature, runSignal, agents.join(",")]);
 
   useEffect(() => {
     loadConfig().then(setCfg);
@@ -375,6 +387,7 @@ export default function App() {
   const saveTask=(t:Task)=>setTasks(m=>mergeEntity(m,t,"response"));
   const saveGoal=(g:Goal)=>setGoals(m=>mergeEntity(m,g,"response"));
   const taskList=[...tasks.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
+  const stuckCount = board?.entries.filter(e=>e.stuck).length ?? 0;
   const goalList=[...goals.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
 
   const activeReminders = [...reminders.values()].filter(r=>{
@@ -468,11 +481,12 @@ export default function App() {
     <div className="app home">
       <header>
         <h1>AgentHub</h1>
+        <span className="version" title={`版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>
         <span className={`conn ${conn}`}>
           <i /> {connText}
         </span>
         <span className="spacer" />
-        <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","goals","calendar"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={{sessions:"会话",tasks:"任务",goals:"目标",calendar:"日历"}[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{{sessions:"会话",tasks:"任务",goals:"目标",calendar:"日历"}[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}</button>)}</nav>
+        <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","board","goals","calendar"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}{t==="board" && stuckCount > 0 && <span className="count" aria-label={`${stuckCount} 个卡住的任务`}>{stuckCount}</span>}</button>)}</nav>
         <span className="spacer" />
         <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>
@@ -480,6 +494,7 @@ export default function App() {
       <main>
         {activeReminders.length > 0 && <section className="reminder-list" aria-label="时间提醒"><h2>时间提醒（{activeReminders.length}）</h2><ul className="list">{activeReminders.map(r=><li key={r.id} className="reminder-row"><button className="entity-row" onClick={()=>r.entityType === "task" ? openTask(r.entityId) : openGoal(r.entityId)}><span className="entity-main"><strong>{r.title}</strong><span>{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span></span></button><button onClick={()=>void dismissReminder(r.id)}>已处理</button></li>)}</ul></section>}
         <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
+        <div hidden={tab!=="board"}>{board && api && <BoardPanel api={api} board={board} now={now} onRefresh={refreshBoard} onOpen={openTask} onNotice={say}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
         <div hidden={tab!=="sessions"}>

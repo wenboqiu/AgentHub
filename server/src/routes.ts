@@ -55,6 +55,7 @@ import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } fro
 import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
+import { dispatchBoard } from './board.ts'
 import { applyProfile, deleteProfile, findProfile, getProfile, listProfiles, saveProfile } from './profiles.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
@@ -94,6 +95,14 @@ type Conn = { sock: Sock; userId: number; authSessionId: number }
 type Exec = Conn & { machine: string; replyBranch: boolean }
 const INVALID_LOGIN = 4401
 
+// Codex Desktop 结束一轮时不一定会写终态（直接关窗口、进程被杀都只留下 task_started），
+// 会话就会永远停在 running，把手机端的发送按钮锁死。
+// 超过这个时长没有任何新事件，就不再拿 running 拦发送（强行续跑最多让 Codex 报一次错，
+// 但比用户永远发不出去要好）。客户端 sendBlockReason 用同一个阈值。
+export const STALE_RUNNING_MS = 30 * 60_000
+const stuckRunning = (s: { state: string; eventAt: string }) =>
+  s.state === 'running' && Date.now() - Date.parse(s.eventAt) > STALE_RUNNING_MS
+
 function parseEvent(raw: unknown): EventIn | null {
   if (!raw || typeof raw !== 'object') return null
   const e = raw as Record<string, unknown>
@@ -125,6 +134,35 @@ const PENDING = ':pending-'
 const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
+
+/** Codex 提问的 questions JSON：解析出问题文本；解析失败退回原文片段 */
+function userInputQuestions(detail: string): { id: string; question: string; options: { label: string; description?: string }[] }[] | null {
+  try {
+    const v = JSON.parse(detail)
+    if (!Array.isArray(v) || !v.length) return null
+    const out = v
+      .filter((q): q is Record<string, unknown> => !!q && typeof q === 'object' && typeof (q as {id?:unknown}).id === 'string')
+      .map(q => ({
+        id: String(q.id),
+        question: typeof q.question === 'string' ? q.question : String(q.header ?? ''),
+        options: Array.isArray(q.options)
+          ? q.options.filter((o): o is { label: string; description?: string } => !!o && typeof o === 'object' && typeof (o as {label?:unknown}).label === 'string')
+          : [],
+      }))
+    return out.length ? out : null
+  } catch {
+    return null
+  }
+}
+
+/** 审批/提问入库消息的标题 */
+function approvalHeading(tool: string, detail: string): string {
+  if (tool !== 'userInput') return `请求授权：${tool} ${detail}`
+  const qs = userInputQuestions(detail)
+  if (!qs) return `Codex 提问：${detail.slice(0, 200)}`
+  const head = qs.map(q => q.question).join(' / ')
+  return `Codex 提问：${head.slice(0, 300)}`
+}
 
 // 返回 kick：删除设备会话 / 账号后，用它立刻关闭对应的 WS（viewer 和执行器）
 export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions = {}): Kick {
@@ -511,6 +549,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const task = await getTask(pool,req.userId,id)
     pushTask(req.userId,task); return {task}
   }))
+  // 派活看板：排队中 / 在跑 / 卡住（进行中无运行）的任务聚到一张板上
+  app.get('/dispatch/board', async req => serial(async () =>
+    dispatchBoard(pool, req.userId, agentList(req.userId))))
 
   app.post('/sessions/ack-all', async req => {
     const list = await ackAll(pool, req.userId)
@@ -560,7 +601,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，请在 WorkBuddy 中继续对话' } as const
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
-      if (session.agent === 'codex' && session.state === 'running') return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
+      if (session.agent === 'codex' && session.state === 'running' && !stuckRunning(session)) return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
       const run = await createRun(pool, userId, randomUUID(), id, session.machine)
       const message = await insertMessage(pool, userId, id, run.id, 'user', clean)
       return { code: 200, run, message, session } as const
@@ -624,7 +665,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const message=await getMessage(pool,userId,id,messageId as number)
         if(!message) return {code:404,error:'回复不存在，请刷新记录'} as const
         if(message.role!=='assistant' || !message.branchPoint) return {code:409,error:'该回复尚无可确认的分支节点，请刷新记录或等待回复完成'} as const
-        if(session.state==='running' || await activeRun(pool,userId,id)) return {code:409,error:'请等待当前会话运行结束后再分支'} as const
+        if((session.state==='running' && !stuckRunning(session)) || await activeRun(pool,userId,id)) return {code:409,error:'请等待当前会话运行结束后再分支'} as const
         point=message.branchPoint
         if(executors.get(execKey(userId,session.machine))?.replyBranch!==true) return {code:409,error:'电脑端尚不支持指定回复分支，请更新电脑端'} as const
       }
@@ -663,19 +704,48 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.post('/approvals/:id', async (req, reply) => {
     const userId = req.userId
     const id = (req.params as { id: string }).id
-    const decision = (req.body as { decision?: unknown } | null)?.decision
+    const body = (req.body ?? {}) as { decision?: unknown; answers?: unknown }
+    const decision = body.decision
     if (decision !== 'allow' && decision !== 'deny') return reply.code(400).send({ error: "decision 必须是 'allow' 或 'deny'" })
     const cur = await getApproval(pool, userId, id)
     if (!cur) return reply.code(404).send({ error: '授权请求不存在' })
     if (cur.status !== 'pending') return reply.code(409).send({ error: '这个授权请求已经处理过了' })
     const run = await getRun(pool, userId, cur.runId)
     if (!run || !executors.has(execKey(userId, run.machine))) return reply.code(409).send({ error: '电脑端不在线' })
+    // Codex 提问：allow 需要带答案 {"问题id": ["选项"]}；deny = 跳过
+    let answers: Record<string, string[]> | null = null
+    if (cur.tool === 'userInput') {
+      if (decision === 'allow') {
+        const raw = body.answers
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return reply.code(400).send({ error: 'answers 必须是 {"问题id": ["选项"]} 形式的对象' })
+        const entries = Object.entries(raw as Record<string, unknown>).slice(0, 10)
+        if (entries.some(([k, v]) => !k || !Array.isArray(v) || v.some(x => typeof x !== 'string'))) {
+          return reply.code(400).send({ error: 'answers 必须是 {"问题id": ["选项"]} 形式的对象' })
+        }
+        answers = Object.fromEntries(entries.map(([k, v]) => [k, (v as unknown[]).map(x => cleanText(String(x), 500)).slice(0, 10)]))
+      }
+    }
     const done = await decideApproval(pool, userId, id, decision === 'allow' ? 'allowed' : 'denied')
     if (!done) return reply.code(409).send({ error: '这个授权请求已经处理过了' })
-    const message = await insertMessage(pool, userId, done.sessionId, done.runId, 'approval', `${decision === 'allow' ? '已允许' : '已拒绝'}：${done.tool} ${done.detail}`)
+    const qs = done.tool === 'userInput' ? userInputQuestions(done.detail) : null
+    const message = await insertMessage(
+      pool,
+      userId,
+      done.sessionId,
+      done.runId,
+      'approval',
+      qs
+        ? decision === 'allow' && answers
+          ? `已回答：${qs.map(q => {
+              const picked = answers[q.id] ?? []
+              return `${q.question} → ${picked.length ? picked.join('、') : '（未选择）'}`
+            }).join('；').slice(0, 900)}`
+          : `已跳过 Codex 提问：${qs.map(q => q.question).join(' / ').slice(0, 300)}`
+        : `${decision === 'allow' ? '已允许' : '已拒绝'}：${done.tool} ${done.detail}`,
+    )
     await pushApproval(userId, done, false)
     pushMessage(userId, message)
-    sendExecutor(userId, run.machine, { type: 'approval.decide', approvalId: id, decision })
+    sendExecutor(userId, run.machine, { type: 'approval.decide', approvalId: id, decision, ...(answers ? { answers } : {}) })
     return { ok: true }
   })
 
@@ -780,7 +850,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!MESSAGE_ROLES.includes(role as never) || role === 'user' || role === 'approval') return
         const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine || !run.sessionId) return
-        pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text), {sourceId:nativeKey(m.sourceId) ?? undefined,branchPoint:role==='assistant' ? nativeKey(m.branchPoint) ?? undefined : undefined}))
+        // Codex 生成/展示的图片：执行器已转成 data URL；最多 4 张、单张 ≤ 9MB
+        const rawImages = Array.isArray(m.images) ? m.images : []
+        const images = rawImages
+          .filter((u): u is string => typeof u === 'string' && u.startsWith('data:image/') && u.length <= 9_000_000)
+          .slice(0, 4)
+        pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text), {sourceId:nativeKey(m.sourceId) ?? undefined,branchPoint:role==='assistant' ? nativeKey(m.branchPoint) ?? undefined : undefined}, images.length ? images : null))
         return
       }
       case 'run.approval': {
@@ -788,7 +863,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!run || run.machine !== machine || !run.sessionId || TERMINAL.includes(run.status)) return
         const tool = cleanText(str(m.tool), 100) || 'tool'
         const approval = await createApproval(pool, userId, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
-        const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', `请求授权：${approval.tool} ${approval.detail}`)
+        // Codex 提问（request_user_input）：detail 是 questions 的 JSON，消息里给人看问题文本
+        const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', approvalHeading(approval.tool, approval.detail))
         await pushApproval(userId, approval, true)
         pushMessage(userId, message)
         sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId: approval.id })
