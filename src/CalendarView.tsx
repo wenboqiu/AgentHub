@@ -13,6 +13,8 @@ const hm = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours(
 /** 本周周一 0 点 */
 const weekStart = (d: Date) => { const s = new Date(d.getFullYear(), d.getMonth(), d.getDate() - (d.getDay() + 6) % 7); return s; };
 const WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
+/** 日视图缩放档位：可视窗口小时数，24 = 全天 */
+const ZOOM_LEVELS = [24, 12, 6, 3];
 const WEEKDAY_FULL = ["日", "一", "二", "三", "四", "五", "六"];
 /** 2026 年 11 月 3 日 周二 */
 const dayLabel = (key: string) => {
@@ -108,6 +110,9 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   // 默认落在"日"粒度的时间轴：打开就是今天这一条时间线，不用先切两次视图
   const [mode, setMode] = useState<"month" | "timeline">("timeline");
   const [scale, setScale] = useState<"week" | "day">("day");
+  // 日视图缩放：zoomH 是可视窗口的小时数（24=全天），viewOffset 是窗口相对当日 0 点的偏移
+  const [zoomH, setZoomH] = useState(24);
+  const [viewOffset, setViewOffset] = useState(0);
   const isDayView = mode === "timeline" && scale === "day";
   const isWeekView = mode === "timeline" && scale === "week";
   const [execs, setExecs] = useState<Execution[]>([]);
@@ -351,8 +356,28 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
     return dateKey(end) === dateKey(new Date(e.createdAt)) ? `${s}–${hm(e.updatedAt)}` : `${s}–${dateKey(end).slice(5)} ${hm(e.updatedAt)}`;
   };
 
-  const spanEnd = timeline.start + timeline.span;
-  const pct = (t: number) => Math.min(100, Math.max(0, (t - timeline.start) / timeline.span * 100));
+  // 日视图缩放窗口：数据始终按整日取，渲染只画可视窗口——缩放/平移不需要重新拉取
+  const viewSpan = isDayView ? zoomH * 3600_000 : timeline.span;
+  const maxOffset = isDayView ? DAY - viewSpan : 0;
+  const clampedOffset = Math.min(maxOffset, Math.max(0, viewOffset));
+  const viewStart = timeline.start + clampedOffset;
+  const viewEnd = viewStart + viewSpan;
+  const pct = (t: number) => Math.min(100, Math.max(0, (t - viewStart) / viewSpan * 100));
+  /** 放大 / 缩小：dir=1 放大（窗口变小），以当前窗口中心为锚点，避免内容跳走 */
+  const zoomStep = (dir: 1 | -1) => {
+    const idx = ZOOM_LEVELS.indexOf(zoomH);
+    const next = ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, Math.max(0, idx + dir))];
+    if (next === zoomH) return;
+    const center = viewStart + viewSpan / 2;
+    const span = next * 3600_000;
+    setZoomH(next);
+    setViewOffset(Math.min(DAY - span, Math.max(0, center - span / 2 - timeline.start)));
+  };
+  /** 半窗平移 */
+  const panDay = (dir: -1 | 1) => setViewOffset(Math.min(maxOffset, Math.max(0, clampedOffset + dir * viewSpan / 2)));
+  // 刻度间隔随缩放档位变细：24h→3h，12h→2h，6h→1h，3h→30min
+  const tickMs = viewSpan > 12 * 3600_000 ? 3 * 3600_000 : viewSpan > 6 * 3600_000 ? 2 * 3600_000 : viewSpan > 3 * 3600_000 ? 3600_000 : 1800_000;
+  const tickCount = Math.round(viewSpan / tickMs);
   const md = (t: number) => { const d = new Date(t); return `${d.getMonth() + 1}/${d.getDate()}`; };
   const planRange = (p: PlanInfo) => `${p.start !== null ? md(p.start) : "未定起"} – ${p.end !== null ? md(p.end) : "未定止"}`;
   const TASK_LABEL: Record<Task["status"], string> = { todo: "待办", doing: "进行中", review: "待验收", done: "已完成" };
@@ -400,10 +425,19 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
           </button>;
         })())}
       </div>
-    </section> : <section className="cal-timeline">
-      <div className={`tl-axis${scale === "day" ? " hours" : ""}`}>{scale === "week"
+    </section> : <section className="cal-timeline" style={isDayView ? { "--tf": String(tickMs / viewSpan) } as React.CSSProperties : undefined}>
+      {isDayView && <div className="tl-toolbar">
+        <span className="tl-zoom-label">{zoomH >= 24 ? "全天" : `可见 ${zoomH} 小时`}</span>
+        <div className="seg tl-zoom" role="group" aria-label="时间轴缩放">
+          <button onClick={() => panDay(-1)} disabled={clampedOffset <= 0} aria-label="向前平移" title="向前平移">‹</button>
+          <button onClick={() => panDay(1)} disabled={clampedOffset >= maxOffset} aria-label="向后平移" title="向后平移">›</button>
+          <button onClick={() => zoomStep(1)} disabled={zoomH <= ZOOM_LEVELS[ZOOM_LEVELS.length - 1]} aria-label="放大" title="放大">＋</button>
+          <button onClick={() => zoomStep(-1)} disabled={zoomH >= ZOOM_LEVELS[0]} aria-label="缩小" title="缩小">－</button>
+        </div>
+      </div>}
+      <div className={`tl-axis${scale === "day" ? " hours" : ""}`} style={scale === "day" ? { gridTemplateColumns: `repeat(${tickCount}, 1fr)` } : undefined}>{scale === "week"
         ? Array.from({ length: 7 }, (_, i) => { const d = new Date(timeline.start + i * DAY); return <span key={i} className={dateKey(d) === today ? "today" : ""}>{`${d.getMonth()+1}/${d.getDate()}`}</span>; })
-        : Array.from({ length: 8 }, (_, i) => <span key={i}>{`${i * 3}:00`}</span>)}</div>
+        : Array.from({ length: tickCount }, (_, i) => { const d = new Date(viewStart + i * tickMs); return <span key={i} className={dateKey(d) === today ? "today" : ""}>{`${pad(d.getHours())}:${pad(d.getMinutes())}`}</span>; })}</div>
       <div className="tl-legend">
         <span><i className="lg-plan" aria-hidden="true"/>计划</span>
         <span><i className="lg-act" aria-hidden="true"/>实际执行</span>
@@ -416,10 +450,11 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         // 目标：跨度带，不占任务行
         if (row.kind === "goal" && row.plan) {
           const p = row.plan;
-          const from = Math.max(timeline.start, p.start ?? timeline.start);
-          const to = Math.min(spanEnd, p.end ?? spanEnd);
+          const from = Math.max(viewStart, p.start ?? viewStart);
+          const to = Math.min(viewEnd, p.end ?? viewEnd);
           const left = pct(from), width = Math.max(1, pct(to) - pct(from));
           const cls = p.overdue ? "overdue" : p.done !== null ? "done" : "active";
+          if (to <= viewStart || from >= viewEnd) return null; // 跨度不在可视窗口内
           return <div className="tl-row goal" key={row.key}>
             <span className="tl-label" title={row.label}>{row.label}</span>
             <div className={`tl-track${scale === "day" ? " hours" : ""}`}>
@@ -434,7 +469,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         // 任务/会话：上层计划，下层实际
         const segs = row.runs.length ? [] : row.sessionIds
           .flatMap(id => segments.get(id) ?? [])
-          .filter(sg => sg.end > timeline.start && sg.start < spanEnd)
+          .filter(sg => sg.end > viewStart && sg.start < viewEnd)
           .sort((a, b) => a.start - b.start);
         const markerState = row.marker ? statusOf(row.marker, now) : null;
         const sessionId = row.sessionIds[0];
@@ -444,36 +479,37 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         };
         const p = row.plan;
         const plan = p ? (() => {
-          const left = pct(Math.max(timeline.start, p.start ?? timeline.start));
-          const right = pct(Math.min(spanEnd, p.end ?? spanEnd));
-          return { left, width: Math.max(0.8, right - left), openStart: p.start === null, openEnd: p.end === null };
+          const left = pct(Math.max(viewStart, p.start ?? viewStart));
+          const right = pct(Math.min(viewEnd, p.end ?? viewEnd));
+          // 计划完全在可视窗口外时不画，避免在边缘出现误导性的细条
+          return { left, width: Math.max(0.8, right - left), openStart: p.start === null, openEnd: p.end === null, visible: right > 0 && left < 100 };
         })() : null;
         const planCls = p ? (p.overdue ? "overdue" : p.done !== null ? "done" : p.status) : "";
         return <div className={`tl-row${p ? " has-plan" : ""}`} key={row.key}>
           <span className="tl-label" title={row.label}>{row.label}</span>
           <div className={`tl-track${scale === "day" ? " hours" : ""}`}>
-            {p && plan && <button className={`tl-plan ${planCls}${plan.openStart ? " open-start" : ""}${plan.openEnd ? " open-end" : ""}`}
+            {p && plan && plan.visible && <button className={`tl-plan ${planCls}${plan.openStart ? " open-start" : ""}${plan.openEnd ? " open-end" : ""}`}
               style={{ left: `${plan.left}%`, width: `${plan.width}%` }}
               title={`${p.overdue ? "已逾期 · " : ""}计划 ${planRange(p)}${p.done !== null ? ` · 完成于 ${md(p.done)}` : ""}`}
               onClick={() => row.taskId && onOpenTask(row.taskId)} />}
-            {p && p.due !== null && p.due >= timeline.start && p.due <= spanEnd &&
+            {p && p.due !== null && p.due >= viewStart && p.due <= viewEnd &&
               <span className={`tl-due${p.overdue ? " overdue" : p.done !== null ? " done" : ""}`} style={{ left: `${pct(p.due)}%` }} aria-hidden="true"/>}
-            {p && p.done !== null && p.done >= timeline.start && p.done <= spanEnd &&
+            {p && p.done !== null && p.done >= viewStart && p.done <= viewEnd &&
               <span className="tl-done-flag" style={{ left: `${pct(p.done)}%` }} aria-hidden="true"/>}
-            {row.doneMark !== undefined && row.doneMark >= timeline.start && row.doneMark <= spanEnd &&
+            {row.doneMark !== undefined && row.doneMark >= viewStart && row.doneMark <= viewEnd &&
               <span className="tl-done-mark" style={{ left: `${pct(row.doneMark)}%` }} title={`完成于 ${md(row.doneMark)} ${hm(new Date(row.doneMark).toISOString())}`} aria-hidden="true"/>}
-            {row.runs.map(e => {
+            {row.runs.filter(e => endOf(e, now) > viewStart && itemAt(e) < viewEnd).map(e => {
               const st = statusOf(e, now);
               const { left, width } = clampPos(itemAt(e), endOf(e, now));
               return <button key={e.id} className={`tl-block ${st.cls}`} style={{ left: `${left}%`, width: `${width}%` }} title={`${timeRange(e)} ${execTitle(e)} · ${st.label}`} onClick={() => open(e)} />;
             })}
             {segs.map(sg => {
-              const { left, width } = clampPos(sg.start, Math.min(sg.end, spanEnd));
+              const { left, width } = clampPos(sg.start, Math.min(sg.end, viewEnd));
               return <button key={sg.start} className={`tl-block act${markerState?.cls === "running" ? " running" : ""}`} style={{ left: `${left}%`, width: `${width}%` }}
-                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, spanEnd)).toISOString())} · ${sg.count} 条消息`}
+                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, viewEnd)).toISOString())} · ${sg.count} 条消息`}
                 onClick={() => sessionId && onOpenSession(sessionId)} />;
             })}
-            {!row.runs.length && !segs.length && row.marker && (() => {
+            {!row.runs.length && !segs.length && row.marker && itemAt(row.marker) >= viewStart && itemAt(row.marker) <= viewEnd && (() => {
               const { left } = clampPos(itemAt(row.marker), itemAt(row.marker));
               // 标记点代表"最后活动"这个时刻，右边缘贴住该时刻（向左延展），否则看起来像是发生在之后
               return <button className="tl-block act stopped point" style={{ left: `${left}%`, width: "0.8%" }} title={`最后活动 ${hm(row.marker.createdAt)} · 无活动明细`} onClick={() => sessionId && onOpenSession(sessionId)} />;
@@ -482,7 +518,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         </div>;
       }) : <p className="empty">{scale === "day" ? "这一天" : "本周"}没有计划、执行或会话记录</p>}
       {/* 当前时间竖线：放在行容器里，用和轨道完全相同的栅格（标签列 + 8px 间隔）定位，避免像素级偏移 */}
-      {scale === "day" && selected === today && now >= timeline.start && now < spanEnd &&
+      {scale === "day" && selected === today && now >= viewStart && now < viewEnd &&
         <div className="tl-now-layer" aria-hidden="true">
           <span className="tl-now-gutter" />
           <span className="tl-now-rail"><span className="tl-now" style={{ left: `${pct(now)}%` }} /></span>
