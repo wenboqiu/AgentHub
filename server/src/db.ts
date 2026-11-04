@@ -28,6 +28,8 @@ export type EventIn = {
   summary?: string
   pid?: number | null
   quiet?: boolean
+  /** 只听不聊的 agent（WorkBuddy）从 transcript 报过来的活动桶，落 session_activity 供日历画跨度 */
+  buckets?: { at: string; count: number }[]
 }
 
 export type Session = {
@@ -292,6 +294,16 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
       [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId],
     )
   ).rows[0]
+  // 活动桶随事件顺路上报（WorkBuddy 只读 transcript，没有消息同步）：已有真实消息的桶以更大者为准，不被覆盖
+  if (ev.buckets?.length) {
+    await pool.query(
+      `INSERT INTO session_activity (user_id, session_id, bucket, count)
+       SELECT $1, $2, to_timestamp(floor(extract(epoch FROM b.at) / 300) * 300), b.count
+       FROM unnest($3::timestamptz[], $4::int[]) AS b(at, count)
+       ON CONFLICT (user_id, session_id, bucket) DO UPDATE SET count = GREATEST(session_activity.count, excluded.count)`,
+      [userId, id, ev.buckets.map(b => b.at), ev.buckets.map(b => b.count)],
+    )
+  }
   return { session: toSession(row), notify }
 }
 

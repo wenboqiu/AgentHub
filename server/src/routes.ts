@@ -116,6 +116,18 @@ function parseEvent(raw: unknown): EventIn | null {
   // Postgres 的 text 不能含 NUL，不去掉会整批 500
   const clean = (v: string) => v.replaceAll('\0', '')
   const str = (v: unknown) => (typeof v === 'string' ? clean(v) : '')
+  // 活动桶（可选）：时间戳必须可解析，count 限制在合理范围
+  let buckets: { at: string; count: number }[] | undefined
+  if (e.buckets !== undefined) {
+    if (!Array.isArray(e.buckets) || e.buckets.length > 2000) return null
+    buckets = []
+    for (const b of e.buckets) {
+      if (!b || typeof b !== 'object') return null
+      const o = b as Record<string, unknown>
+      if (typeof o.at !== 'string' || Number.isNaN(Date.parse(o.at))) return null
+      buckets.push({ at: o.at, count: typeof o.count === 'number' && Number.isInteger(o.count) && o.count > 0 && o.count <= 1000 ? o.count : 1 })
+    }
+  }
   return {
     agent: e.agent as EventIn['agent'],
     sessionId: clean(e.sessionId),
@@ -129,6 +141,7 @@ function parseEvent(raw: unknown): EventIn | null {
     quiet: e.quiet === true,
     expectedAt: e.expectedAt as string | undefined,
     readAt: e.readAt as string | undefined,
+    buckets,
   }
 }
 

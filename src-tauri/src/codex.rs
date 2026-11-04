@@ -47,8 +47,8 @@ pub fn parse_line(line: &str) -> Option<Line> {
             let parts = p.get("content")?.as_array()?;
             parts.iter().find_map(|c| {
                 let t = c.get("text")?.as_str()?.trim();
-                // 跳过注入的环境上下文（<environment_context> 之类）
-                (!t.is_empty() && !t.starts_with('<')).then(|| t.to_string())
+                // 跳过注入的环境上下文（<environment_context>）和 AGENTS.md 指令全文，取真正的提问
+                (!t.is_empty() && !t.starts_with('<') && !t.starts_with("# AGENTS.md")).then(|| t.to_string())
             })
             .map(Line::UserText)
         }
@@ -128,6 +128,7 @@ impl FileState {
             summary,
             pid: None,
             quiet,
+            buckets: Vec::new(),
         }
     }
 }
@@ -242,6 +243,9 @@ mod tests {
     fn parses_known_lines_and_ignores_others() {
         assert_eq!(parse_line(META), Some(Line::Meta { session_id: Some("abc-123".into()), cwd: "D:\\Work2\\Demo".into() }));
         assert_eq!(parse_line(USER), Some(Line::UserText("帮我修个 bug".into())));
+        // AGENTS.md 指令全文也是 response_item，但不能当标题
+        let agents = r##"{"timestamp":"2026-10-31T01:00:01.000Z","ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions <INSTRUCTIONS> # 全局偏好"},{"type":"input_text","text":"新建图标"}]}}"##;
+        assert_eq!(parse_line(agents), Some(Line::UserText("新建图标".into())));
         assert!(matches!(parse_line(START), Some(Line::Status { state: "running", .. })));
         assert_eq!(parse_line(ITEM), None);
         match parse_line(DONE) {

@@ -12,12 +12,12 @@
 use crate::{
     claude::{home_dir, now_iso, truncate_chars},
     codex::complete_prefix_len,
-    forwarder::{Event, Forwarder},
+    forwarder::{Bucket, Event, Forwarder},
 };
 use chrono::TimeZone;
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -66,6 +66,10 @@ pub struct FileState {
     emitted: Option<(String, String)>,
     /// 历史会话：不回填、不再上报
     skipped: bool,
+    /// 本轮 feed 里出现了用户消息（状态没变也要把活动桶捎上去）
+    user_turn: bool,
+    /// 尚未随事件上报的活动时间戳（ms），发事件时聚合成 5 分钟桶带走
+    pending: Vec<i64>,
 }
 
 fn iso(ms: i64) -> String {
@@ -91,21 +95,40 @@ fn text_of(v: &Value, kind: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-/// 用户消息前面会拼 system-reminder 注入块，标题只取注入块之后的内容
+/// 用户消息剥掉注入块后剩下的可见文本；纯注入块（摘要 / 通知 / reminder）返回 None，不当标题
 fn user_text(v: &Value) -> Option<String> {
     let raw = text_of(v, "input_text")?;
-    let visible = match raw.rfind("</system-reminder>") {
+    let mut visible = match raw.rfind("</system-reminder>") {
         Some(i) => &raw[i + "</system-reminder>".len()..],
         None => raw.as_str(),
     };
+    // `> ` 引用前缀和 <user_query> 包裹是派发格式残留
+    visible = visible.trim_start_matches(['>', ' ', '\n', '\t']);
+    if let Some(rest) = visible.strip_prefix("<user_query>") {
+        if let Some(end) = rest.rfind("</user_query>") {
+            visible = &rest[..end];
+        }
+    }
     let flat = one_line(visible);
-    (!flat.is_empty()).then_some(flat)
+    // 剩下的还是注入块（<cb_summary>、<task-notification> 等）就不当标题
+    (!flat.is_empty() && !flat.starts_with('<')).then_some(flat)
+}
+
+/// 时间戳聚合成 5 分钟桶，与服务端 session_activity 同粒度
+fn buckets_of(ms: &[i64]) -> Vec<Bucket> {
+    const BUCKET_MS: i64 = 5 * 60_000;
+    let mut m: BTreeMap<i64, u32> = BTreeMap::new();
+    for t in ms {
+        *m.entry(t.div_euclid(BUCKET_MS) * BUCKET_MS).or_insert(0) += 1;
+    }
+    m.into_iter().map(|(b, c)| Bucket { at: iso(b), count: c }).collect()
 }
 
 impl FileState {
     /// 喂入新增的完整行，只在状态变化时上报；完成/中断由 confirm_quiet 确认
     pub fn feed(&mut self, lines: &[&str], _now_ms: i64) -> Vec<Event> {
         let before_state = self.state.clone();
+        self.user_turn = false;
         let mut title_changed = false;
         for l in lines {
             let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
@@ -134,13 +157,18 @@ impl FileState {
                         self.title = Some(truncate_chars(t.trim(), 200));
                     }
                 }
-                "message" => self.feed_message(&v),
+                "message" => {
+                    self.track(&v);
+                    self.feed_message(&v);
+                }
                 "function_call" => {
+                    self.track(&v);
                     self.open_calls += 1;
                     self.state = "running".into();
                     self.tail = Tail::None;
                 }
                 "function_call_result" => {
+                    self.track(&v);
                     self.open_calls = self.open_calls.saturating_sub(1);
                     self.tail = Tail::ToolResult;
                 }
@@ -159,12 +187,25 @@ impl FileState {
         let mut out = Vec::new();
         if self.state == "running" && before_state != "running" {
             out.push(self.event("running", None, false));
+        } else if self.user_turn && self.state == "running" && !self.pending.is_empty() {
+            // 状态没变的后续轮次也把活动桶捎上去，日历的跨度才不会停在上一轮
+            out.push(self.event("running", None, true));
         } else if title_changed && self.state != "running" {
             // 只改标题：静默同步，不重复提醒
             let st = self.state_or_unknown().to_string();
             out.push(self.event(&st, None, true));
         }
         out
+    }
+
+    /// 记录一条活动的发生时间，凑够一批后随事件上报
+    fn track(&mut self, v: &Value) {
+        if let Some(ms) = v.get("timestamp").and_then(Value::as_i64) {
+            self.pending.push(ms);
+            if self.pending.len() > 4096 {
+                self.pending.drain(..1024);
+            }
+        }
     }
 
     fn feed_message(&mut self, v: &Value) {
@@ -175,6 +216,7 @@ impl FileState {
                         self.title = Some(truncate_chars(&t, 40));
                     }
                 }
+                self.user_turn = true;
                 self.state = "running".into();
                 self.tail = Tail::None;
                 self.open_calls = 0;
@@ -257,6 +299,8 @@ impl FileState {
 
     fn event(&mut self, state: &str, summary: Option<String>, quiet: bool) -> Event {
         self.emitted = Some((state.to_string(), self.last_at.clone()));
+        let buckets = buckets_of(&self.pending);
+        self.pending.clear();
         Event {
             agent: "workbuddy".into(),
             session_id: self.session_id.clone().unwrap_or_default(),
@@ -268,6 +312,7 @@ impl FileState {
             summary,
             pid: None,
             quiet,
+            buckets,
         }
     }
 }
@@ -304,6 +349,71 @@ fn new_state(path: &Path) -> FileState {
     }
 }
 
+/// 新文件先读头部：ai-title / custom-title / session-meta 都写在文件开头，
+/// 大文件只读尾部会漏掉，标题就会退化成尾部的注入块（cb_summary / 通知原文）。
+/// 只取身份与标题，不碰状态机。
+fn seed_head(path: &Path, st: &mut FileState) {
+    const HEAD_BYTES: u64 = 256 * 1024;
+    let Ok(mut file) = std::fs::File::open(path) else { return };
+    let mut buf = Vec::new();
+    if file.by_ref().take(HEAD_BYTES).read_to_end(&mut buf).is_err() {
+        return;
+    }
+    for l in String::from_utf8_lossy(&buf).lines() {
+        let Ok(v) = serde_json::from_str::<Value>(l) else { continue };
+        match v.get("type").and_then(Value::as_str).unwrap_or("") {
+            "session-meta" => {
+                if let Some(id) = v.get("sessionId").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                    st.session_id = Some(id.to_string());
+                }
+            }
+            "ai-title" => {
+                if let Some(t) = v.get("aiTitle").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                    st.title = Some(truncate_chars(t.trim(), 200));
+                }
+            }
+            "custom-title" => {
+                if let Some(t) = v.get("customTitle").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                    st.title = Some(truncate_chars(t.trim(), 200));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// 全文件扫一遍活动时间戳：历史会话的对话跨度靠它，register 时随事件上报。
+/// 只做子串查找不逐行解析 JSON，18MB 的 transcript 也在毫秒级。
+fn scan_buckets(path: &Path, since_ms: i64) -> Vec<i64> {
+    let Ok(mut file) = std::fs::File::open(path) else { return Vec::new() };
+    const CHUNK: u64 = 4 * 1024 * 1024;
+    let mut out = Vec::new();
+    let mut carry = String::new();
+    loop {
+        let mut buf = Vec::with_capacity(CHUNK as usize);
+        if file.by_ref().take(CHUNK).read_to_end(&mut buf).unwrap_or(0) == 0 {
+            break;
+        }
+        let text = carry + String::from_utf8_lossy(&buf).as_ref();
+        let mut lines = text.split('\n');
+        carry = lines.next_back().unwrap_or("").to_string();
+        for l in lines {
+            // 只数消息与工具调用，meta / 标题不算活动
+            if !(l.contains("\"type\":\"message\"") || l.contains("\"function_call")) {
+                continue;
+            }
+            let Some(i) = l.find("\"timestamp\":") else { continue };
+            let digits: String = l[i + 12..].chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(ms) = digits.parse::<i64>() {
+                if ms >= since_ms {
+                    out.push(ms);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn spawn(fwd: Forwarder) {
     std::thread::spawn(move || {
         let Some(root) = home_dir().map(|h| h.join(".workbuddy").join("projects")) else { return };
@@ -316,6 +426,13 @@ pub fn spawn(fwd: Forwarder) {
             for path in files {
                 let fresh = !states.contains_key(&path);
                 let st = states.entry(path.clone()).or_insert_with(|| new_state(&path));
+                if fresh {
+                    seed_head(&path, st);
+                    if !initial {
+                        // 中途新发现的文件：历史活动并进 pending，第一个事件就带着完整跨度
+                        st.pending.extend(scan_buckets(&path, now_ms - BACKFILL_MS));
+                    }
+                }
                 let Ok(mut file) = std::fs::File::open(&path) else { continue };
                 let Ok(len) = file.metadata().map(|m| m.len()) else { continue };
                 if st.offset > len {
@@ -351,7 +468,9 @@ pub fn spawn(fwd: Forwarder) {
                 st.offset += complete as u64;
             }
             if initial {
-                for st in states.values_mut() {
+                for (path, st) in states.iter_mut() {
+                    // feed 阶段的事件被丢弃但 pending 已被清空：登记前重新补齐历史活动桶
+                    st.pending.extend(scan_buckets(path, now_ms - BACKFILL_MS));
                     if let Some(ev) = st.register(now_ms) {
                         fwd.push(ev);
                     }
@@ -460,8 +579,11 @@ mod tests {
         s.feed(&[&meta("abc", T0)], T0);
         let first = s.feed(&[&msg("user", "completed", "一", T0)], T0);
         assert_eq!(first[0].state, "running");
-        // 同一轮里再来一条用户消息不再重复上报
-        assert!(s.feed(&[&msg("user", "completed", "二", T0 + 1_000)], T0 + 1_000).is_empty());
+        // 同一轮里再来一条用户消息：状态不重复提醒，但活动桶静默捎上（跨度跟着对话走）
+        let second = s.feed(&[&msg("user", "completed", "二", T0 + 1_000)], T0 + 1_000);
+        assert_eq!(second.len(), 1);
+        assert!(second[0].quiet);
+        assert_eq!(second[0].state, "running");
         s.feed(&[&msg("assistant", "completed", "答", T0 + 2_000)], T0 + 2_000);
         s.confirm_quiet(T0 + 2_000 + QUIET_MS).unwrap();
         // 下一轮重新开始
@@ -514,6 +636,86 @@ mod tests {
         let mut s = live();
         assert!(s.feed(&["not json", "{}"], T0).is_empty());
         assert!(s.register(T0).is_none());
+    }
+
+    #[test]
+    fn injected_only_user_messages_do_not_become_titles() {
+        let mut s = live();
+        let cb = serde_json::json!({
+            "type": "message", "role": "user", "status": "completed", "timestamp": T0,
+            "content": [{"type": "input_text", "text": "<cb_summary> Summary of the conversation"}]
+        })
+        .to_string();
+        let notified = serde_json::json!({
+            "type": "message", "role": "user", "status": "completed", "timestamp": T0 + 1,
+            "content": [{"type": "input_text", "text": "<task-notification> <task-id>NDuwWi</task-id> 已完成"}]
+        })
+        .to_string();
+        let wrapped = serde_json::json!({
+            "type": "message", "role": "user", "status": "completed", "timestamp": T0 + 2,
+            "content": [{"type": "input_text", "text": "<system-reminder data-role=\"user-context\">注入</system-reminder>\n> <user_query>真正的提问</user_query>"}]
+        })
+        .to_string();
+        s.feed(&[&cb, &notified, &wrapped], T0 + 2);
+        assert_eq!(s.title.as_deref(), Some("真正的提问"));
+    }
+
+    #[test]
+    fn activity_buckets_flow_with_events() {
+        let mut s = live();
+        let first = s.feed(&[&msg("user", "completed", "一", T0)], T0);
+        assert_eq!(first[0].buckets.len(), 1);
+        assert_eq!(first[0].buckets[0].count, 1);
+        // 状态没变的后续轮次也要把桶捎上去（静默），跨度才不会停在上一轮
+        let again = s.feed(&[&msg("user", "completed", "二", T0 + 60_000)], T0 + 60_000);
+        assert_eq!(again.len(), 1);
+        assert!(again[0].quiet);
+        assert_eq!(again[0].buckets.len(), 1);
+        assert_eq!(again[0].buckets[0].count, 1);
+        // 桶已带走，纯助手回复不再上报
+        assert!(s.feed(&[&msg("assistant", "completed", "答", T0 + 120_000)], T0 + 120_000).is_empty());
+        let done = s.confirm_quiet(T0 + 120_000 + QUIET_MS).unwrap();
+        assert_eq!(done.buckets.len(), 1);
+    }
+
+    #[test]
+    fn scan_buckets_reads_message_timestamps() {
+        let dir = std::env::temp_dir().join(format!("wb-scan-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("scan.jsonl");
+        std::fs::write(
+            &p,
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                meta("scan", T0),
+                msg("user", "completed", "问", T0 + 1000),
+                titled("标题", T0 + 2000),
+                msg("assistant", "completed", "答", T0 + 3000),
+            ),
+        )
+        .unwrap();
+        let ms = scan_buckets(&p, T0 - BACKFILL_MS);
+        assert_eq!(ms, vec![T0 + 1000, T0 + 3000], "meta / 标题不算活动");
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn head_seeding_picks_up_title() {
+        let dir = std::env::temp_dir().join(format!("wb-head-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("headabc.jsonl");
+        std::fs::write(
+            &p,
+            format!("{}\n{}\n{}\n", meta("headabc", T0), titled("文件头标题", T0 + 10), msg("user", "completed", "问", T0 + 20)),
+        )
+        .unwrap();
+        let mut st = new_state(&p);
+        assert_eq!(st.session_id.as_deref(), Some("headabc"));
+        seed_head(&p, &mut st);
+        assert_eq!(st.title.as_deref(), Some("文件头标题"));
+        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]

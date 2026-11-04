@@ -14,6 +14,14 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Bucket {
+    /// 桶起点（对齐到 5 分钟）
+    pub at: String,
+    pub count: u32,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {
@@ -33,6 +41,9 @@ pub struct Event {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub quiet: bool,
+    /// 只听不聊的 agent 顺路报活动桶，服务端落 session_activity 给日历画跨度
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<Bucket>,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -185,6 +196,7 @@ mod tests {
             summary: None,
             pid: None,
             quiet: false,
+            buckets: Vec::new(),
         }
     }
 
