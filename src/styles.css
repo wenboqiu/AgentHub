@@ -412,6 +412,10 @@ header h1 { white-space: nowrap; }
 .tl-block.running { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
 /* 点状标记（会话最后活动）：右边缘对齐时刻 */
 .tl-block.point { transform: translateX(-100%); }
+/* 会话跨度：上层细条带（首活动→末活动），与任务行的计划层同一视觉语言 */
+.tl-span { position: absolute; top: 4px; height: 10px; min-height: 0; padding: 0 9px; border-radius: 999px; border: 1px dashed color-mix(in srgb, var(--dim) 55%, transparent); background: color-mix(in srgb, var(--dim) 8%, transparent); color: var(--dim); font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; overflow: hidden; white-space: nowrap; cursor: pointer; }
+.tl-span span { overflow: hidden; text-overflow: ellipsis; }
+.tl-span.running { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 9%, transparent); color: var(--accent); }
 /* 会话活动片段：没有精确起止，颜色淡一档以区别于 run 的真实执行区间 */
 .tl-block.act { background: color-mix(in srgb, var(--accent) 42%, transparent); }
 .tl-block.act.stopped { background: color-mix(in srgb, var(--dim) 55%, transparent); }
@@ -440,6 +444,7 @@ header h1 { white-space: nowrap; }
 .tl-legend i { display: inline-block; width: 14px; height: 8px; border-radius: 4px; }
 .tl-legend .lg-plan { border: 1px dashed color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .tl-legend .lg-act { background: color-mix(in srgb, var(--accent) 70%, transparent); }
+.tl-legend .lg-span { border: 1px dashed color-mix(in srgb, var(--dim) 55%, transparent); background: color-mix(in srgb, var(--dim) 10%, transparent); }
 .tl-legend .lg-due { width: 8px; height: 8px; border-radius: 2px; transform: rotate(45deg); border: 1.5px solid var(--dim); background: var(--card); }
 .tl-legend .lg-done { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); }
 .tl-check { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }

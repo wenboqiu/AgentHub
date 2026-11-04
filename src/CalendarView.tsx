@@ -124,6 +124,8 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   const isWeekView = mode === "timeline" && scale === "week";
   const [execs, setExecs] = useState<Execution[]>([]);
   const [activity, setActivity] = useState<ActivityBucket[]>([]);
+  // 快照只推活跃会话（ended 和超过 24h 的被滤掉），日历自己拉全量补齐已结束的对话
+  const [allSessions, setAllSessions] = useState<Session[]>([]);
   const [showDone, setShowDone] = useState(false);
   const [showUnsched, setShowUnsched] = useState(false);
   const [err, setErr] = useState("");
@@ -164,8 +166,16 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
     api.activity(new Date(range.from).toISOString(), new Date(range.to - 1).toISOString())
       .then(r => { if (alive) setActivity(r.activity); })
       .catch(() => { if (alive) setActivity([]); });
+    api.sessionsAll().then(r => { if (alive) setAllSessions(r); }).catch(() => { if (alive) setAllSessions([]); });
     return () => { alive = false; };
   }, [api, range, runSignal]);
+
+  // 活跃会话以快照为准（状态实时），快照里没有的从全量列表补
+  const mergedSessions = useMemo(() => {
+    const m = new Map(allSessions.map(s => [s.id, s]));
+    for (const s of sessions) m.set(s.id, s);
+    return [...m.values()];
+  }, [allSessions, sessions]);
 
   // 把活动桶合并成片段：间隔 ≤ MERGE_GAP 视为同一次连续工作
   const segments = useMemo(() => {
@@ -182,9 +192,9 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   }, [activity]);
 
   // 拉取区间内有活动的会话（最后活动时间落在区间内）——终端里直接开的会话没有 run 记录，也要出现在日历
-  const sessionItems = useMemo(() => sessions
+  const sessionItems = useMemo(() => mergedSessions
     .map(sessionItem)
-    .filter(e => { const t = itemAt(e); return t >= range.from && t < range.to; }), [sessions, range]);
+    .filter(e => { const t = itemAt(e); return t >= range.from && t < range.to; }), [mergedSessions, range]);
 
   // 每个会话在选中日的累计活动时长：片段与当日求交集后求和
   const dayActiveMs = useMemo(() => {
@@ -496,6 +506,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
       <div className="tl-legend">
         <span><i className="lg-plan" aria-hidden="true"/>计划</span>
         <span><i className="lg-act" aria-hidden="true"/>实际执行</span>
+        <span><i className="lg-span" aria-hidden="true"/>对话跨度</span>
         <span><i className="lg-due" aria-hidden="true"/>截止</span>
         <span><i className="lg-done" aria-hidden="true"/>完成</span>
         <label className="tl-check" title="计划跨越当前视图、但完成时间更早的任务；在本视图内完成的始终显示"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)}/>显示已完成的旧任务</label>
@@ -521,8 +532,10 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
             </div>
           </div>;
         }
-        // 任务/会话：上层计划，下层实际
-        const segs = row.runs.length ? [] : row.sessionIds
+        // 任务/会话：上层计划（任务）或对话跨度（会话），下层实际执行。
+        // 活动分段不再被 run 屏蔽：run 只是 AgentHub 发起的回合（每次几分钟），
+        // 真正的对话节奏在消息活动里，两个都画才不会把一小时对话缩成一个点。
+        const segs = row.sessionIds
           .flatMap(id => segments.get(id) ?? [])
           .filter(sg => sg.end > viewStart && sg.start < viewEnd)
           .sort((a, b) => a.start - b.start);
@@ -540,6 +553,23 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
           return { left, width: Math.max(0.8, right - left), openStart: p.start === null, openEnd: p.end === null, visible: right > 0 && left < 100 };
         })() : null;
         const planCls = p ? (p.overdue ? "overdue" : p.done !== null ? "done" : p.status) : "";
+        // 会话跨度：第一次活动到最后一次活动（进行中延伸到当前时刻）。中间的空闲不算断开——
+        // 跨度回答"这轮对话前后拖了多久"，分段回答"真正在动的是哪几段"。没有任何活动时保持刻度点。
+        const span = row.kind === "session" ? (() => {
+          let s: number | null = null, e: number | null = null;
+          for (const sg of row.sessionIds.flatMap(id => segments.get(id) ?? [])) {
+            s = s === null ? sg.start : Math.min(s, sg.start);
+            e = e === null ? sg.end : Math.max(e, sg.end);
+          }
+          for (const run of row.runs) {
+            const rs = itemAt(run), re = endOf(run, now);
+            s = s === null ? rs : Math.min(s, rs);
+            e = e === null ? re : Math.max(e, re);
+          }
+          if (s === null) return null;
+          if (markerState?.cls === "running") e = Math.max(e ?? s, now);
+          return { start: s, end: Math.max(e ?? s, s + BUCKET) };
+        })() : null;
         return <div className={`tl-row${p ? " has-plan" : ""}`} key={row.key}>
           <span className="tl-label" title={row.label}>{row.label}</span>
           <div className={`tl-track${scale === "day" ? " hours" : ""}`}>
@@ -553,6 +583,17 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
               <span className="tl-done-flag" style={{ left: `${pct(p.done)}%` }} aria-hidden="true"/>}
             {row.doneMark !== undefined && row.doneMark >= viewStart && row.doneMark <= viewEnd &&
               <span className="tl-done-mark" style={{ left: `${pct(row.doneMark)}%` }} title={`完成于 ${md(row.doneMark)} ${hm(new Date(row.doneMark).toISOString())}`} aria-hidden="true"/>}
+            {span && span.end > viewStart && span.start < viewEnd && (() => {
+              const left = pct(Math.max(viewStart, span.start));
+              const right = pct(Math.min(viewEnd, span.end));
+              const width = Math.max(0.8, right - left);
+              return <button className={`tl-span${markerState?.cls === "running" ? " running" : ""}`}
+                style={{ left: `${left}%`, width: `${width}%` }}
+                title={`对话跨度 ${hm(new Date(span.start).toISOString())}–${hm(new Date(span.end).toISOString())} · 跨度 ${durLabel(span.end - span.start)}`}
+                onClick={() => sessionId && onOpenSession(sessionId)}>
+                {width > 10 && <span>{durLabel(span.end - span.start)}</span>}
+              </button>;
+            })()}
             {row.runs.filter(e => endOf(e, now) > viewStart && itemAt(e) < viewEnd).map(e => {
               const st = statusOf(e, now);
               const { left, width } = clampPos(itemAt(e), endOf(e, now));
