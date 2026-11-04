@@ -53,6 +53,7 @@ import { evaluateNotify, getSettings, saveSettings } from './notify.ts'
 import { buildFailureDigest, buildReviewDigest, getDigests } from './digest.ts'
 import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } from './watchdog.ts'
 import { taskThread } from './threads.ts'
+import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -356,6 +357,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.post('/tasks/:id/sessions', async req => serial(async () => {
     const task = await linkSession(pool,req.userId,entityId((req.params as {id:string}).id),taskText(object(req.body).sessionId,'会话 ID',200))
     pushTask(req.userId,task); return {task}
+  }))
+  // 验收：检查项（来自任务清单）+ 证据（会话记录摘取）+ 打回沉淀的标准
+  app.get('/tasks/:id/review', async req => serial(async () => {
+    return getReview(pool, req.userId, entityId((req.params as {id:string}).id))
+  }))
+  app.post('/tasks/:id/review', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const item = await addReviewItem(pool, req.userId, id, taskText(object(req.body).title, '检查项', 500))
+    return { item }
+  }))
+  app.patch('/tasks/:id/review/:itemId', async req => serial(async () => {
+    const p = req.params as {id:string;itemId:string}
+    const b = object(req.body)
+    const status = b.status
+    if (status !== 'pending' && status !== 'pass' && status !== 'fail') throw new TaskError('判定状态不合法')
+    const note = b.note === undefined ? '' : taskText(b.note, '打回原因', 500, true)
+    const item = await decideReviewItem(pool, req.userId, entityId(p.id), entityId(p.itemId), status, note)
+    return { item }
   }))
   // 投机预摘要：验收摘要（进入待验收时后台生成）与失败上下文
   app.get('/tasks/:id/digest', async req => serial(async () => {

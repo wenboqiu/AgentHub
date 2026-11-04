@@ -12,11 +12,17 @@ export type Goal = Schedule & { id: number; title: string; notes: string; priori
 export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
 export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
+/** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
+export type EvidenceKind = "file" | "command" | "test" | "shot" | "log";
+export type Evidence = { kind: EvidenceKind; label: string; value: string; at: string | null };
 /** 验收摘要：任务进入待验收时服务端后台预生成（投机执行），打开详情即见 */
-export type ReviewDigest = { kind: "review"; builtAt: string; sessionId: string | null; sessionTitle: string; agent: string | null; project: string; messages: number; lastReply: string; lastReplyAt: string | null; runs: RunBrief[] };
+export type ReviewDigest = { kind: "review"; builtAt: string; sessionId: string | null; sessionTitle: string; agent: string | null; project: string; messages: number; lastReply: string; lastReplyAt: string | null; runs: RunBrief[]; evidence?: Evidence[] };
 /** 失败上下文：run 失败时预收集的错误与最后几条消息 */
 export type FailureDigest = { kind: "failure"; builtAt: string; runId: string; sessionId: string | null; error: string; tail: { role: string; text: string }[] };
 export type TaskDigests = { review: ReviewDigest | null; failure: FailureDigest | null };
+/** 验收检查项：来自任务清单（或人工添加），可判通过/打回，打回原因沉淀为标准 */
+export type ReviewItem = { id: number; key: string; title: string; status: "pending" | "pass" | "fail"; note: string; manual: boolean; updatedAt: string };
+export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] };
 /** Thread 事件：任务视角的统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要） */
 export type ThreadEvent =
   | { type: "message"; at: string; sessionId: string; role: string; text: string; sourceId?: string }
@@ -136,6 +142,9 @@ export class Api {
   deleteTask = (id: number) => this.call("DELETE", `/tasks/${id}`);
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
   digests = (id: number) => this.call<TaskDigests>("GET", `/tasks/${id}/digest`);
+  review = (id: number) => this.call<Review>("GET", `/tasks/${id}/review`);
+  addReviewItem = (id: number, title: string) => this.call<{ item: ReviewItem }>("POST", `/tasks/${id}/review`, { title });
+  decideReviewItem = (taskId: number, itemId: number, status: "pending" | "pass" | "fail", note = "") => this.call<{ item: ReviewItem }>("PATCH", `/tasks/${taskId}/review/${itemId}`, { status, note });
   thread = (id: number, limit = 200) => this.call<{ events: ThreadEvent[] }>("GET", `/threads/task/${id}?limit=${limit}`);
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
   startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId: string; sessionId: string; task: Task}>("POST", `/tasks/${id}/start`, input);

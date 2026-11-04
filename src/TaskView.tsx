@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Api, Goal, Session, Task, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import type { Api, EvidenceKind, Goal, Review, ReviewItem, Session, Task, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
 import { localDateTime } from "./ScheduleFields";
@@ -27,6 +27,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const [now, setNow] = useState(Date.now());
   const [fetchedDigest, setFetchedDigest] = useState<TaskDigests | null>(null);
   const [timeline, setTimeline] = useState<ThreadEvent[] | null>(null);
+  const [review, setReview] = useState<Review | null>(null);
+  const [failing, setFailing] = useState<number | null>(null), [note, setNote] = useState(""), [newItem, setNewItem] = useState("");
   const flashTimer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   useEffect(() => { if (!task.timerStartedAt) return; const t = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(t); }, [task.timerStartedAt]);
@@ -36,6 +38,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     api.digests(task.id).then(d => { if (alive) setFetchedDigest(d); }).catch(() => {});
     // Thread 时间线：任务为锚点的统一事件流（消息 / 执行 / 提醒 / 摘要）
     api.thread(task.id).then(r => { if (alive) setTimeline(r.events); }).catch(() => { if (alive) setTimeline([]); });
+    // 验收：检查项 + 证据 + 打回沉淀的标准
+    api.review(task.id).then(r => { if (alive) setReview(r); }).catch(() => { if (alive) setReview(null); });
     return () => { alive = false; };
   }, [api, task.id, task.updatedAt]);
   const digest: TaskDigests | null = liveDigest ?? fetchedDigest;
@@ -44,6 +48,21 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
 
   const guard = async (fn: () => Promise<unknown>) => { setBusy(true); setErr(""); try { await fn(); flash(); } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); } };
   const patch = (v: TaskInput) => void guard(async () => onSaved(await api.updateTask(task.id, v)));
+  // 验收判定：通过 / 打回（打回原因沉淀为账号级标准，下次交付前自查）
+  const decide = (it: ReviewItem, status: ReviewItem["status"]) => void guard(async () => {
+    await api.decideReviewItem(task.id, it.id, status, status === "fail" ? note : it.note);
+    setReview(await api.review(task.id));
+    if (status === "fail") { setFailing(null); setNote(""); }
+  });
+  const addItem = () => void guard(async () => {
+    await api.addReviewItem(task.id, newItem.trim());
+    setNewItem("");
+    setReview(await api.review(task.id));
+  });
+  const passed = review?.items.filter(i => i.status === "pass").length ?? 0;
+  const evidenceGroups = (["test", "command", "file", "shot", "log"] as EvidenceKind[])
+    .map(k => ({ k, label: (review?.evidence ?? []).find(e => e.kind === k)?.label ?? k, list: (review?.evidence ?? []).filter(e => e.kind === k) }))
+    .filter(g => g.list.length > 0);
 
   const done = task.status === "done";
   const machine = task.machine || (agents.length === 1 ? agents[0] : "");
@@ -90,6 +109,60 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     </section>
 
     {err && <p className="form-error" role="alert">{err}</p>}
+
+    {review && (review.items.length > 0 || review.evidence.length > 0 || task.status === "review") && (
+      <section className="detail-section">
+        <h3>验收{review.items.length > 0 ? <span className="dim"> · {passed}/{review.items.length} 通过</span> : null}</h3>
+        {review.items.length === 0 && <p className="hint">这个任务还没有检查项。任务清单里的每一项都会自动变成检查项，也可以在这里临时补。</p>}
+        <ul className="review-list">
+          {review.items.map(it => (
+            <li key={it.id} className={`review-item ${it.status}`}>
+              <div className="review-row">
+                <span className={`review-dot ${it.status}`} aria-hidden />
+                <span className="review-title">{it.title}</span>
+                <span className="review-actions">
+                  <button className="link" disabled={busy} onClick={() => void decide(it, it.status === "pass" ? "pending" : "pass")}>{it.status === "pass" ? "撤销" : "通过"}</button>
+                  <button className="link danger" disabled={busy} onClick={() => { setFailing(failing === it.id ? null : it.id); setNote(it.note); }}>{it.status === "fail" ? "重新打回" : "打回"}</button>
+                </span>
+              </div>
+              {it.note && failing !== it.id && <p className="review-note-text">{it.note}</p>}
+              {failing === it.id && (
+                <div className="review-note">
+                  <textarea value={note} maxLength={500} placeholder="打回原因（会沉淀为标准，下次交付前先自查）" onChange={e => setNote(e.target.value)} />
+                  <div className="action-bar">
+                    <button className="primary" disabled={busy} onClick={() => void decide(it, "fail")}>确认打回</button>
+                    <button onClick={() => setFailing(null)}>取消</button>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+        <form className="review-add" onSubmit={e => { e.preventDefault(); if (newItem.trim()) addItem(); }}>
+          <input value={newItem} maxLength={500} placeholder="补一项检查…" onChange={e => setNewItem(e.target.value)} />
+          <button disabled={busy || !newItem.trim()}>添加</button>
+        </form>
+
+        {evidenceGroups.length > 0 && (
+          <div className="evidence">
+            <p className="dim">证据（自动摘取自会话记录，只读）</p>
+            {evidenceGroups.map(g => (
+              <details key={g.k}>
+                <summary>{g.label} · {g.list.length}</summary>
+                <ul>{g.list.map((e, i) => <li key={i}><code>{e.value}</code></li>)}</ul>
+              </details>
+            ))}
+          </div>
+        )}
+
+        {review.standards.length > 0 && (
+          <div className="review-standards">
+            <p className="dim">打回沉淀的标准（最近 5 条，交付前先自查）</p>
+            <ul>{review.standards.map((s, i) => <li key={i}>{s}</li>)}</ul>
+          </div>
+        )}
+      </section>
+    )}
 
     {(digest?.review || digest?.failure) && (
       <section className="detail-section">

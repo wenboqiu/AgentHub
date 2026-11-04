@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import { listMessages } from './db.ts'
+import { harvestEvidence, type Evidence } from './review.ts'
 
 // 投机预摘要（思路来自 DeepSeek Super-agent 的投机执行：结果不确定是否被采用时先在
 // 后台准备，有价值再提交）。任务进入「待验收」时预生成验收摘要，失败运行时预收集
@@ -20,6 +21,8 @@ export type ReviewDigest = {
   lastReply: string
   lastReplyAt: string | null
   runs: RunBrief[]
+  // 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志
+  evidence: Evidence[]
 }
 export type FailureDigest = {
   kind: 'failure'
@@ -58,9 +61,11 @@ export async function buildReviewDigest(pool: pg.Pool, userId: number, taskId: n
     await pool.query('SELECT status, error, updated_at FROM runs WHERE user_id=$1 AND task_id=$2 ORDER BY created_at DESC, id DESC LIMIT 3', [userId, taskId])
   ).rows.map((r: { status: string; error: string; updated_at: Date }) => ({ status: r.status, error: r.error, updatedAt: r.updated_at.toISOString() }))
   let lastReply = '', lastReplyAt: string | null = null, messages = 0
+  let evidence: Evidence[] = []
   if (s) {
     const msgs = await listMessages(pool, userId, s.id, 200)
     messages = msgs.length
+    evidence = harvestEvidence(msgs.map(m => ({ role: m.role, text: m.text, createdAt: m.createdAt })))
     for (let i = msgs.length - 1; i >= 0; i--) {
       if (msgs[i].role === 'assistant') {
         lastReply = msgs[i].text.slice(0, 500)
@@ -81,6 +86,7 @@ export async function buildReviewDigest(pool: pg.Pool, userId: number, taskId: n
     lastReply,
     lastReplyAt,
     runs,
+    evidence,
   }
   await upsert(pool, userId, taskId, 'review', digest)
   return digest
