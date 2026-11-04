@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityBucket, Api, Execution, Goal, Session, Task } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 
@@ -394,6 +394,42 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
   };
   /** 半窗平移 */
   const panDay = (dir: -1 | 1) => setViewOffset(Math.min(maxOffset, Math.max(0, clampedOffset + dir * viewSpan / 2)));
+  // 按住拖动平移：鼠标按住或手指拖轨道，内容跟手。移动超过 3px 判定为拖动，
+  // 松手后吞掉这次 click，避免拖完误开某个执行块；全天视图没有可平移的余量，不启用。
+  const dragRef = useRef<{ startX: number; startOffset: number; moved: boolean; msPerPx: number } | null>(null);
+  const suppressClick = useRef(false);
+  const [dragging, setDragging] = useState(false);
+  const draggable = isDayView && zoomH < 24;
+  const beginPan = (e: React.PointerEvent) => {
+    if (!draggable || e.button !== 0) return;
+    const track = (e.currentTarget as HTMLElement).querySelector<HTMLElement>(".tl-track");
+    if (!track?.clientWidth) return;
+    dragRef.current = { startX: e.clientX, startOffset: clampedOffset, moved: false, msPerPx: viewSpan / track.clientWidth };
+    setDragging(true);
+    e.preventDefault(); // 防止拖动时选中标签文字
+    const move = (ev: PointerEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const dx = ev.clientX - d.startX;
+      if (Math.abs(dx) > 3) d.moved = true;
+      setViewOffset(Math.min(maxOffset, Math.max(0, d.startOffset - dx * d.msPerPx)));
+    };
+    const up = () => {
+      suppressClick.current = dragRef.current?.moved ?? false;
+      dragRef.current = null;
+      setDragging(false);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      window.setTimeout(() => { suppressClick.current = false; }, 0); // click 在 pointerup 之后同步派发，定时清理兜底
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  };
+  const eatDragClick = (e: React.MouseEvent) => {
+    if (suppressClick.current) { e.stopPropagation(); e.preventDefault(); }
+  };
   // 刻度间隔随缩放档位变细：24h→3h，12h→2h，6h→1h，3h→30min
   const tickMs = viewSpan > 12 * 3600_000 ? 3 * 3600_000 : viewSpan > 6 * 3600_000 ? 2 * 3600_000 : viewSpan > 3 * 3600_000 ? 3600_000 : 1800_000;
   const tickCount = Math.round(viewSpan / tickMs);
@@ -464,7 +500,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         <span><i className="lg-done" aria-hidden="true"/>完成</span>
         <label className="tl-check" title="计划跨越当前视图、但完成时间更早的任务；在本视图内完成的始终显示"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)}/>显示已完成的旧任务</label>
       </div>
-      <div className="tl-rows">
+      <div className={`tl-rows${draggable ? " draggable" : ""}${dragging ? " dragging" : ""}`} onPointerDown={beginPan} onClickCapture={eatDragClick}>
       {timeline.rows.length ? timeline.rows.map(row => {
         // 目标：跨度带，不占任务行
         if (row.kind === "goal" && row.plan) {

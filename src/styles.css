@@ -336,7 +336,10 @@ header h1 { white-space: nowrap; }
 /* 日视图刻度随缩放档位变化，网格线用 --tf（单格占比）与坐标轴对齐 */
 .tl-track.hours { background: repeating-linear-gradient(to right, transparent 0, transparent calc(100% * var(--tf, .125) - 1px), var(--line) calc(100% * var(--tf, .125) - 1px), var(--line) calc(100% * var(--tf, .125))); }
 /* 行容器：当前时间线叠在行上面，栅格与 .tl-row 一致（标签列 + 8px 间隔 + 轨道） */
-.tl-rows { position: relative; }
+.tl-rows { position: relative; touch-action: pan-y; }
+/* 日视图缩放后支持按住拖动平移：鼠标按住或手指左右拖，纵向滚动不受影响 */
+.tl-rows.draggable { cursor: grab; }
+.tl-rows.dragging { cursor: grabbing; user-select: none; }
 .tl-now-layer { position: absolute; inset: 0; display: flex; gap: 8px; pointer-events: none; }
 .tl-now-gutter { width: var(--tl-label-w); flex-shrink: 0; }
 .tl-now-rail { position: relative; flex: 1; min-width: 280px; }
