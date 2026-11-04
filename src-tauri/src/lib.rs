@@ -136,7 +136,18 @@ mod desktop {
             let _ = w.unminimize();
             let _ = w.show();
             let _ = w.set_focus();
+            // 被托盘 / 系统通知唤起时，系统常常拒绝「抢前台」，补一次强制前置
+            #[cfg(windows)]
+            if let Ok(hwnd) = w.hwnd() {
+                let _ = crate::focus::win::bring_to_front(hwnd.0 as _);
+            }
         }
+    }
+
+    /// 前端在「用户点了系统通知」时调用：把主窗口叫回前台
+    #[tauri::command]
+    fn show_main_window(app: AppHandle) {
+        show_main(&app);
     }
 
     fn build_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -185,7 +196,8 @@ mod desktop {
                 uninstall_claude_hooks,
                 focus_session,
                 open_in_terminal,
-                set_badge
+                set_badge,
+                show_main_window
             ])
             .setup(move |app| {
                 let config_path = config::config_path(app.path().app_config_dir()?);

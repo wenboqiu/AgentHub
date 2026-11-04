@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests } from "./lib/api";
 import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
+import { onNotificationClick, pushNotification, type NotifyTarget } from "./lib/desktopNotify";
 import SessionView from "./SessionView";
 import { makeBus } from "./lib/sessionSync";
 import { mergeEntity } from "./lib/taskSync";
@@ -45,59 +47,40 @@ function sinceText(s: Session, now: number): string {
   }
 }
 
-async function notifyDesktop(s: Session) {
-  try {
-    const n = await import("@tauri-apps/plugin-notification");
-    let ok = await n.isPermissionGranted();
-    if (!ok) ok = (await n.requestPermission()) === "granted";
-    if (!ok) return;
-    n.sendNotification({
-      title: `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${ALERT_LABEL[s.state] ?? ""}`.trim(),
-      body: (s.summary || s.title).slice(0, 80),
-    });
-  } catch {
-    /* 通知失败不影响主流程 */
-  }
+// 通知都带上「点了要跳到哪」，点击后由 onNotificationClick 里统一处理
+function notifyDesktop(s: Session) {
+  return pushNotification(
+    `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${ALERT_LABEL[s.state] ?? ""}`.trim(),
+    (s.summary || s.title).slice(0, 80),
+    { kind: "session", id: s.id },
+  );
 }
 
 /** Watchdog 升级提醒：只提醒不干预 */
-async function notifyWatchdog(issue: "stall" | "abort-spree", s: Session) {
-  try {
-    const n = await import("@tauri-apps/plugin-notification");
-    let ok = await n.isPermissionGranted();
-    if (!ok) ok = (await n.requestPermission()) === "granted";
-    if (!ok) return;
-    n.sendNotification({
-      title: `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${issue === "stall" ? "可能卡住了" : "反复失败"}`,
-      body:
-        issue === "stall"
-          ? `运行中超过 45 分钟没有新事件，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`
-          : `短时间内多次中断，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`,
-    });
-  } catch {
-    /* 通知失败不影响主流程 */
-  }
+function notifyWatchdog(issue: "stall" | "abort-spree", s: Session) {
+  return pushNotification(
+    `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${issue === "stall" ? "可能卡住了" : "反复失败"}`,
+    issue === "stall"
+      ? `运行中超过 45 分钟没有新事件，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`
+      : `短时间内多次中断，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`,
+    { kind: "session", id: s.id },
+  );
 }
 
-async function notifyReminder(r: Reminder) {
-  try {
-    const n = await import("@tauri-apps/plugin-notification");
-    let ok = await n.isPermissionGranted();
-    if (!ok) ok = (await n.requestPermission()) === "granted";
-    if (ok) n.sendNotification({title:`${r.entityType === "task" ? "任务" : "目标"} · ${r.kind === "start" ? "开始时间到了" : "已到截止时间"}`,body:r.title.slice(0,100)});
-  } catch { /* 应用内仍保留待处理提醒 */ }
+function notifyReminder(r: Reminder) {
+  return pushNotification(
+    `${r.entityType === "task" ? "任务" : "目标"} · ${r.kind === "start" ? "开始时间到了" : "已到截止时间"}`,
+    r.title.slice(0, 100),
+    { kind: r.entityType, id: r.entityId },
+  );
 }
 
-async function notifyApproval(a: Approval) {
-  try {
-    const n = await import("@tauri-apps/plugin-notification");
-    let ok = await n.isPermissionGranted();
-    if (!ok) ok = (await n.requestPermission()) === "granted";
-    if (!ok) return;
-    n.sendNotification({ title: `${a.project || "会话"} · 请求授权`, body: `${a.tool} ${a.detail}`.slice(0, 80) });
-  } catch {
-    /* 通知失败不影响主流程 */
-  }
+function notifyApproval(a: Approval) {
+  return pushNotification(
+    `${a.project || "会话"} · 请求授权`,
+    `${a.tool} ${a.detail}`.slice(0, 80),
+    { kind: "session", id: a.sessionId },
+  );
 }
 
 function Row({
@@ -334,6 +317,29 @@ export default function App() {
     import("@tauri-apps/api/event").then(({ listen }) => listen("tray-ack-all", () => void ackAll()).then((f) => (un = f)));
     return () => un?.();
   }, [ackAll]);
+
+  // 点击系统通知：先把主窗口叫到前台（Rust 侧 unminimize + show + 抢前台），再跳到对应条目
+  const notifyNav = useRef<(t: NotifyTarget) => void>(() => {});
+  notifyNav.current = (t) => {
+    const nextTab: Tab = t.kind === "session" ? "sessions" : t.kind === "task" ? "tasks" : "goals";
+    const next: Detail = t.kind === "session" ? { kind: "session", id: t.id } : { kind: t.kind, id: t.id };
+    setTab(nextTab);
+    window.history.pushState({ agenthub: true, detail: next, tab: nextTab }, "");
+    setDetail(next);
+  };
+  useEffect(() => {
+    if (!isDesktop) return;
+    let off: (() => void) | undefined;
+    let dead = false;
+    void onNotificationClick((t) => {
+      invoke("show_main_window").catch(() => {});
+      if (t) notifyNav.current(t);
+    }).then((u) => (dead ? u() : (off = u)));
+    return () => {
+      dead = true;
+      off?.();
+    };
+  }, []);
 
   // 每层历史保存详情类型和标签，任务 → 会话 → 返回可恢复任务详情。
   const navigate = (next: Detail, replace=false) => {

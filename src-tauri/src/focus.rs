@@ -1,7 +1,7 @@
 //! 按进程号找窗口并切到前台（仅 Windows）
 
 #[cfg(windows)]
-mod win {
+pub(crate) mod win {
     use std::collections::HashMap;
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
