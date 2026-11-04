@@ -77,6 +77,8 @@ pub fn check_cwd(cwd: &str, roots: &[String]) -> Result<(), CwdIssue> {
     }
 }
 
+/// 只给单测用的布尔包装：生产路径走 `check_cwd`，需要知道具体是哪种失败
+#[cfg(test)]
 pub fn cwd_allowed(cwd: &str, roots: &[String]) -> bool {
     check_cwd(cwd, roots).is_ok()
 }
