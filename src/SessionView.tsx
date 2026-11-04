@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isRunActive, type Api, type Approval, type Message, type Run, type Session, type Task } from "./lib/api";
-import { desktop, isDesktop } from "./lib/platform";
+import { desktop, isAndroid, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
@@ -8,7 +8,8 @@ import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
-import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickImageFiles } from "./lib/images";
+import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
+import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
 
 const STATE_LABEL: Record<string, string> = {
@@ -264,6 +265,31 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       if (ok.length) setImages((cur) => [...cur, ...ok].slice(0, MAX_IMAGES));
     })();
   };
+  /**
+   * 点图片按钮：Android 走系统相册（原生解码 HEIC 和拍摄方向），
+   * 其余情况退回 input[type=file]（桌面选文件、老版本 APK 没有原生通道时）
+   */
+  const openPicker = () => {
+    if (!canPickNative()) {
+      fileRef.current?.click();
+      return;
+    }
+    void (async () => {
+      try {
+        const r = await pickNativeImages(MAX_IMAGES - images.length);
+        const picked = pickDataUrls(r.images, images.length);
+        const msg = r.error || picked.error;
+        if (msg) {
+          setNote(msg);
+          window.setTimeout(() => setNote(""), 3500);
+        }
+        if (picked.images.length) setImages((cur) => [...cur, ...picked.images].slice(0, MAX_IMAGES));
+      } catch {
+        setNote("打开相册失败，请重试");
+        window.setTimeout(() => setNote(""), 3500);
+      }
+    })();
+  };
   const startSpawn = () => {
     const t = spawnText.trim();
     if (!t) return;
@@ -511,7 +537,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           aria-label="会话消息"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={reason ?? "发消息给这个会话…（Ctrl+Enter 发送，可粘贴图片）"}
+          placeholder={reason ?? (isAndroid ? "发消息给这个会话…" : "发消息给这个会话…（Ctrl+Enter 发送，可粘贴图片）")}
           disabled={!!reason}
           rows={2}
           onPaste={(e) => {
@@ -543,7 +569,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
             aria-label="添加图片"
             title={images.length >= MAX_IMAGES ? `最多附 ${MAX_IMAGES} 张图片` : `添加图片（最多 ${MAX_IMAGES} 张）`}
             disabled={!!reason || pending === "send" || images.length >= MAX_IMAGES}
-            onClick={() => fileRef.current?.click()}
+            onClick={openPicker}
           >
             <Icon name="image" />
           </button>

@@ -32,6 +32,8 @@ type NativeBridge = {
   isRunning(): boolean;
   notificationsEnabled(): boolean;
   openBatterySettings(): void;
+  /** 打开系统相册；结果通过 window.__agenthubPickImage / __agenthubPickDone 回传 */
+  pickImages?(requestId: string, limit: number): void;
 };
 declare global {
   interface Window {

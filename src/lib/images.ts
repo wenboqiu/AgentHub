@@ -22,6 +22,18 @@ export function pickImageFiles(files: File[], existing: number): { files: File[]
 /** 这个 data URL 还能不能收（超限就别塞进输入框了） */
 export const fitsLimit = (dataUrl: string): boolean => dataUrl.length <= MAX_IMAGE_CHARS
 
+/** 原生相册回来的 data URL 也要过一遍同样的上限与数量检查（Android 侧解完码就不再走 canvas） */
+export function pickDataUrls(urls: string[], existing: number): { images: string[]; error: string } {
+  const room = MAX_IMAGES - existing
+  if (room <= 0) return { images: [], error: `最多附 ${MAX_IMAGES} 张图片` }
+  const ok = urls.filter((u) => u.startsWith("data:image/") && fitsLimit(u))
+  const skipped = urls.length - ok.length
+  const tail = skipped > 0 ? "有图片太大或格式不支持，已跳过" : ""
+  if (!ok.length) return { images: [], error: skipped > 0 ? tail : "" }
+  if (ok.length > room) return { images: ok.slice(0, room), error: `最多附 ${MAX_IMAGES} 张图片，多出的没有加进来` }
+  return { images: ok, error: tail }
+}
+
 /**
  * 读一张图片并压成 data URL。
  * gif 不压（canvas 会丢掉动画），其余按长边缩放后编码；png 保留透明，其他统一转 jpeg。
