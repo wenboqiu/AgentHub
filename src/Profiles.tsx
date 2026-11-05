@@ -3,7 +3,7 @@ import type { Api, Profile, ProfileInput } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 
 /** 只有这两个能真正派活；豆包 / WorkBuddy 只做状态监听，放进默认值只会让派活报错 */
-const DISPATCHABLE = ["claude", "codex"];
+const DISPATCHABLE = ["claude", "codex", "zcode"];
 
 // 项目配置管理：一条配置 = 用哪个 agent、哪台电脑、哪个目录、默认优先级、验收要看哪几项。
 // 它不给人格和 prompt——那是执行端的事；这里只是把「派活要填的三个格 + 验收标准」命名复用。

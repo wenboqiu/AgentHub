@@ -8,7 +8,7 @@ export const AGENT_LABEL: Record<string, string> = {
 };
 
 /** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent */
-const LISTEN_ONLY = new Set(["doubao", "workbuddy", "zcode"]);
+const LISTEN_ONLY = new Set(["doubao", "workbuddy"]);
 
 export const isListenOnly = (agent: string | null | undefined): boolean => !!agent && LISTEN_ONLY.has(agent);
 

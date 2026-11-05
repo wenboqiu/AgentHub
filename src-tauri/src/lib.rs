@@ -15,6 +15,8 @@ mod workbuddy;
 #[cfg(desktop)]
 mod zcode;
 #[cfg(desktop)]
+mod zcode_exec;
+#[cfg(desktop)]
 mod collector;
 #[cfg(desktop)]
 mod config;

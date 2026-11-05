@@ -3,12 +3,14 @@ import type { Api, Memory, Profile, Project, Role, RoleInput } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 
 /** 只有这两个能真正派活；豆包 / WorkBuddy 只做状态监听 */
-const DISPATCHABLE = ["claude", "codex"];
+const DISPATCHABLE = ["claude", "codex", "zcode"];
 
 /** 模型留空 = 用执行端自己的默认；给出常见别名，也允许手填完整 id */
 const MODEL_HINTS: Record<string, string[]> = {
-  claude: ["opus", "sonnet", "haiku"],
-  codex: ["gpt-5-codex", "gpt-5"],
+  // Claude Code 别名：opus/sonnet/haiku/fable 已解析到 5.5 家族与 Fable 5.1（2026-11 核对）
+  claude: ["opus", "sonnet", "haiku", "fable"],
+  // Codex 目录现行：gpt-6.1-sol 为默认，gpt-5.6 三档仍在售；旧 gpt-5.x codex 系已弃用
+  codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
 };
 
 // 角色管理：像员工一样——有职责、执行工具、模型、准则、可用工具声明，
@@ -118,6 +120,7 @@ export default function Roles({ api }: { api: Api }) {
   const [forms, setForms] = useState<Record<string, Form>>({});
   const [adding, setAdding] = useState(false), [draft, setDraft] = useState<Form>(BLANK);
   const [openMem, setOpenMem] = useState<number | null>(null);
+  const [open, setOpen] = useState<Record<number, boolean>>({});
   const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [err, setErr] = useState("");
 
   const load = useCallback(() => {
@@ -153,27 +156,35 @@ export default function Roles({ api }: { api: Api }) {
           {list.map((r) => {
             const form = forms[String(r.id)] ?? toForm(r);
             const dirty = JSON.stringify(form) !== JSON.stringify(toForm(r));
+            const expanded = !!open[r.id];
             return (
               <div key={r.id} className="profile-card">
-                <div className="profile-head">
+                <button type="button" className="role-head" aria-expanded={expanded}
+                  onClick={() => setOpen((o) => ({ ...o, [r.id]: !o[r.id] }))}>
                   <strong>{r.name}</strong>
-                  <span className="dim">
-                    {r.title || "职责未写"}
-                    {r.agent ? ` · ${AGENT_LABEL[r.agent] ?? r.agent}` : " · 执行工具未定"}
-                    {r.model ? ` · ${r.model}` : ""}
-                    {r.profileId !== null ? ` · 配置 ${profileName(r.profileId) || r.profileId}` : ""}
-                    {` · ${r.tasks} 个任务`}
+                  {r.agent && <span className={`tag ${r.agent}`}>{AGENT_LABEL[r.agent] ?? r.agent}</span>}
+                  <span className="dim role-title">{r.title || "职责未写"}</span>
+                  <span className="role-meta">
+                    {r.model && <code>{r.model}</code>}
+                    {r.profileId !== null && <span>配置 {profileName(r.profileId) || r.profileId}</span>}
+                    <span>{r.tasks} 个任务</span>
                   </span>
-                </div>
-                <Fields form={form} busy={busy} profiles={profiles} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
-                <div className="btns">
-                  <button className="primary" disabled={busy || !dirty} onClick={() => void run(() => api.updateRole(r.id, toInput(form)), "角色已保存")}>保存</button>
-                  <button className="ghost" disabled={busy} onClick={() => void run(() => api.deleteRole(r.id), "角色已删除")}>删除</button>
-                  <button className="ghost" aria-expanded={openMem === r.id} onClick={() => setOpenMem(openMem === r.id ? null : r.id)}>
-                    {openMem === r.id ? "收起记忆" : "记忆"}
-                  </button>
-                </div>
-                {openMem === r.id && <Memories api={api} roleId={r.id} projects={projects} onError={setErr} />}
+                  {dirty && <span className="badge">未保存</span>}
+                  <span className="role-toggle">{expanded ? "收起" : "编辑"}</span>
+                </button>
+                {expanded && (
+                  <>
+                    <Fields form={form} busy={busy} profiles={profiles} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
+                    <div className="btns">
+                      <button className="primary" disabled={busy || !dirty} onClick={() => void run(() => api.updateRole(r.id, toInput(form)), "角色已保存")}>保存</button>
+                      <button className="ghost" disabled={busy} onClick={() => void run(() => api.deleteRole(r.id), "角色已删除")}>删除</button>
+                      <button className="ghost" aria-expanded={openMem === r.id} onClick={() => setOpenMem(openMem === r.id ? null : r.id)}>
+                        {openMem === r.id ? "收起记忆" : "记忆"}
+                      </button>
+                    </div>
+                    {openMem === r.id && <Memories api={api} roleId={r.id} projects={projects} onError={setErr} />}
+                  </>
+                )}
               </div>
             );
           })}

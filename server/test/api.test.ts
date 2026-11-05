@@ -196,7 +196,7 @@ describe('AgentHub 服务端', () => {
     }
   })
 
-  it('ZCode 事件支持状态与标题，拒绝远程执行和历史读取', async () => {
+  it('ZCode 事件支持状态与标题，并且可以派活（不再按只读拒绝）', async () => {
     const key = sid(), id = `zcode:${key}`
     const first = await send([ev(key, 'running', { agent: 'zcode', cwd: 'D:\\Work2\\AgentHub', title: '分析 agenthub 能否支持 zcode 的消息' })])
     assert.equal(first.status, 200)
@@ -204,16 +204,21 @@ describe('AgentHub 服务端', () => {
     assert.equal(running.state, 'running')
     assert.equal(running.title, '分析 agenthub 能否支持 zcode 的消息')
     assert.equal(running.project, 'AgentHub')
-    await send([ev(key, 'done', { agent: 'zcode', cwd: 'D:\\Work2\\AgentHub', summary: '结论：可以，读 ~/.zcode/v2/sessions' })])
+    await send([ev(key, 'done', { agent: 'zcode', cwd: 'D:\\Work2\\AgentHub', summary: '结论：可以，走 app-server' })])
     const done = await get(id)
     assert.equal(done.state, 'done')
     assert.equal(done.acked, false, '非静默的完成要留待处理')
-    assert.equal(done.summary, '结论：可以，读 ~/.zcode/v2/sessions')
+    assert.equal(done.summary, '结论：可以，走 app-server')
+    // 不再按「仅状态监听」拒绝；测试里没有执行器在线，所以落到「电脑端不在线」这一步
     for (const [action, body] of [['messages', { text: 'hello' }], ['spawn', { mode: 'fresh', text: 'hello' }], ['history', {}]] as const) {
       const response = await call('POST', `/sessions/${id}/${action}`, body)
       assert.equal(response.status, 409, JSON.stringify(response.body))
-      assert.match(response.body.error, /ZCode/)
+      assert.match(response.body.error, /电脑端|执行器/)
+      assert.ok(!/仅支持状态监听/.test(response.body.error), `ZCode 不该再被当成只读：${response.body.error}`)
     }
+    // 分叉仍然不支持，但要给出明确原因
+    const fork = await call('POST', `/sessions/${id}/spawn`, { mode: 'fork', text: 'hello' })
+    assert.match(fork.body.error, /暂不支持按回复分叉/)
   })
 
   it('非法事件返回 400', async () => {

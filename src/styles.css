@@ -598,6 +598,20 @@ header h1 { white-space: nowrap; }
 .profile-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .profile-card label { font-size: 13px; }
 
+/* 角色列表：默认收起成一行摘要，点开才编辑 */
+.role-head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 0; padding: 2px 0; border: 0; border-radius: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.role-head strong { flex-shrink: 0; }
+.role-head .tag { flex-shrink: 0; }
+.role-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.role-meta { display: inline-flex; align-items: center; gap: 10px; flex-shrink: 0; font-size: 12px; color: var(--dim); }
+.role-meta code { font-size: 12px; padding: 2px 7px; border-radius: 6px; background: var(--field); }
+.role-toggle { flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--accent); }
+.role-head .badge { margin-left: 0; flex-shrink: 0; }
+@media (max-width: 560px) {
+  .role-head { flex-wrap: wrap; }
+  .role-title { flex-basis: 100%; order: 5; white-space: normal; }
+}
+
 /* 角色记忆：一条条经验，带来源与用量，可手写可删 */
 .memory-block { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
 .memory-head { display: flex; align-items: baseline; gap: 10px; }

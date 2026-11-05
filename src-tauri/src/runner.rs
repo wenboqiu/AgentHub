@@ -766,6 +766,7 @@ pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<crate::mess
             let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
             Ok(crate::message_history::parse("codex", &text, HISTORY_COUNT))
         }
+        "zcode" => crate::zcode_exec::history(key, HISTORY_COUNT).ok_or("没找到这个会话的本地记录".into()),
         _ => Err("不认识的 agent".into()),
     }
 }
@@ -853,6 +854,9 @@ fn read_lines<R: Read>(r: R, mut f: impl FnMut(String) -> bool) {
 }
 
 fn write_line(stdin: &mut Option<ChildStdin>, line: &str) -> bool {
+    if std::env::var_os("AGENTHUB_ZCODE_DEBUG").is_some() {
+        eprintln!("-> {}", line.chars().take(600).collect::<String>());
+    }
     let Some(w) = stdin.as_mut() else { return false };
     w.write_all(line.as_bytes()).and_then(|_| w.write_all(b"\n")).and_then(|_| w.flush()).is_ok()
 }
@@ -1401,6 +1405,369 @@ fn answer_codex(stdin: &mut Option<ChildStdin>, p: &Pending, allow: bool) {
     write_line(stdin, &rpc_response(&p.key, codex_decision(&p.method, allow)));
 }
 
+// ---------------------------------------------------------------- zcode
+
+const ZCODE_PERMISSION: &str = "interaction/requestPermission";
+const ZCODE_USER_INPUT: &str = "interaction/requestUserInput";
+/// create 首次要等约 20s（官方 MCP 鉴权 + workspace 初始化），给足预算
+const ZCODE_CREATE_TIMEOUT: Duration = Duration::from_secs(150);
+/// stop 之后等终止态的时间
+const ZCODE_STOP_GRACE: Duration = Duration::from_secs(15);
+
+
+/// ZCode 的帧是 strict schema：多一个键（比如 Codex 需要的 jsonrpc）整帧被拒
+fn zcode_response(id: &Value, result: Value) -> String {
+    json!({"id": id, "result": result}).to_string()
+}
+
+fn zcode_prefs() -> Value {
+    json!({
+        "nativeSearchEnhancementsEnabled": false,
+        "toolSearchMode": "off",
+        "memoryEnabled": false,
+        "askUserQuestionAutoResolutionEnabled": true,
+        "modelContextBudgetStrategy": "preflight-v1"
+    })
+}
+
+/// zcode 的授权应答只有 allow / deny 两个决定
+fn zcode_decision(allow: bool) -> Value {
+    json!({"decision": if allow { "allow" } else { "deny" }})
+}
+
+fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &str, instructions: &str) {
+    if mode == Mode::Fork {
+        return run.fail("ZCode 暂不支持按回复分叉：可以同目录新开会话，或直接在会话里继续聊");
+    }
+    let Some(install) = crate::zcode_exec::find_install() else {
+        return run.fail("没找到 ZCode 安装目录（默认 C:\\Program Files\\ZCode）");
+    };
+    let log_dir = std::env::temp_dir().join("agenthub-zcode").join(&run.run_id);
+    let mut cmd = match crate::zcode_exec::runtime(&install) {
+        crate::zcode_exec::Runtime::Electron(exe) => {
+            let mut c = Command::new(exe);
+            // ZCode 自带 Electron：以 node 身份跑 CLI，不依赖用户装没装 Node
+            c.env("ELECTRON_RUN_AS_NODE", "1").arg(&install.cjs);
+            c
+        }
+        crate::zcode_exec::Runtime::Node(exe) => {
+            let mut c = Command::new(exe);
+            c.arg(&install.cjs);
+            c
+        }
+    };
+    cmd.args(["app-server", "--stdio", "--surface", "desktop"])
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    crate::zcode_exec::prepare_command(&mut cmd, &install, &log_dir);
+    let mut child = match no_window(&mut cmd).spawn() {
+        Ok(c) => c,
+        Err(e) => return run.fail(&format!("启动 ZCode 失败：{e}")),
+    };
+    let mut stdin = child.stdin.take();
+    let tail = spawn_readers(&mut child, &run.tx);
+    run.status("running", "");
+
+    const ID_CREATE: i64 = 1;
+    const ID_RESUME: i64 = 2;
+    const ID_REFRESH: i64 = 3;
+    const ID_ACCOUNT: i64 = 4;
+    const ID_SUB: i64 = 5;
+    const ID_SEND: i64 = 6;
+    const ID_STOP: i64 = 7;
+
+    let (provider_id, model_id) = crate::zcode_exec::model_selection(model);
+    let body = codex_role_text(text, instructions);
+    // 与桌面端一致：create 只带 workspace，其它字段走默认；spawn 后等存储就绪再发
+    let create = json!({"workspace": {"workspacePath": cwd, "workspaceKey": cwd}});
+    let resume = json!({"sessionId": key});
+    let mut create_sent = false;
+    let mut boot_deadline = Instant::now() + Duration::from_secs(3);
+
+    let start = Instant::now();
+    let debug = std::env::var("AGENTHUB_ZCODE_DEBUG").is_ok();
+    let mut create_deadline = Instant::now() + ZCODE_CREATE_TIMEOUT;
+    let mut approvals = Approvals::default();
+    let mut session_id = key.to_string();
+    let mut created = false;
+    let mut stop_deadline: Option<Instant> = None;
+    let mut finish: Option<Finish> = None;
+    let mut project_token: Option<(String, String)> = None;
+    let mut reply = String::new();
+    while finish.is_none() {
+        if !create_sent && Instant::now() >= boot_deadline {
+            create_sent = true;
+            create_deadline = Instant::now() + ZCODE_CREATE_TIMEOUT;
+            let msg = if mode == Mode::Resume {
+                json!({"id": ID_RESUME, "method": "session/resume", "params": resume})
+            } else {
+                json!({"id": ID_CREATE, "method": "session/create", "params": create})
+            };
+            write_line(&mut stdin, &msg.to_string());
+        }
+        if start.elapsed() > RUN_TIMEOUT {
+            run.message("system", "运行超过 2 小时，已强制停止");
+            finish = Some(Finish::Stopped);
+            break;
+        }
+        if !created && Instant::now() > create_deadline {
+            finish = Some(Finish::Failed("ZCode 初始化超时（会话还没准备好），请稍后重试".into()));
+            break;
+        }
+        match run.rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(RunMsg::Line(l)) => {
+                if debug {
+                    eprintln!("<- {}", l.chars().take(600).collect::<String>());
+                }
+                let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                let Some(id) = v.get("id").cloned() else {
+                    // 通知：会话事件 / 生命周期
+                    match v.get("method").and_then(Value::as_str).unwrap_or("") {
+                        "session/event" => {
+                            let p = &v["params"];
+                            match p.get("type").and_then(Value::as_str).unwrap_or("") {
+                                "turn.started" => {}
+                                "model.streaming" => {
+                                    // 这一版 CLI 不发 turn.completed 的正文，回复只在流式增量里
+                                    if p.pointer("/payload/kind").and_then(Value::as_str) == Some("text_delta") {
+                                        if let Some(d) = p.pointer("/payload/delta").and_then(Value::as_str) {
+                                            reply.push_str(d);
+                                        }
+                                    }
+                                }
+                                "tool.updated" => {
+                                    if let Some(name) = p
+                                        .pointer("/payload/toolName")
+                                        .or_else(|| p.pointer("/payload/name"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        let status = p.pointer("/payload/status").and_then(Value::as_str).unwrap_or("");
+                                        if !status.is_empty() {
+                                            run.message("tool", &format!("{name}（{status}）"));
+                                        }
+                                    }
+                                }
+                                "turn.completed" => {
+                                    let content = p
+                                        .pointer("/payload/content")
+                                        .and_then(Value::as_str)
+                                        .filter(|s| !s.trim().is_empty())
+                                        .map(str::to_string)
+                                        .unwrap_or_else(|| reply.clone());
+                                    if !content.trim().is_empty() {
+                                        let source = p.get("turnId").and_then(Value::as_str).filter(|s| valid_key(s));
+                                        run.message_at(&content, source, None);
+                                    }
+                                    finish = Some(Finish::Done);
+                                }
+                                "turn.failed" => {
+                                    let msg = p
+                                        .pointer("/payload/error/message")
+                                        .and_then(Value::as_str)
+                                        .or_else(|| p.pointer("/payload/error/code").and_then(Value::as_str))
+                                        .unwrap_or("未知错误");
+                                    let phase = p
+                                        .pointer("/payload/error/attribution/errorPhase")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("");
+                                    finish = Some(Finish::Failed(if phase.is_empty() {
+                                        format!("ZCode 运行失败：{msg}")
+                                    } else {
+                                        format!("ZCode 运行失败（{phase}）：{msg}")
+                                    }));
+                                }
+                                _ => {}
+                            }
+                        }
+                        "session/lifecycle/changed" => {
+                            if v.pointer("/params/state").and_then(Value::as_str) == Some("failed") {
+                                let msg = v
+                                    .pointer("/params/lastError/message")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("会话启动失败");
+                                finish = Some(Finish::Failed(format!("ZCode 会话启动失败：{msg}")));
+                            }
+                        }
+                        // 存储就绪就可以发 create，不必等满 3 秒
+                        "startup/storageState" => {
+                            if v.pointer("/params/phase").and_then(Value::as_str) == Some("ready") && !create_sent {
+                                boot_deadline = Instant::now();
+                            }
+                        }
+                        // 终止态的另一条流：computer-use 的 turn-completed / v4 遥测的 turn.terminal
+                        "computer-use/operation-event" => {
+                            if v.pointer("/params/kind").and_then(Value::as_str) == Some("turn-completed") {
+                                if !reply.trim().is_empty() {
+                                    run.message("assistant", &reply);
+                                }
+                                finish = Some(Finish::Done);
+                            }
+                        }
+                        "v4/telemetry/event" => {
+                            if v.pointer("/params/kind").and_then(Value::as_str) == Some("turn.terminal") {
+                                let status = v.pointer("/params/status").and_then(Value::as_str).unwrap_or("");
+                                if !reply.trim().is_empty() {
+                                    run.message("assistant", &reply);
+                                }
+                                finish = Some(if status == "success" { Finish::Done } else { Finish::Failed(format!("ZCode 运行结束：{status}")) });
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                };
+                if let Some(err) = v.get("error") {
+                    let msg = err.get("message").and_then(Value::as_str).unwrap_or("未知错误");
+                    let req = id.as_i64().unwrap_or(0);
+                    // 账号权益下发失败不致命：后面 send 会给出更具体的原因
+                    if req == ID_REFRESH || req == ID_ACCOUNT {
+                        run.message("system", &format!("ZCode 模型配置下发失败：{msg}"));
+                    } else if req != ID_STOP {
+                        finish = Some(Finish::Failed(format!("ZCode 返回错误：{msg}")));
+                    }
+                    continue;
+                }
+                // 服务端反向请求（有 id 也有 method）
+                if v.get("method").is_some() {
+                    let method = v["method"].as_str().unwrap_or("");
+                    match method {
+                        "session/requestRuntimePreferences" => {
+                            write_line(&mut stdin, &zcode_response(&id, zcode_prefs()));
+                        }
+                        "interaction/requestOfficialMcpAuthHeaders" => {
+                            write_line(&mut stdin, &zcode_response(&id, json!({})));
+                        }
+                        "interaction/requestProviderRuntimeHeaders" => {
+                            if project_token.is_none() {
+                                project_token = crate::zcode_exec::project_token();
+                            }
+                            let result = match &project_token {
+                                Some((api_key, _)) => json!({"headersApplied": true, "requestAuth": {"apiKey": api_key}}),
+                                None => json!({"headersApplied": false}),
+                            };
+                            write_line(&mut stdin, &zcode_response(&id, result));
+                        }
+                        ZCODE_PERMISSION => {
+                            let tool = v.pointer("/params/toolName").and_then(Value::as_str).unwrap_or("工具").to_string();
+                            let detail = v
+                                .pointer("/params/input")
+                                .map(|i| clip(&i.to_string()))
+                                .filter(|s| !s.is_empty())
+                                .or_else(|| v.pointer("/params/reason").and_then(Value::as_str).map(str::to_string))
+                                .unwrap_or_default();
+                            approvals.add(&run.out, &run.run_id, &tool, &detail, id, ZCODE_PERMISSION, Value::Null);
+                        }
+                        ZCODE_USER_INPUT => {
+                            // 提问卡片暂不支持在 AgentHub 作答：直接取消，避免整轮挂住
+                            run.message("system", "ZCode 的提问暂不支持在 AgentHub 回答，已自动跳过");
+                            write_line(&mut stdin, &zcode_response(&id, json!({"value": "", "cancelled": true})));
+                        }
+                        _ => {
+                            run.message("system", &format!("不支持的请求：{method}"));
+                            write_line(&mut stdin, &zcode_response(&id, json!({})));
+                        }
+                    }
+                    continue;
+                }
+                // 我们自己请求的应答
+                match id.as_i64().unwrap_or(0) {
+                    ID_CREATE | ID_RESUME => {
+                        match v.pointer("/result/session/sessionId").and_then(Value::as_str) {
+                            Some(sid) => {
+                                session_id = sid.to_string();
+                                created = true;
+                                if mode != Mode::Resume {
+                                    run.session(sid);
+                                }
+                            }
+                            None => {
+                                finish = Some(Finish::Failed("ZCode 没有返回会话 id".into()));
+                                continue;
+                            }
+                        }
+                        // provider 权益下发：不下发 registry 就是空的，send 会报「先选模型」
+                        let mut account = json!({
+                            "revision": format!("agenthub-{}", run.run_id),
+                            "providers": { provider_id.clone(): {"access": {"type": "zhipu-account", "entitled": true}} },
+                            "states": { provider_id.clone(): {"availability": "available", "entitled": true, "current": true} }
+                        });
+                        if let Some(rev) = crate::zcode_exec::builtin_revision(&log_dir) {
+                            account["basedOnZCodeBuiltinRevision"] = json!(rev);
+                        }
+                        write_line(&mut stdin, &json!({"id": ID_REFRESH, "method": "provider/refreshRegistry", "params": {"reason": "run"}}).to_string());
+                        write_line(&mut stdin, &json!({"id": ID_ACCOUNT, "method": "provider/updateAccountConfig", "params": account}).to_string());
+                        write_line(
+                            &mut stdin,
+                            &json!({"id": ID_SUB, "method": "session/subscribe", "params": {"sessionId": session_id, "deliveryKind": "desktop-continuous"}}).to_string(),
+                        );
+                    }
+                    ID_SUB => {
+                        write_line(
+                            &mut stdin,
+                            &json!({"id": ID_SEND, "method": "session/send", "params": {
+                                "sessionId": session_id,
+                                "content": body,
+                                "modelSelection": {"providerId": provider_id, "modelId": model_id, "options": {"reasoningLevel": "high"}}
+                            }})
+                            .to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            Ok(RunMsg::Eof) => {
+                let code = child.wait().ok().and_then(|s| s.code());
+                finish = Some(Finish::Failed(format!(
+                    "ZCode 进程异常退出（{}）：{}",
+                    code.map_or("未知".into(), |c| c.to_string()),
+                    stderr_tail(&tail)
+                )));
+            }
+            Ok(RunMsg::Stop) => {
+                write_line(&mut stdin, &json!({"id": ID_STOP, "method": "session/stop", "params": {"sessionId": session_id}}).to_string());
+                stop_deadline = Some(Instant::now() + ZCODE_STOP_GRACE);
+            }
+            Ok(RunMsg::Shutdown) => finish = Some(Finish::Silent),
+            Ok(RunMsg::Created { local_id, approval_id }) => {
+                if let Some((p, allow)) = approvals.created(local_id, approval_id, &run.out, &run.run_id) {
+                    write_line(&mut stdin, &zcode_response(&p.key, zcode_decision(allow)));
+                }
+            }
+            Ok(RunMsg::Decide { approval_id, allow }) => {
+                if let Some((p, allow)) = approvals.decide(&approval_id, allow) {
+                    write_line(&mut stdin, &zcode_response(&p.key, zcode_decision(allow)));
+                }
+            }
+            Ok(RunMsg::Answer { approval_id, answers }) => {
+                if let Some(p) = approvals.answer(&approval_id, &answers) {
+                    write_line(&mut stdin, &zcode_response(&p.key, answers.clone()));
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => finish = Some(Finish::Silent),
+        }
+        if let Some(d) = stop_deadline {
+            if finish.is_none() && Instant::now() >= d {
+                finish = Some(Finish::Stopped);
+            }
+        }
+        for p in approvals.expired(Instant::now(), &run.out, &run.run_id) {
+            run.message("system", "授权等待超时，已拒绝");
+            write_line(&mut stdin, &zcode_response(&p.key, zcode_decision(false)));
+        }
+    }
+    let f = finish.unwrap();
+    let exited = matches!(&f, Finish::Failed(m) if m.starts_with("ZCode 进程异常退出"));
+    drop(stdin);
+    if !exited {
+        kill_tree(&mut child);
+    }
+    let _ = std::fs::remove_dir_all(&log_dir);
+    report(run, f);
+}
+
 // ---------------------------------------------------------------- 入口
 
 struct Entry {
@@ -1537,6 +1904,13 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
             Some(exe) => run_codex(run, mode, &exe, key, cwd, text, images, branch_point, model, instructions),
             None => run.fail("没找到 Codex Desktop 自带的 codex.exe"),
         },
+        "zcode" => {
+            // session/send 的附件格式还没对上，图片先明确拒绝，不悄悄丢
+            if !images.is_empty() {
+                return run.fail("ZCode 暂不支持在派活时附带图片");
+            }
+            run_zcode(run, mode, key, cwd, text, model, instructions)
+        }
         other => run.fail(&format!("不认识的 agent：{other}")),
     }
 }
@@ -1544,6 +1918,47 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 真机端到端：起一次 ZCode 派活，确认能拿到会话 id 与助手回复。
+    /// 会消耗一次真实模型配额（约 24k input tokens），默认 ignore。
+    #[test]
+    #[ignore = "真实调用 ZCode 模型，设置 AGENTHUB_ZCODE_E2E=1 才跑"]
+    fn zcode_dispatch_end_to_end() {
+        if std::env::var("AGENTHUB_ZCODE_E2E").as_deref() != Ok("1") {
+            return;
+        }
+        let cwd = std::env::temp_dir().join(format!("agenthub-zcode-e2e-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (out_tx, out_rx) = mpsc::channel::<Value>();
+        let (tx, rx) = mpsc::channel::<RunMsg>();
+        let run = Run { out: out_tx, run_id: "e2e".into(), rx, tx };
+        run_zcode(&run, Mode::Fresh, "", cwd.to_str().unwrap(), "只回复 OK1", "", "");
+        let mut got_reply = false;
+        let mut finished = String::new();
+        while let Ok(msg) = out_rx.recv_timeout(Duration::from_secs(5)) {
+            match msg.get("type").and_then(Value::as_str).unwrap_or("") {
+                "run.message" => {
+                    let text = msg.get("text").and_then(Value::as_str).unwrap_or("");
+                    eprintln!("[msg] {text}");
+                    if text.contains("OK1") {
+                        got_reply = true;
+                    }
+                }
+                "run.status" => {
+                    let status = msg.get("status").and_then(Value::as_str).unwrap_or("");
+                    eprintln!("[status] {status} {}", msg.get("error").and_then(Value::as_str).unwrap_or(""));
+                    if status == "done" || status == "failed" {
+                        finished = format!("{status}: {}", msg.get("error").and_then(Value::as_str).unwrap_or(""));
+                        break;
+                    }
+                }
+                other => eprintln!("[{other}] {msg}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+        assert!(got_reply, "没有收到模型回复");
+        assert!(finished.starts_with("done"), "运行没有正常结束：{finished}");
+    }
 
     fn roots(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
