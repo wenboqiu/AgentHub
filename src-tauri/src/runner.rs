@@ -24,6 +24,8 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 const HISTORY_COUNT: usize = 50;
 const TEXT_MAX: usize = 4000;
+/// 「正在做什么」那行只显示尾巴：思考原文截到 200 字，也不往 WS 上传大段文字
+const ACTIVITY_MAX: usize = 200;
 /// request_user_input 的消息图片太大就放弃附带（base64 后约 5.3MB，WS 和移动端都能承受）
 const IMAGE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// Codex 的用户输入请求（request_user_input 工具）：不是审批，是带选项的提问
@@ -287,12 +289,107 @@ pub fn claude_detail(tool: &str, input: &Value) -> String {
     d.unwrap_or_else(|| truncate_chars(&input.to_string(), 300))
 }
 
+/// 一次运行消耗的 token：Claude 在 result.usage 里给，Codex 在 token_count 通知里给，
+/// 两家字段名不同（snake_case / camelCase 都有），统一成这一份再发给服务端。
+#[derive(Debug, Default, PartialEq, Clone)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    /// 命中缓存的输入（Claude 的 cache_read_input_tokens / Codex 的 cached_input_tokens）
+    pub cached: u64,
+    /// 思考过程产生的输出（Codex 的 reasoning_output_tokens）
+    pub reasoning: u64,
+    pub total: u64,
+    /// 只有 Claude 给美元成本
+    pub cost_usd: f64,
+}
+
+impl Usage {
+    pub fn to_json(&self) -> Value {
+        let mut m = json!({"input": self.input, "output": self.output, "total": self.total});
+        if self.cached > 0 {
+            m["cached"] = json!(self.cached);
+        }
+        if self.reasoning > 0 {
+            m["reasoning"] = json!(self.reasoning);
+        }
+        if self.cost_usd > 0.0 {
+            m["costUsd"] = json!(self.cost_usd);
+        }
+        m
+    }
+}
+
+fn number(v: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|k| v.get(*k))
+        .and_then(|x| x.as_u64().or_else(|| x.as_f64().filter(|f| *f > 0.0).map(|f| f as u64)))
+        .unwrap_or(0)
+}
+
+/// 认一份用量对象；连 input/output 都没有就当「不是用量」（有些事件的 usage 是空壳）
+fn usage_of(v: &Value) -> Option<Usage> {
+    let input = number(v, &["input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input"]);
+    let output = number(v, &["output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output"]);
+    if input == 0 && output == 0 {
+        return None;
+    }
+    let cached = number(v, &["cache_read_input_tokens", "cacheReadInputTokens", "cached_input_tokens", "cachedInputTokens", "cached"]);
+    let reasoning = number(v, &["reasoning_output_tokens", "reasoningOutputTokens", "reasoning"]);
+    let total = match number(v, &["total_tokens", "totalTokens", "total"]) {
+        0 => input + output + cached,
+        n => n,
+    };
+    Some(Usage { input, output, cached, reasoning, total, cost_usd: 0.0 })
+}
+
+/// 从任意事件里找用量：先按已知协议位置逐个试，再在浅层里兜底搜一个像用量的对象。
+pub fn usage_from(v: &Value) -> Option<Usage> {
+    const PATHS: &[&[&str]] = &[
+        &["usage"],
+        &["total_token_usage"],
+        &["totalTokenUsage"],
+        &["tokenUsage"],
+        &["token_usage"],
+        &["info", "total_token_usage"],
+        &["info", "totalTokenUsage"],
+        &["lastTokenUsage"],
+        &["info", "last_token_usage"],
+        &["turn", "usage"],
+        &["payload", "usage"],
+        &["result", "usage"],
+    ];
+    let mut u = PATHS
+        .iter()
+        .find_map(|p| p.iter().try_fold(v, |acc, k| acc.get(*k)).and_then(usage_of))
+        .or_else(|| deep_usage(v, 3))?;
+    u.cost_usd = ["total_cost_usd", "totalCostUsd", "cost_usd", "costUsd"]
+        .iter()
+        .find_map(|k| v.get(*k))
+        .and_then(|x| x.as_f64())
+        .unwrap_or(0.0);
+    Some(u)
+}
+
+fn deep_usage(v: &Value, depth: usize) -> Option<Usage> {
+    if depth == 0 {
+        return None;
+    }
+    match v {
+        Value::Array(a) => a.iter().find_map(|x| deep_usage(x, depth - 1)),
+        Value::Object(o) => usage_of(v).or_else(|| o.values().find_map(|x| deep_usage(x, depth - 1))),
+        _ => None,
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum ClaudeMsg {
     Text(String),
+    /// 模型自己的思考内容（extended thinking）：不进对话流，只当「正在做什么」的实时提示
+    Thinking(String),
     Tool { name: String, summary: String },
     Approval { request_id: String, tool: String, detail: String, input: Value },
-    Result { subtype: String },
+    Result { subtype: String, usage: Option<Usage> },
 }
 
 /// 解析 claude stream-json 的一行；不关心的类型返回空
@@ -308,6 +405,12 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeMsg> {
                             let t = it.get("text").and_then(|t| t.as_str()).unwrap_or("");
                             if !t.trim().is_empty() {
                                 out.push(ClaudeMsg::Text(t.to_string()));
+                            }
+                        }
+                        Some("thinking") => {
+                            let t = it.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                            if !t.trim().is_empty() {
+                                out.push(ClaudeMsg::Thinking(t.to_string()));
                             }
                         }
                         Some("tool_use") => {
@@ -335,7 +438,7 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeMsg> {
         }
         Some("result") => {
             let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
-            out.push(ClaudeMsg::Result { subtype });
+            out.push(ClaudeMsg::Result { subtype, usage: usage_from(&v) });
         }
         _ => {}
     }
@@ -507,6 +610,70 @@ pub fn codex_event(method: &str, params: &Value) -> Option<CodexEvent> {
         }
         _ => None,
     }
+}
+
+/// 运行中的一句话状态。Codex / ZCode 都是流式增量，片段拼起来后只把尾巴交给界面。
+#[derive(Default)]
+struct Live {
+    kind: &'static str,
+    buf: String,
+}
+
+impl Live {
+    /// 追加一段增量，返回 (kind, 累积后的尾巴)
+    fn push(&mut self, kind: &'static str, delta: &str) -> (&'static str, String) {
+        if kind != self.kind {
+            self.switch(kind);
+        }
+        self.buf.push_str(delta);
+        if self.buf.chars().count() > ACTIVITY_MAX * 2 {
+            self.buf = tail_chars(&self.buf, ACTIVITY_MAX);
+        }
+        (self.kind, tail_chars(&self.buf, ACTIVITY_MAX))
+    }
+
+    /// 换了种活动（开始调工具 / 开始写回复）就把累积清掉
+    fn switch(&mut self, kind: &'static str) {
+        self.kind = kind;
+        self.buf.clear();
+    }
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    s.chars().skip(count.saturating_sub(n)).collect()
+}
+
+/// Codex 的 item/started：告诉界面它开始了什么（命令、改文件、调 MCP、思考、写回复）。
+/// 文字直接取协议的字段，不做改写。
+pub fn codex_activity_started(params: &Value) -> Option<(&'static str, String)> {
+    let item = params.get("item")?;
+    Some(match item.get("type").and_then(|t| t.as_str())? {
+        "commandExecution" => ("tool", item.get("command").and_then(command_text).unwrap_or_else(|| "命令".into())),
+        "fileChange" => ("tool", "改文件".into()),
+        "mcpToolCall" => {
+            let server = item.get("server").and_then(|s| s.as_str()).unwrap_or("");
+            let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("MCP");
+            ("tool", if server.is_empty() { tool.to_string() } else { format!("{server}/{tool}") })
+        }
+        "webSearch" => ("tool", "联网搜索".into()),
+        "reasoning" => ("thinking", String::new()),
+        "agentMessage" => ("text", String::new()),
+        _ => return None,
+    })
+}
+
+/// Codex 的流式增量：agentMessage 是正文，reasoning 的几种 delta 是思考内容
+pub fn codex_activity_delta<'a>(method: &str, params: &'a Value) -> Option<(&'static str, &'a str)> {
+    // 协议的流式通知有 `/delta` 也有 `summaryTextDelta` 这种写法
+    if !method.to_ascii_lowercase().ends_with("delta") {
+        return None;
+    }
+    if !method.contains("agentMessage") && !method.contains("reasoning") {
+        return None;
+    }
+    let delta = params.get("delta").or_else(|| params.get("text"))?.as_str()?;
+    Some((if method.contains("reasoning") { "thinking" } else { "text" }, delta))
 }
 
 fn command_text(v: &Value) -> Option<String> {
@@ -986,6 +1153,8 @@ struct Run {
     run_id: String,
     rx: mpsc::Receiver<RunMsg>,
     tx: Sender<RunMsg>,
+    /// 上一次上报的「正在做什么」：时间是节流用的，文字用来跳过重复内容
+    activity: Mutex<(Instant, String)>,
 }
 
 impl Run {
@@ -1008,6 +1177,32 @@ impl Run {
 
     fn message_at(&self, text: &str, source: Option<&str>, point: Option<&str>) {
         let _ = self.out.send(json!({"type":"run.message","runId":self.run_id,"role":"assistant","text":clip(text),"sourceId":source,"branchPoint":point}));
+    }
+
+    /// 这次的 token 用量：界面在对话流末尾显示「输入 / 输出 / 缓存 / 花费」
+    fn usage(&self, u: &Usage) {
+        let _ = self.out.send(json!({"type":"run.usage","runId":self.run_id,"usage":u.to_json()}));
+    }
+
+    /// 运行中的一句话状态，文字全部来自 agent 自己（思考原文 / 工具调用），不在这里编。
+    /// kind: thinking | tool | text；kind 为 idle 表示「这轮没有在说的话了」，界面回到中性提示。
+    /// thinking 会高频更新，所以节流：200ms 内、或内容完全没变就跳过。
+    fn activity(&self, kind: &str, text: &str) {
+        let text: String = text.trim().chars().rev().take(ACTIVITY_MAX).collect::<Vec<_>>().into_iter().rev().collect();
+        let text = text.trim().to_string();
+        let key = format!("{kind}\u{1}{text}");
+        let now = Instant::now();
+        {
+            let mut last = self.activity.lock().unwrap();
+            if last.1 == key {
+                return;
+            }
+            if kind != "tool" && kind != "idle" && now.duration_since(last.0) < Duration::from_millis(200) {
+                return;
+            }
+            *last = (now, key);
+        }
+        let _ = self.out.send(json!({"type":"run.activity","runId":self.run_id,"kind":kind,"text":text}));
     }
 
     fn fail(&self, error: &str) {
@@ -1131,12 +1326,20 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
                 }
                 for m in parsed {
                     match m {
-                        ClaudeMsg::Text(_) => {},
-                        ClaudeMsg::Tool { name, summary } => run.message("tool", &format!("{name} {summary}")),
+                        // 正文已经作为消息进对话流了，这里把「正在做什么」清掉，回到中性提示
+                        ClaudeMsg::Text(_) => run.activity("idle", ""),
+                        ClaudeMsg::Thinking(t) => run.activity("thinking", &t),
+                        ClaudeMsg::Tool { name, summary } => {
+                            run.message("tool", &format!("{name} {summary}"));
+                            run.activity("tool", &format!("{name} {summary}"));
+                        }
                         ClaudeMsg::Approval { request_id, tool, detail, input } => {
                             approvals.add(&run.out, &run.run_id, &tool, &detail, json!(request_id), "", input)
                         }
-                        ClaudeMsg::Result { subtype } => {
+                        ClaudeMsg::Result { subtype, usage } => {
+                            if let Some(u) = usage {
+                                run.usage(&u);
+                            }
                             stdin = None; // 关闭 stdin，进程自己退出
                             finish = Some(if subtype == "success" { Finish::Done } else { Finish::Failed(format!("运行结束：{subtype}")) });
                         }
@@ -1278,6 +1481,10 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
     // Resume 用原线程；Fork / Fresh 在响应里拿到新线程 id 后替换
     let mut thread_id = key.to_string();
     let mut interrupt_deadline: Option<Instant> = None;
+    // 最近一次上报过的用量：Codex 的 token_count 会边跑边刷，值没变就不再发
+    let mut last_usage: Option<Usage> = None;
+    // 正在做什么：流式增量拼成一句话，只发尾巴
+    let mut live = Live::default();
     let mut finish: Option<Finish> = None;
     while finish.is_none() {
         if start.elapsed() > RUN_TIMEOUT {
@@ -1329,30 +1536,55 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                         }
                     }
                 }
-                CodexIn::Notification { method, params } => match codex_event(&method, &params) {
-                    Some(CodexEvent::Agent(t)) => {
-                        let source = params["item"]["id"].as_str().filter(|s| valid_key(s));
-                        let point = if params["item"]["phase"] == "final_answer" { turn_id.as_deref() } else { None };
-                        run.message_at(&t, source, point);
-                    },
-                    Some(CodexEvent::Command(c)) => run.message("tool", &format!("命令：{c}")),
-                    Some(CodexEvent::Image(path)) => {
-                        let name = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("图片").to_string();
-                        match image_data_url(&path) {
-                            Some(url) => run.message_images(&format!("图片：{name}"), vec![url]),
-                            None => run.message("system", &format!("生成了图片但无法读取：{path}")),
+                CodexIn::Notification { method, params } => {
+                    // 用量：token_count 通知（累计值）与 turn/completed 里的 turn.usage，只发变化过的
+                    if let Some(u) = usage_from(&params) {
+                        if last_usage.as_ref() != Some(&u) {
+                            run.usage(&u);
+                            last_usage = Some(u);
                         }
                     }
-                    Some(CodexEvent::TurnStarted(id)) => turn_id = Some(id),
-                    Some(CodexEvent::TurnDone { status }) => {
-                        finish = Some(match status.as_str() {
-                            "completed" => Finish::Done,
-                            "interrupted" if interrupt_deadline.is_some() => Finish::Stopped,
-                            s => Finish::Failed(format!("运行结束：{s}")),
-                        })
+                    // 正在做什么：开始一件新事 / 正在吐字，都按 agent 自己的说法显示
+                    if method == "item/started" {
+                        if let Some((kind, text)) = codex_activity_started(&params) {
+                            live.switch(kind);
+                            run.activity(kind, &text);
+                        }
+                    } else if let Some((kind, delta)) = codex_activity_delta(&method, &params) {
+                        let (kind, text) = live.push(kind, delta);
+                        run.activity(kind, &text);
                     }
-                    None => {}
-                },
+                    let event = codex_event(&method, &params);
+                    match event {
+                        Some(CodexEvent::Agent(t)) => {
+                            let source = params["item"]["id"].as_str().filter(|s| valid_key(s));
+                            let point = if params["item"]["phase"] == "final_answer" { turn_id.as_deref() } else { None };
+                            run.message_at(&t, source, point);
+                            // 正文已经落到对话流里，状态行回到中性提示
+                            run.activity("idle", "");
+                        }
+                        Some(CodexEvent::Command(c)) => {
+                            run.message("tool", &format!("命令：{c}"));
+                            run.activity("idle", "");
+                        }
+                        Some(CodexEvent::Image(path)) => {
+                            let name = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or("图片").to_string();
+                            match image_data_url(&path) {
+                                Some(url) => run.message_images(&format!("图片：{name}"), vec![url]),
+                                None => run.message("system", &format!("生成了图片但无法读取：{path}")),
+                            }
+                        }
+                        Some(CodexEvent::TurnStarted(id)) => turn_id = Some(id),
+                        Some(CodexEvent::TurnDone { status }) => {
+                            finish = Some(match status.as_str() {
+                                "completed" => Finish::Done,
+                                "interrupted" if interrupt_deadline.is_some() => Finish::Stopped,
+                                s => Finish::Failed(format!("运行结束：{s}")),
+                            })
+                        }
+                        None => {}
+                    }
+                }
                 CodexIn::Request { id, method, params } => {
                     if let Some(questions) = codex_user_input(&method, &params) {
                         approvals.add_input(&run.out, &run.run_id, questions, id);
@@ -1518,6 +1750,8 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
     let mut finish: Option<Finish> = None;
     let mut project_token: Option<(String, String)> = None;
     let mut reply = String::new();
+    // 正在做什么：model.streaming 的增量拼成一句话
+    let mut live = Live::default();
     while finish.is_none() {
         if !create_sent && Instant::now() >= boot_deadline {
             create_sent = true;
@@ -1553,10 +1787,25 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                 "turn.started" => {}
                                 "model.streaming" => {
                                     // 这一版 CLI 不发 turn.completed 的正文，回复只在流式增量里
-                                    if p.pointer("/payload/kind").and_then(Value::as_str) == Some("text_delta") {
-                                        if let Some(d) = p.pointer("/payload/delta").and_then(Value::as_str) {
-                                            reply.push_str(d);
+                                    let kind = p.pointer("/payload/kind").and_then(Value::as_str).unwrap_or("");
+                                    let delta = p.pointer("/payload/delta").and_then(Value::as_str);
+                                    match kind {
+                                        "text_delta" => {
+                                            if let Some(d) = delta {
+                                                reply.push_str(d);
+                                                // 正在写的正文尾巴，直接当状态显示（agent 自己的话）
+                                                let (_, text) = live.push("text", d);
+                                                run.activity("text", &text);
+                                            }
                                         }
+                                        // 思考 / 推理增量：字段名各版本不一，认 thinking / reasoning 两种
+                                        k if k.contains("thinking") || k.contains("reasoning") => {
+                                            if let Some(d) = delta {
+                                                let (_, text) = live.push("thinking", d);
+                                                run.activity("thinking", &text);
+                                            }
+                                        }
+                                        _ => {}
                                     }
                                 }
                                 "tool.updated" => {
@@ -1569,9 +1818,19 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                         if !status.is_empty() {
                                             run.message("tool", &format!("{name}（{status}）"));
                                         }
+                                        // 工具在跑就显示它，跑完（completed 等）回到中性提示
+                                        if matches!(status, "running" | "started" | "pending" | "in_progress") {
+                                            run.activity("tool", name);
+                                        } else {
+                                            run.activity("idle", "");
+                                        }
                                     }
                                 }
                                 "turn.completed" => {
+                                    // 有 token 统计就一起报（这套 CLI 不一定给，给了就显示）
+                                    if let Some(u) = usage_from(p) {
+                                        run.usage(&u);
+                                    }
                                     let content = p
                                         .pointer("/payload/content")
                                         .and_then(Value::as_str)
@@ -1581,6 +1840,7 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                     if !content.trim().is_empty() {
                                         let source = p.get("turnId").and_then(Value::as_str).filter(|s| valid_key(s));
                                         run.message_at(&content, source, None);
+                                        run.activity("idle", "");
                                     }
                                     finish = Some(Finish::Done);
                                 }
@@ -1629,6 +1889,9 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                         }
                         "v4/telemetry/event" => {
                             if v.pointer("/params/kind").and_then(Value::as_str) == Some("turn.terminal") {
+                                if let Some(u) = usage_from(&v["params"]) {
+                                    run.usage(&u);
+                                }
                                 let status = v.pointer("/params/status").and_then(Value::as_str).unwrap_or("");
                                 if !reply.trim().is_empty() {
                                     run.message("assistant", &reply);
@@ -1870,7 +2133,7 @@ impl Runner {
 
     fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String, model: String, instructions: String) {
         let (tx, rx) = mpsc::channel();
-        let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone() };
+        let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone(), activity: Mutex::new((Instant::now(), String::new())) };
         // 空 cwd = 用 AgentHub 自己的默认工作目录（<文档>/AgentHub，重装也还在）。
         // 先建目录再占会话槽：建不出来就直接失败，别留下一个永远卡住的运行。
         let cwd = if cwd.trim().is_empty() {
@@ -1963,7 +2226,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (out_tx, out_rx) = mpsc::channel::<Value>();
         let (tx, rx) = mpsc::channel::<RunMsg>();
-        let run = Run { out: out_tx, run_id: "e2e".into(), rx, tx };
+        let run = Run { out: out_tx, run_id: "e2e".into(), rx, tx, activity: Mutex::new((Instant::now(), String::new())) };
         run_zcode(&run, Mode::Fresh, "", cwd.to_str().unwrap(), "只回复 OK1", "", "");
         let mut got_reply = false;
         let mut finished = String::new();
@@ -2213,8 +2476,76 @@ mod tests {
             [ClaudeMsg::Approval { detail, .. }] => assert_eq!(detail, r#"{"pattern":"*.rs"}"#),
             o => panic!("{o:?}"),
         }
-        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","session_id":"s"}"#), vec![ClaudeMsg::Result { subtype: "success".into() }]);
-        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"error_max_turns"}"#), vec![ClaudeMsg::Result { subtype: "error_max_turns".into() }]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","session_id":"s"}"#), vec![ClaudeMsg::Result { subtype: "success".into(), usage: None }]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"error_max_turns"}"#), vec![ClaudeMsg::Result { subtype: "error_max_turns".into(), usage: None }]);
+    }
+
+    #[test]
+    fn usage_from_claude_result() {
+        let l = r#"{"type":"result","subtype":"success","total_cost_usd":0.0421,"duration_ms":9100,
+          "usage":{"input_tokens":1200,"output_tokens":345,"cache_read_input_tokens":8000,"cache_creation_input_tokens":100}}"#;
+        match &parse_claude_line(l)[..] {
+            [ClaudeMsg::Result { usage: Some(u), .. }] => {
+                assert_eq!((u.input, u.output, u.cached, u.total), (1200, 345, 8000, 9545));
+                assert!((u.cost_usd - 0.0421).abs() < 1e-9);
+                let j = u.to_json();
+                assert_eq!(j["input"], 1200);
+                assert_eq!(j["cached"], 8000);
+                assert_eq!(j["costUsd"], 0.0421);
+            }
+            o => panic!("{o:?}"),
+        }
+        // 空 usage 不能当成「用了 0 个 token」
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","usage":{}}"#), vec![ClaudeMsg::Result { subtype: "success".into(), usage: None }]);
+    }
+
+    #[test]
+    fn claude_thinking_block_is_activity_not_message() {
+        let l = r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"先看 runner 怎么解析"},{"type":"text","text":"好了"}]}}"#;
+        assert_eq!(
+            parse_claude_line(l),
+            vec![ClaudeMsg::Thinking("先看 runner 怎么解析".into()), ClaudeMsg::Text("好了".into())]
+        );
+        // 空思考块不进提示，免得状态行空转
+        assert!(parse_claude_line(r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"  "}]}}"#).is_empty());
+    }
+
+    #[test]
+    fn codex_activity_from_item_events() {
+        assert_eq!(codex_activity_started(&json!({"item":{"type":"commandExecution","command":"npm test"}})), Some(("tool", "npm test".to_string())));
+        assert_eq!(codex_activity_started(&json!({"item":{"type":"reasoning"}})), Some(("thinking", String::new())));
+        assert_eq!(codex_activity_started(&json!({"item":{"type":"mcpToolCall","server":"fs","tool":"read"}})), Some(("tool", "fs/read".to_string())));
+        assert_eq!(codex_activity_started(&json!({"item":{"type":"unknown"}})), None);
+        assert_eq!(codex_activity_delta("item/agentMessage/delta", &json!({"delta":"好了"})), Some(("text", "好了")));
+        assert_eq!(codex_activity_delta("item/reasoning/summaryTextDelta", &json!({"delta":"想"})), Some(("thinking", "想")));
+        // 别的通知不掺和
+        assert_eq!(codex_activity_delta("turn/completed", &json!({"delta":"x"})), None);
+        assert_eq!(codex_activity_delta("item/commandExecution/outputDelta", &json!({"delta":"x"})), None);
+    }
+
+    #[test]
+    fn live_accumulates_and_keeps_tail() {
+        let mut live = Live::default();
+        assert_eq!(live.push("thinking", "第一段"), ("thinking", "第一段".to_string()));
+        assert_eq!(live.push("thinking", "，第二段").1, "第一段，第二段");
+        // 换了种活动就把上一段清掉，别把思考和工作命令拼在一起
+        assert_eq!(live.push("tool", "Bash").1, "Bash");
+        let long = "字".repeat(400);
+        assert_eq!(live.push("text", &long).1.chars().count(), ACTIVITY_MAX);
+    }
+
+    #[test]
+    fn usage_from_codex_token_count() {
+        // rollout 风格（snake_case，累计值优先于单次值）
+        let v = json!({"threadId":"t","info":{"total_token_usage":{"input_tokens":5000,"cached_input_tokens":4000,"output_tokens":700,"reasoning_output_tokens":120,"total_tokens":5700},"last_token_usage":{"input_tokens":100,"output_tokens":20},"model_context_window":200000}});
+        let u = usage_from(&v).unwrap();
+        assert_eq!((u.input, u.output, u.cached, u.reasoning, u.total), (5000, 700, 4000, 120, 5700));
+        // app-server 风格（camelCase，嵌在 turn 里）
+        let v = json!({"turn":{"usage":{"inputTokens":12,"outputTokens":34}}});
+        let u = usage_from(&v).unwrap();
+        assert_eq!((u.input, u.output, u.total), (12, 34, 46));
+        // 没有用量的普通通知不能误判
+        assert!(usage_from(&json!({"item":{"type":"agentMessage","text":"好了"}})).is_none());
     }
 
     #[test]

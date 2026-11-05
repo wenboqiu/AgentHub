@@ -40,11 +40,13 @@ import {
   removeSession,
   renamePendingSession,
   setRunStatus,
+  setRunUsage,
   stopTaskRun,
   type Approval,
   type EventIn,
   type Message,
   type Run,
+  type RunUsage,
   type Session,
 } from './db.ts'
 import { authenticate, type Kick } from './auth.ts'
@@ -223,6 +225,28 @@ function cleanUserImages(raw: unknown): string[] | { error: string } {
   return out
 }
 
+/**
+ * 清洗执行器上报的 token 用量：只认已知数值字段，防止执行端塞进来一坨任意 JSON。
+ * 连一个数都没有就当没报过（返回 null）。
+ */
+function cleanUsage(raw: unknown): RunUsage | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const num = (k: string) => {
+    const v = o[k]
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.round(v) : 0
+  }
+  const input = num('input'), output = num('output')
+  const cached = num('cached'), reasoning = num('reasoning')
+  const total = num('total') || input + output + cached
+  const cost = typeof o.costUsd === 'number' && Number.isFinite(o.costUsd) && o.costUsd > 0 ? Math.min(o.costUsd, 1000) : 0
+  if (!input && !output && !cached) return null
+  return { input, output, total, ...(cached ? { cached } : {}), ...(reasoning ? { reasoning } : {}), ...(cost ? { costUsd: cost } : {}) }
+}
+
+/** 执行器上报的「正在做什么」：kind 为 idle 表示这轮没有在说的话，界面回到中性提示 */
+export type LiveActivity = { runId: string; sessionId: string; kind: 'thinking' | 'tool' | 'text' | 'idle'; text: string; at: string }
+
 /** 审批/提问入库消息的标题 */
 function approvalHeading(tool: string, detail: string): string {
   if (tool !== 'userInput') return `请求授权：${tool} ${detail}`
@@ -247,6 +271,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const executors = new Map<string, Exec>()
   // 等待执行器返回的历史请求
   const historyWaits = new Map<string, { userId: number; machine: string; resolve: (r: HistoryResult) => void }>()
+  // 每个 run 最近一次「正在做什么」：执行器实时上报，只放内存（不需要持久化），
+  // 中途打开会话时随 /messages 一起下发，界面才不会一进来就空着
+  const liveActivity = new Map<string, LiveActivity>()
 
   // 所有推送都只发给同一账号的 viewer
   const broadcast = (userId: number, msg: unknown) => {
@@ -1066,7 +1093,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 会话不属于当前账号一律 404（不泄露别人的数据是否存在）
     if (!(await getSession(pool, req.userId, id))) return reply.code(404).send({ error: '会话不存在' })
     const [messages, approvals, run] = await Promise.all([listMessages(pool, req.userId, id, limit), pendingApprovals(pool, req.userId, id), latestRun(pool, req.userId, id)])
-    return { messages, approvals, run }
+    // 正在跑的话把最近一次「正在做什么」一起带上（内存态，没赶上就没有）
+    const activity = run && (run.status === 'running' || run.status === 'queued') ? liveActivity.get(run.id) ?? null : null
+    return { messages, approvals, run, activity }
   })
 
   app.post('/sessions/:id/messages', { bodyLimit: MESSAGE_BODY_LIMIT }, async (req, reply) => {
@@ -1314,6 +1343,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         }
         if (updated.sessionId && (status === 'failed' || status === 'stopped')) await abortPending(userId, updated.sessionId, str(m.error) || (status === 'stopped' ? '已停止' : '启动失败'))
         if (TERMINAL.includes(status)) {
+          liveActivity.delete(run.id)
           for (const a of await expireApprovalsOfRuns(pool, userId, [run.id])) await pushApproval(userId, a, false)
         }
         return
@@ -1359,6 +1389,31 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
             if (refined.action === 'skipped') broadcast(userId, { type: 'proposal.skipped', proposal: refined.proposal })
           }
         }
+        return
+      }
+      case 'run.activity': {
+        const run = await getRun(pool, userId, str(m.runId))
+        if (!run || run.machine !== machine || !run.sessionId) return
+        const kind = str(m.kind)
+        if (!['thinking', 'tool', 'text', 'idle'].includes(kind)) return
+        const at = new Date().toISOString()
+        const text = kind === 'idle' ? '' : cleanText(str(m.text), 300)
+        // 只是「现在在做什么」，不落库：run 结束后就不再需要了
+        if (kind === 'idle') liveActivity.delete(run.id)
+        else liveActivity.set(run.id, { runId: run.id, sessionId: run.sessionId, kind: kind as LiveActivity['kind'], text, at })
+        // 顺手清掉十分钟前的旧条目，避免长跑实例里无限增长
+        const cutoff = Date.now() - 10 * 60_000
+        for (const [id, a] of liveActivity) if (Date.parse(a.at) < cutoff) liveActivity.delete(id)
+        broadcast(userId, { type: 'activity', activity: { runId: run.id, sessionId: run.sessionId, kind, text, at } })
+        return
+      }
+      case 'run.usage': {
+        const run = await getRun(pool, userId, str(m.runId))
+        if (!run || run.machine !== machine) return
+        const usage = cleanUsage(m.usage)
+        if (!usage) return
+        const updated = await setRunUsage(pool, userId, run.id, usage)
+        if (updated) pushRun(userId, updated)
         return
       }
       case 'run.approval': {

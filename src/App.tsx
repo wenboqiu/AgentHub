@@ -299,6 +299,7 @@ export default function App() {
         bus.emit({ kind: "resync" });
       },
       onRun: (r) => { setRunSignal(s => s + 1); bus.emit({ kind: "run", r }); },
+      onActivity: (a) => bus.emit({ kind: "activity", a }),
       onMessage: (m) => bus.emit({ kind: "message", m }),
       onApproval: (a, notify) => {
         setApprovals((m) => {

@@ -129,6 +129,8 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
   await pool.query('ALTER TABLE runs ALTER COLUMN session_id DROP NOT NULL')
   // 标题快照：任务/会话被删掉后，历史执行记录仍然能看出当时在做什么
   await pool.query("ALTER TABLE runs ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT ''")
+  // 一次运行的 token 用量（执行器上报）：{input,output,cached,reasoning,total,costUsd}
+  await pool.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS usage jsonb')
   await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(user_id, task_id, created_at DESC)')
   await pool.query(`CREATE TABLE IF NOT EXISTS messages (
     id bigserial primary key,
@@ -438,7 +440,8 @@ export const MESSAGE_ROLES = ['user', 'assistant', 'tool', 'approval', 'system']
 export type MessageRole = (typeof MESSAGE_ROLES)[number]
 export const KEEP_MESSAGES = 200
 
-export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string }
+export type RunUsage = { input: number; output: number; cached?: number; reasoning?: number; total: number; costUsd?: number }
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage: RunUsage | null; createdAt: string; updatedAt: string }
 export type MessageMeta = { sourceId?: string; branchPoint?: string }
 export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string }
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired'
@@ -453,7 +456,7 @@ export type Approval = {
   decidedAt: string | null
 }
 
-type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; created_at: Date; updated_at: Date }
+type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; created_at: Date; updated_at: Date }
 type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; images?: string[] | null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
 type ApprovalRow = {
   id: string
@@ -474,6 +477,7 @@ const toRun = (r: RunRow): Run => ({
   machine: r.machine,
   status: r.status,
   error: r.error,
+  usage: r.usage ?? null,
   createdAt: r.created_at.toISOString(),
   updatedAt: r.updated_at.toISOString(),
 })
@@ -552,6 +556,12 @@ export async function latestRun(pool: pg.Pool, userId: number, sessionId: string
 
 export async function setRunStatus(pool: pg.Pool, userId: number, id: string, status: RunStatus, error = ''): Promise<Run | null> {
   const r = await pool.query<RunRow>('UPDATE runs SET status = $2, error = $3, updated_at = now() WHERE user_id = $4 AND id = $1 RETURNING *', [id, status, cleanText(error, 1000), userId])
+  return r.rows[0] ? toRun(r.rows[0]) : null
+}
+
+/** 执行器上报的 token 用量：运行结束后迟到也照样收（只是记账，不回写状态） */
+export async function setRunUsage(pool: pg.Pool, userId: number, id: string, usage: RunUsage): Promise<Run | null> {
+  const r = await pool.query<RunRow>('UPDATE runs SET "usage" = $2, updated_at = now() WHERE user_id = $3 AND id = $1 RETURNING *', [id, usage, userId])
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 

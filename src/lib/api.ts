@@ -177,7 +177,11 @@ export type Session = {
 };
 
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
-export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
+/** 一次运行的 token 用量（执行器上报，Claude / Codex 才有；cached 是命中缓存的输入） */
+export type RunUsage = { input: number; output: number; total: number; cached?: number; reasoning?: number; costUsd?: number };
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; createdAt: string; updatedAt: string };
+/** 执行器实时上报的「正在做什么」：文字是 agent 自己的（思考原文 / 工具调用 / 正在写的正文） */
+export type RunActivity = { runId: string; sessionId: string; kind: "thinking" | "tool" | "text" | "idle"; text: string; at: string };
 /** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
 export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
@@ -353,7 +357,7 @@ export class Api {
   // 远程控制
   controlStatus = () => this.call<{ agents: string[] }>("GET", "/control/status");
   messages = (sessionId: string) =>
-    this.call<{ messages: Message[]; approvals: Approval[]; run: Run | null }>("GET", `/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`);
+    this.call<{ messages: Message[]; approvals: Approval[]; run: Run | null; activity?: RunActivity | null }>("GET", `/sessions/${encodeURIComponent(sessionId)}/messages?limit=200`);
   /** 基于已有会话新开：fork = 带上下文分叉，fresh = 同目录从零开始。返回临时会话 id */
   spawn = (sessionId: string, mode: "fork" | "fresh", text: string, messageId?: number) =>
     this.call<{ runId: string; sessionId: string }>("POST", `/sessions/${encodeURIComponent(sessionId)}/spawn`, { mode, text, ...(messageId === undefined ? {} : {messageId}) });
@@ -388,6 +392,8 @@ export type Handlers = {
   /** 新开的临时会话拿到真实 id */
   onRenamed(from: string, to: string): void;
   onRun(r: Run): void;
+  /** 执行器实时的「正在做什么」（思考原文 / 工具 / 正在写的正文） */
+  onActivity(a: RunActivity): void;
   onMessage(m: Message): void;
   onApproval(a: Approval, notify: boolean): void;
   /** Watchdog 升级提醒：stall = 会话长时间无事件疑似卡死；abort-spree = 同一会话反复失败 */
@@ -486,6 +492,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "removed") h.onRemoved(m.id);
         else if (m.type === "session.renamed") h.onRenamed(m.from, m.to);
         else if (m.type === "run") h.onRun(m.run);
+        else if (m.type === "activity") h.onActivity(m.activity);
         else if (m.type === "message") h.onMessage(m.message);
         else if (m.type === "approval") h.onApproval(m.approval, !!m.notify);
         else if (m.type === "watchdog") h.onWatchdog(m.issue === "abort-spree" ? "abort-spree" : "stall", m.session);

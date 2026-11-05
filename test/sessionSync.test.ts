@@ -19,7 +19,7 @@ test('评价广播更新已有回复，慢快照不能覆盖新评价', async()=
 });
 function snapshotData(ids: number[], status: Run['status']) {
   const { messages, run } = snapshot(ids, status);
-  return { messages, run };
+  return { messages, run, activity: null };
 }
 
 function setup() {
@@ -54,6 +54,25 @@ test('慢快照不能覆盖请求期间的新消息和同毫秒终态，消息�
   await loading;
   s.bus.emit({ kind: 'run', r: run('running') });
   assert.deepEqual(s.states.at(-1), snapshotData([1, 2], 'done'));
+  s.sync.dispose();
+});
+
+test('运行状态只贴当前这次 run：换轮次清空，idle 清空，别人的不认', async () => {
+  const s = setup();
+  const loading = s.sync.reload();
+  s.pending.shift()!(snapshot([1], 'running'));
+  await loading;
+  const act = (runId: string, kind: 'thinking' | 'tool' | 'idle', text: string) =>
+    ({ runId, sessionId: 's', kind, text, at: time });
+  s.bus.emit({ kind: 'activity', a: act('r', 'thinking', '先看解析') });
+  assert.equal(s.states.at(-1)?.activity?.text, '先看解析');
+  s.bus.emit({ kind: 'activity', a: act('other', 'tool', 'npm test') });
+  assert.equal(s.states.at(-1)?.activity?.text, '先看解析', '别的 run 的状态不能串过来');
+  s.bus.emit({ kind: 'activity', a: act('r', 'idle', '') });
+  assert.equal(s.states.at(-1)?.activity, null);
+  s.bus.emit({ kind: 'activity', a: act('r', 'tool', 'npm test') });
+  s.bus.emit({ kind: 'run', r: { ...run('running'), id: 'r2', createdAt: '2026-10-31T00:01:00Z' } });
+  assert.equal(s.states.at(-1)?.activity, null, '换了一轮就不该留着上一轮的话');
   s.sync.dispose();
 });
 
