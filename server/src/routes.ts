@@ -1043,9 +1043,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     })
     // 项目经理自己的上下文就是它做判断的准则，拼在首条消息前面（与派活时的系统提示同源）
     const brief = role?.context ? `${role.context}\n\n${prompt}` : prompt
+    // 第 9 参是「这次 run 用谁的身份」：漏了它，细化就会用执行工具自己的默认模型，
+    // 项目经理角色配的模型等于没配。上下文已经在 brief 里，这里不再重复注入 instructions。
     const res = await startSession(
       req.userId, { agent, machine, cwd: session?.cwd ?? '' },
-      `${PROPOSAL_TITLE}${proposal.title.slice(0, 40)}`, prompt, 'fresh', '', undefined, undefined, undefined, brief,
+      `${PROPOSAL_TITLE}${proposal.title.slice(0, 40)}`, prompt, 'fresh', '', undefined, undefined,
+      { model: roleModel(role), instructions: '' }, brief,
     )
     await markRefineRun(pool, req.userId, id, res.runId)
     return { runId: res.runId }

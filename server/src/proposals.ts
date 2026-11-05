@@ -457,7 +457,19 @@ async function saveProposal(pool: DB, userId: number, input: {
       input.draft.priority, input.draft.roleId, input.draft.projectId, input.draft.profileId,
       JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin],
   )
-  return r.rows[0] ? row(r.rows[0]) : null
+  const inserted = r.rows[0]
+  if (!inserted) return null
+  // 同一件事反复跑完（做完 → 被打回 → 又跑完）会攒出好几张几乎一样的任务单，
+  // 新的进来就把旧的待处理意见作废，只留一张等人确认。
+  // 挂了任务按任务收；没挂任务按会话收——否则同一会话里的两件不同的事会互相顶掉。
+  // 放在插入之后：命中 (session, event_at) 去重时说明这一条已经存在，不作废任何人。
+  await pool.query(
+    `UPDATE session_proposals SET status='discarded'
+      WHERE user_id=$1 AND status='pending' AND id<>$3
+        AND ${input.taskId === null ? 'task_id IS NULL AND session_id=$2' : 'task_id=$2'}`,
+    [userId, input.taskId === null ? input.sessionId : input.taskId, inserted.id],
+  )
+  return row(inserted)
 }
 
 // ---------- 细化档：让项目经理角色重写 ----------
