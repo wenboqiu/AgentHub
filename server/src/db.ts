@@ -9,6 +9,7 @@ import { migrateProfiles } from './profiles.ts'
 import { migrateRoles } from './roles.ts'
 import { migrateProjects } from './projects.ts'
 import { migrateMemories } from './memories.ts'
+import { migrateAssistant } from './assistant.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -199,6 +200,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateRoles(client)
     // 记忆引用 roles 与 projects，必须排在两者后面
     await migrateMemories(client)
+    // 角色助手的草稿引用 roles，排在最后
+    await migrateAssistant(client)
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()

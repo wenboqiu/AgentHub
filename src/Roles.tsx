@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Api, Memory, Profile, Project, Role, RoleInput } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+import Assistant from "./Assistant";
 
 /** 只有这两个能真正派活；豆包 / WorkBuddy 只做状态监听 */
 const DISPATCHABLE = ["claude", "codex", "zcode"];
@@ -121,6 +122,7 @@ export default function Roles({ api }: { api: Api }) {
   const [adding, setAdding] = useState(false), [draft, setDraft] = useState<Form>(BLANK);
   const [openMem, setOpenMem] = useState<number | null>(null);
   const [open, setOpen] = useState<Record<number, boolean>>({});
+  const [assist, setAssist] = useState(false);
   const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [err, setErr] = useState("");
 
   const load = useCallback(() => {
@@ -144,10 +146,16 @@ export default function Roles({ api }: { api: Api }) {
 
   return (
     <section className="box">
-      <h2>角色</h2>
+      <div className="box-head">
+        <h2>角色</h2>
+        <button className="ghost" aria-expanded={assist} onClick={() => setAssist(v => !v)}>
+          {assist ? "收起助手" : "让助手建"}
+        </button>
+      </div>
       <p className="hint">
         把「谁来干、什么职责、用什么模型、按什么准则、记得什么」存成一个名字——像一名员工。建任务或派活时选角色，执行工具就定了，模型、准则、项目背景和这个项目的经验一起下发给电脑端；挂上默认配置还能把电脑、目录、验收模板一起带出来。
       </p>
+      {assist && <Assistant api={api} profiles={profiles} onCreated={load} onClose={() => setAssist(false)} />}
       {list === null ? (
         <p className="hint">加载中…</p>
       ) : (

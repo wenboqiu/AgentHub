@@ -60,6 +60,21 @@ import { applyProfile, deleteProfile, findProfile, getProfile, listProfiles, sav
 import { applyRole, deleteRole, findRole, getRole, listRoles, roleModel, saveRole } from './roles.ts'
 import { deleteProject, findProject, getProject, listProjects, saveProject } from './projects.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
+import {
+  ASSISTANT_TITLE,
+  draftPatch,
+  followupMessage,
+  getDraft,
+  getThread,
+  isAssistantSession,
+  listDrafts,
+  markDispatch,
+  markDraft,
+  openingMessage,
+  recordReply,
+  resetThread,
+  startThread,
+} from './assistant.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -301,7 +316,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }) {
+  // prompt 用来把「实际发给 agent 的内容」和「记录里显示的内容」分开（助手在消息前面拼了输出格式契约）。
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }, prompt?: string) {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
@@ -318,7 +334,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
     pushSession(userId,pending,false); pushRun(userId,run); pushMessage(userId,message)
     if (task) pushTask(userId,task)
-    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {})})) {
+    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text:prompt ?? text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {})})) {
       const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
       if (failed) pushRun(userId,failed)
       await abortPending(userId,pendingId,'电脑端不在线')
@@ -413,7 +429,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const r = await applyEvent(pool,req.userId,ev)
         if (r) {
           // 通知过滤管线（Fast Path）：底层判定可通知后，再过账号规则；静音的照常入列
-          const notify = r.notify
+          // 角色助手的会话不弹通知：人就等在面板前，回话几秒后自己会看到
+          const notify = r.notify && !r.session.title.startsWith(ASSISTANT_TITLE)
             ? await evaluateNotify(pool, req.userId, { kind:'session', agent:r.session.agent, state:r.session.state as 'done'|'aborted'|'waiting', sessionId:r.session.id })
             : false
           pushSession(req.userId,r.session,notify)
@@ -502,6 +519,100 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.delete('/roles/:id/memories/:memoryId', async req => serial(async () => {
     const p = req.params as {id:string;memoryId:string}
     await deleteMemory(pool, req.userId, entityId(p.id), entityId(p.memoryId))
+    return { ok: true }
+  }))
+  // ---------- 角色助手：一句话 → agent 出草稿 → 人确认才落库 ----------
+  // 派活通道复用：助手对话就是一个真实会话（ram 里跑在用户自己的电脑上），
+  // 服务端只额外记住「这个会话属于助手」，好把 agent 回的 JSON 认成草稿。
+  app.get('/assistant', async req => serial(async () => {
+    const thread = await getThread(pool, req.userId)
+    const [messages, drafts, run, roles, profiles] = await Promise.all([
+      thread?.sessionId ? listMessages(pool, req.userId, thread.sessionId, 100) : Promise.resolve([]),
+      thread ? listDrafts(pool, req.userId, thread.id) : Promise.resolve([]),
+      thread?.lastRunId ? getRun(pool, req.userId, thread.lastRunId) : Promise.resolve(null),
+      listRoles(pool, req.userId),
+      listProfiles(pool, req.userId),
+    ])
+    const online = agentList(req.userId)
+    return {
+      thread,
+      messages,
+      drafts,
+      // 正在等 agent 回话：界面据此显示「思考中」并锁住输入框
+      pending: !!run && (run.status === 'queued' || run.status === 'running'),
+      runError: run && run.status === 'failed' ? run.error : '',
+      online,
+      suggestion: {
+        agent: thread?.agent ?? 'claude',
+        machine: thread?.machine ?? (online.length === 1 ? online[0] : ''),
+        cwd: thread?.cwd ?? profiles[0]?.cwd ?? '',
+      },
+      roles: roles.length,
+    }
+  }))
+  // 开新对话：清掉旧 thread（旧草稿一并没了），重新派一次
+  app.post('/assistant/start', async req => serial(async () => {
+    const b = object(req.body ?? {})
+    const request = taskText(b.text, '需求', 4000)
+    const machine = taskText(b.machine, '电脑名', 200)
+    // 先确认电脑在线再动旧 thread：开新对话会连草稿一起清掉，别因为一台离线电脑白丢历史
+    if (!executors.has(execKey(req.userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
+    const thread = await startThread(pool, req.userId, { agent: b.agent, machine, cwd: b.cwd })
+    const [roles, profiles] = await Promise.all([listRoles(pool, req.userId), listProfiles(pool, req.userId)])
+    const prompt = openingMessage({
+      request,
+      roles: roles.map(r => ({ name: r.name, title: r.title })),
+      profiles: profiles.map(p => ({ id: p.id, name: p.name })),
+    })
+    const res = await startSession(
+      req.userId, { agent: thread.agent, machine: thread.machine, cwd: thread.cwd },
+      `${ASSISTANT_TITLE}${request.slice(0, 40)}`, request, 'fresh', '', undefined, undefined, undefined, prompt,
+    )
+    await markDispatch(pool, req.userId, res.runId)
+    return { thread: await getThread(pool, req.userId), runId: res.runId }
+  }))
+  // 追问：同一条会话续聊，契约已经在上下文里了，消息前面只补一句提醒
+  app.post('/assistant/reply', async req => serial(async () => {
+    const thread = await getThread(pool, req.userId)
+    if (!thread?.sessionId) throw new TaskError('还没开始对话', 409)
+    const request = taskText(object(req.body ?? {}).text, '需求', 4000)
+    const session = await getSession(pool, req.userId, thread.sessionId)
+    if (!session) throw new TaskError('助手会话已经不在了，重新开始一次', 409)
+    if (!executors.has(execKey(req.userId, session.machine))) throw new TaskError('那台电脑不在线', 409)
+    if (await activeRun(pool, req.userId, session.id)) throw new TaskError('上一句还在想，等它回完再说', 409)
+    const run = await createRun(pool, req.userId, randomUUID(), session.id, session.machine)
+    const message = await insertMessage(pool, req.userId, session.id, run.id, 'user', request)
+    await markDispatch(pool, req.userId, run.id)
+    pushRun(req.userId, run)
+    pushMessage(req.userId, message)
+    const sent = sendExecutor(req.userId, session.machine, {
+      type: 'run.start', runId: run.id, sessionId: session.id, agent: session.agent,
+      sessionKey: session.id.slice(session.id.indexOf(':') + 1), cwd: session.cwd,
+      text: followupMessage(request), mode: 'resume',
+    })
+    if (!sent) {
+      const failed = await setRunStatus(pool, req.userId, run.id, 'failed', '电脑端不在线')
+      if (failed) pushRun(req.userId, failed)
+      throw new TaskError('电脑端不在线', 409)
+    }
+    return { runId: run.id }
+  }))
+  // 确认：用户可能改过字段，改过的键以界面为准，其余按草稿原值，最终仍走 saveRole 的校验
+  app.post('/assistant/drafts/:id/confirm', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const draft = await getDraft(pool, req.userId, id)
+    if (draft.status !== 'pending') throw new TaskError('这张草稿已经处理过了', 409)
+    const base = draft.draft ?? { name: '', title: '', agent: null, model: null, context: '', tools: [], profileId: null }
+    const role = await saveRole(pool, req.userId, { ...base, ...draftPatch(req.body) })
+    const updated = await markDraft(pool, req.userId, id, 'created', role.id)
+    return { role, draft: updated }
+  }))
+  app.post('/assistant/drafts/:id/discard', async req => serial(async () => ({
+    draft: await markDraft(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded'),
+  })))
+  // 重开：连会话一起放掉，助手记录里不再有这条
+  app.post('/assistant/reset', async req => serial(async () => {
+    await resetThread(pool, req.userId)
     return { ok: true }
   }))
   // 项目：一个代码库的身份与背景知识，可指向一套默认执行配置
@@ -897,6 +1008,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const session = await getSession(pool, userId, id)
     if (!session) return reply.code(404).send({ error: '会话不存在' })
     if (session.agent === 'doubao') return reply.code(409).send({ error: '豆包暂不支持读取完整对话记录' })
+    // 角色助手的会话不同步原生历史：快照会整段替换消息、重排 id，而草稿按消息 id 挂着，
+    // 一同步草稿卡就全变成孤儿；这条会话本来也只在助手面板里看，我们的记录就是全文。
+    if (await isAssistantSession(pool, userId, id)) return { messages: await listMessages(pool, userId, id, 100) }
     if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     const requestId = randomUUID()
     const waiting = new Promise<HistoryResult | null>(resolve => {
@@ -996,7 +1110,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const images = rawImages
           .filter((u): u is string => typeof u === 'string' && u.startsWith('data:image/') && u.length <= 9_000_000)
           .slice(0, 4)
-        pushMessage(userId, await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text), {sourceId:nativeKey(m.sourceId) ?? undefined,branchPoint:role==='assistant' ? nativeKey(m.branchPoint) ?? undefined : undefined}, images.length ? images : null))
+        const saved = await insertMessage(pool, userId, run.sessionId, run.id, role as Message['role'], str(m.text), {sourceId:nativeKey(m.sourceId) ?? undefined,branchPoint:role==='assistant' ? nativeKey(m.branchPoint) ?? undefined : undefined}, images.length ? images : null)
+        pushMessage(userId, saved)
+        // 角色助手：这条回复如果是 agent 交的 JSON 草稿，就地解析入库，界面轮询即可看到卡片
+        if (role === 'assistant') {
+          const draft = await recordReply(pool, userId, run.id, saved.id, saved.text).catch(() => null)
+          if (draft) broadcast(userId, { type: 'assistant.draft', draft })
+        }
         return
       }
       case 'run.approval': {

@@ -22,6 +22,51 @@ export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updat
 export type Project = { id: number; name: string; brief: string; profileId: number | null; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
+/** 角色助手：一句话需求交给电脑端的 agent 整理成草稿，人确认后才建角色 */
+export type AssistantAgent = "claude" | "codex" | "zcode";
+export type AssistantDraftFields = {
+  name: string;
+  title: string;
+  agent: Task["agent"];
+  model: string | null;
+  context: string;
+  tools: string[];
+  profileId: number | null;
+  /** agent 交代的缺口或假设，只给人看，不落库 */
+  note: string;
+};
+export type AssistantDraft = {
+  id: number;
+  messageId: number;
+  /** 解析失败时为 null（保留 raw 原文，界面提示重说） */
+  draft: AssistantDraftFields | null;
+  raw: string;
+  status: "pending" | "created" | "discarded";
+  roleId: number | null;
+  createdAt: string;
+};
+export type AssistantThread = {
+  id: number;
+  agent: AssistantAgent;
+  machine: string;
+  cwd: string;
+  sessionId: string | null;
+  lastRunId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type AssistantState = {
+  thread: AssistantThread | null;
+  messages: Message[];
+  drafts: AssistantDraft[];
+  /** agent 还在想：界面锁输入并轮询 */
+  pending: boolean;
+  runError: string;
+  online: string[];
+  suggestion: { agent: AssistantAgent; machine: string; cwd: string };
+  roles: number;
+};
+
 /** 角色记忆：projectId 为空 = 跨项目的通用经验 */
 export type Memory = { id: number; roleId: number; projectId: number | null; content: string; source: "manual" | "review"; weight: number; uses: number; lastUsedAt: string | null; createdAt: string; updatedAt: string };
 export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
@@ -197,6 +242,15 @@ export class Api {
   createRole = async (input: RoleInput & { name: string }) => (await this.call<{ role: Role }>("POST", "/roles", input)).role;
   updateRole = async (id: number, input: RoleInput) => (await this.call<{ role: Role }>("PATCH", `/roles/${id}`, input)).role;
   deleteRole = (id: number) => this.call("DELETE", `/roles/${id}`);
+  // 角色助手：对话、草稿与确认。agent 跑在用户自己的电脑上，电脑离线时服务端直接 409
+  assistant = () => this.call<AssistantState>("GET", "/assistant");
+  startAssistant = (input: { agent: AssistantAgent; machine: string; cwd: string; text: string }) =>
+    this.call<{ thread: AssistantThread; runId: string }>("POST", "/assistant/start", input);
+  replyAssistant = (text: string) => this.call<{ runId: string }>("POST", "/assistant/reply", { text });
+  confirmDraft = (id: number, fields: Partial<AssistantDraftFields>) =>
+    this.call<{ role: Role; draft: AssistantDraft }>("POST", `/assistant/drafts/${id}/confirm`, fields);
+  discardDraft = (id: number) => this.call<{ draft: AssistantDraft }>("POST", `/assistant/drafts/${id}/discard`);
+  resetAssistant = () => this.call<{ ok: true }>("POST", "/assistant/reset", {});
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
   digests = (id: number) => this.call<TaskDigests>("GET", `/tasks/${id}/digest`);
   review = (id: number) => this.call<Review>("GET", `/tasks/${id}/review`);
