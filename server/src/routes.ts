@@ -93,10 +93,11 @@ import {
   proposalPatch,
   recordRefine,
   refineMessage,
+  sessionKeyOf,
   toChecklist,
   type Delivery,
 } from './proposals.ts'
-import { getManager, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
+import { getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
@@ -497,7 +498,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       mode = plan.mode
       deliveryReason = plan.reason
       // 会话键是 agent 自己那半截 id（claude:xxx → xxx）；拼不出来就别假装能续
-      if (mode === 'fork' && src && src.id.includes(':')) sessionKey = src.id.slice(src.id.indexOf(':') + 1)
+      if (mode === 'fork' && src) sessionKey = sessionKeyOf(src.id)
       if (!sessionKey) mode = 'fresh'
     }
     const text = taskText(b.text ?? (task.notes || task.title), '第一条消息', 8000)
@@ -516,10 +517,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       boundaryLine(task.constraints),
     ].filter(Boolean).join('\n\n')
     const dispatch = { model: roleModel(role), instructions }
-    // 开跑方式只用一次：无论排队还是立刻开跑，都在这儿清掉，重试时才不会又续回老上下文
+    // 开跑方式只用一次：无论排队还是立刻开跑，也无论最后按 fork 还是 fresh 跑，
+    // 都在这儿清掉——显式请求 fresh 时不清，重试就会又续回老上下文
     const settle = async () => {
-      if (want !== 'fork') return
-      await saveTask(pool, userId, { startMode: 'fresh', forkFrom: null }, task.id).catch(() => undefined)
+      if (task.startMode === 'fresh' && !task.forkFrom) return
+      await saveTask(pool, userId, { startMode: 'fresh', forkFrom: null }, task.id)
+        .catch(e => app.log.warn({ taskId: task.id, err: String(e) }, '清除开跑方式失败，重试可能续回老上下文'))
     }
     // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么、怎么开场都定下来了）
     if (!executors.has(execKey(userId, machine))) {
@@ -544,9 +547,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   async function drainQueue(userId: number, machine: string) {
     for (const item of await queuedFor(pool, userId, machine, queueDrainLimit)) {
       if (!executors.has(execKey(userId, machine))) return
+      // 入队时定的「接着原会话」到真投递可能隔了几小时：原会话可能又在跑或被删了，投递前重新判定
+      let mode = item.mode as Delivery, sessionKey = item.sessionKey as string
+      if (mode === 'fork') {
+        const src = sessionKey ? await getSession(pool, userId, `${item.agent}:${sessionKey}`).catch(() => null) : null
+        const plan = planDelivery('fork', src ? forkInfo(src) : NO_FORK, { agent: item.agent as string, machine, cwd: item.cwd as string })
+        if (plan.mode !== 'fork') {
+          mode = 'fresh'; sessionKey = ''
+          app.log.warn({ taskId: item.taskId, reason: plan.reason }, '排队投递复核：续不上原会话，退回新会话')
+          await logAuto(pool, userId, item.taskId, 'dispatched', null, `排队复核退回新会话：${plan.reason}`)
+        } else if (src) sessionKey = sessionKeyOf(src.id)
+      }
       let ok = false
       try {
-        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, item.mode, item.sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
+        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
         ok = true
       } catch (e) {
         const attempts = await bumpAttempts(pool, userId, item.taskId)

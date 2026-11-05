@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { planDelivery } from '../src/lib/delivery.ts';
+import { normalizeCwd, planDelivery } from '../src/lib/delivery.ts';
 import type { ForkInfo } from '../src/lib/api.ts';
 
 // 界面这一份只是预览：真正的判定在服务端，两边规则要一致，否则人会看到
@@ -48,4 +48,22 @@ test('还没定执行人时不拦：交给服务端派发时再判', () => {
 test('主动选从零开始：不做任何额外判断', () => {
   const p = planDelivery('fresh', fork({ ok: false, reason: 'x' }), target);
   assert.deepEqual([p.mode, p.blocked], ['fresh', false]);
+});
+
+test('同一目录不同写法：不误判成目录不同', () => {
+  // 反斜杠、末尾斜杠、盘符大小写都是同一目录
+  const win = fork({ cwd: 'D:\\Work2\\AgentHub\\' });
+  const p = planDelivery('fork', win, { ...target, cwd: 'd:/Work2/AgentHub' });
+  assert.equal(p.mode, 'fork');
+  assert.equal(p.blocked, false);
+  // 真不同目录还是拦
+  const other = planDelivery('fork', win, { ...target, cwd: 'D:/Work2/别的' });
+  assert.equal(other.blocked, true);
+});
+
+test('normalizeCwd：归一化反斜杠、末尾斜杠和盘符大小写', () => {
+  assert.equal(normalizeCwd('D:\\Work2\\AgentHub\\'), 'd:/Work2/AgentHub');
+  assert.equal(normalizeCwd('d:/Work2/AgentHub'), 'd:/Work2/AgentHub');
+  assert.equal(normalizeCwd('  /home/wilbur/agenthub/  '), '/home/wilbur/agenthub');
+  assert.equal(normalizeCwd(''), '');
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, toChecklist } from '../src/proposals.ts'
+import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, sessionKeyOf, toChecklist } from '../src/proposals.ts'
 import { DEFAULT_MANAGER, pickCandidates, quota } from '../src/dispatch-manager.ts'
 import type { Task } from '../src/tasks.ts'
 
@@ -123,10 +123,33 @@ test('原会话能不能续：只做状态监听的和在跑的都不行', () =>
   assert.equal(zcode.ok, false)
   assert.match(zcode.reason, /ZCode/)
   assert.equal(forkInfo({ ...base, agent: 'workbuddy' }).ok, false)
-  // 在跑的会话不能分叉
+  // 在跑的、等授权的（进程都还活着）不能分叉，状态不明的也要拦
   const running = forkInfo({ ...base, agent: 'claude', state: 'running' })
   assert.equal(running.ok, false)
   assert.match(running.reason, /还在跑/)
+  const waiting = forkInfo({ ...base, agent: 'claude', state: 'waiting' })
+  assert.equal(waiting.ok, false)
+  assert.match(waiting.reason, /等授权/)
+  const unknown = forkInfo({ ...base, agent: 'claude', state: 'unknown' })
+  assert.equal(unknown.ok, false)
+  assert.match(unknown.reason, /状态不明/)
+})
+
+test('planDelivery：目录写法不同但同一目录时能续上', () => {
+  const fork = forkInfo({ agent: 'claude', machine: 'PC-Home', cwd: 'D:\\Work2\\AgentHub\\', state: 'done' })
+  // 盘符大小写、反斜杠、末尾斜杠都是同一目录
+  const ok = planDelivery('fork', fork, { agent: 'claude', machine: 'pc-home', cwd: 'd:/Work2/AgentHub' })
+  assert.equal(ok.mode, 'fork')
+  // 电脑名只差大小写也是同一台（目录相同，能续上）
+  const sameMachine = planDelivery('fork', fork, { agent: 'claude', machine: 'PC-HOME', cwd: 'D:\\Work2\\AgentHub' })
+  assert.equal(sameMachine.mode, 'fork')
+})
+
+test('sessionKeyOf：拆 agent 前缀，拆不出来给空', () => {
+  assert.equal(sessionKeyOf('claude:abc-123'), 'abc-123')
+  assert.equal(sessionKeyOf('codex:xyz'), 'xyz')
+  assert.equal(sessionKeyOf('no-colon'), '')
+  assert.equal(sessionKeyOf(''), '')
 })
 
 test('parseRefine：认 delivery，没写就按 kind 兜底', () => {

@@ -135,12 +135,24 @@ const agentName = (a: string): string => AGENT_NAME[a] ?? (a || '未知工具')
 
 export const NO_FORK: ForkInfo = { agent: '', machine: '', cwd: '', ok: false, reason: '找不到原会话' }
 
-/** 会话这一侧能不能续：工具支持 + 现在不在跑（在跑的会话不能分叉） */
+/** 会话这一侧能不能续：工具支持 + 现在不在跑（在跑 / 等授权的会话进程还活着，续过去就是双写） */
 export function forkInfo(s: Pick<Session, 'agent' | 'machine' | 'cwd' | 'state'>): ForkInfo {
   const base = { agent: s.agent, machine: s.machine, cwd: s.cwd }
   if (!FORK_AGENTS.has(s.agent)) return { ...base, ok: false, reason: `${agentName(s.agent)} 不能接着原会话` }
-  if (s.state === 'running') return { ...base, ok: false, reason: '原会话还在跑，等它结束才能续' }
+  if (s.state === 'running' || s.state === 'waiting') return { ...base, ok: false, reason: '原会话还在跑或等授权，等它结束才能续' }
+  if (s.state === 'unknown') return { ...base, ok: false, reason: '原会话状态不明，先确认再续' }
   return { ...base, ok: true, reason: '' }
+}
+
+/** 'claude:xxx' → 'xxx'（会话键是 agent 自己那半截 id）；拆不出来返回空 */
+export function sessionKeyOf(sessionId: string): string {
+  return sessionId.includes(':') ? sessionId.slice(sessionId.indexOf(':') + 1) : ''
+}
+
+/** 目录比较前先归一化：反斜杠、末尾斜杠、Windows 盘符大小写，否则同一目录会被误判成两个 */
+export function normalizeCwd(p: string): string {
+  const p2 = (p ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
+  return /^[a-zA-Z]:/.test(p2) ? p2[0].toLowerCase() + p2.slice(1) : p2
 }
 
 /**
@@ -153,10 +165,10 @@ export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: st
   if (target.agent !== fork.agent) {
     return { mode: 'fresh', reason: `执行人是 ${agentName(target.agent)}，原会话是 ${agentName(fork.agent)}，续不上` }
   }
-  if (target.machine && target.machine !== fork.machine) {
+  if (target.machine && target.machine.toLowerCase() !== fork.machine.toLowerCase()) {
     return { mode: 'fresh', reason: `换了电脑，原会话在 ${fork.machine}` }
   }
-  if (target.cwd && target.cwd !== fork.cwd) {
+  if (target.cwd && normalizeCwd(target.cwd) !== normalizeCwd(fork.cwd)) {
     return { mode: 'fresh', reason: '任务目录和原会话不同，续不上上下文' }
   }
   return { mode: 'fork', reason: `接着原会话的上下文（${agentName(fork.agent)} · ${fork.machine}）` }
@@ -177,7 +189,7 @@ export async function migrateProposals(db: DB) {
     notes text NOT NULL DEFAULT '',
     checklist jsonb NOT NULL DEFAULT '[]'::jsonb,
     constraints jsonb NOT NULL DEFAULT '{}'::jsonb,
-    delivery text NOT NULL DEFAULT 'fresh' CHECK (delivery IN ('fork','fresh')),
+    delivery text NOT NULL DEFAULT 'fresh',
     priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
     role_id bigint,
     project_id bigint,
@@ -685,11 +697,13 @@ export async function replaceDraft(pool: DB, userId: number, id: number, draft: 
   const r = await pool.query(
     `UPDATE session_proposals SET kind=$3,title=$4,notes=$5,checklist=$6,priority=$7,
        role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),delivery=$12,
+       constraints=$13,
        profile_id=COALESCE($11,(SELECT r.profile_id FROM roles r WHERE r.user_id=$1 AND r.id=$8),profile_id)
      WHERE user_id=$1 AND id=$2 AND status='pending' RETURNING *`,
     [userId, id, draft.kind, draft.title.slice(0, MAX_TITLE), draft.notes.slice(0, MAX_NOTES),
       JSON.stringify(draft.checklist), draft.priority, draft.roleId, draft.projectId, draft.note.slice(0, 500),
-      draft.profileId, draft.delivery ?? defaultDelivery(draft.kind)],
+      draft.profileId, draft.delivery ?? defaultDelivery(draft.kind),
+      JSON.stringify(draft.constraints ?? NO_CONSTRAINTS)],
   )
   if (!r.rows[0]) throw new TaskError('这条意见已经处理过了', 409)
   return (await fillAssignees(pool, userId, [row(r.rows[0])]))[0]
