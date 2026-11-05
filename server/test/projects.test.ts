@@ -92,6 +92,7 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.equal(p.name.startsWith('AgentHub'), true)
     assert.equal(p.brief, 'Fastify + Postgres，改完要跑 tsc')
     assert.equal(p.profileId, null)
+    assert.deepEqual(p.profileIds, [])
     assert.equal(p.tasks, 0)
 
     assert.equal((await h.call('POST', '/projects', { name: p.name })).status, 409)
@@ -140,6 +141,44 @@ describe('项目：一个代码库的身份与背景知识', () => {
     const run = await waitFor(() => msgs.find(m => m.type === 'run.start' && m.runId === started.body.runId))
     assert.equal(run.cwd, 'D:\\Work2\\ProjApp')
     assert.match(run.instructions, /这个项目只跑 Node/, '项目背景随派活下发')
+  })
+
+  it('一个项目挂多套配置：派活按这次要去的机器挑对应那套目录', async () => {
+    const pcA = `proj-a-${stamp}`
+    const pcB = `proj-b-${stamp}`
+    await h.executor(pcA)
+    const msgsB = await h.executor(pcB)
+    const a = await h.profile({ name: uniq('台式机配置'), agent: 'claude', machine: pcA, cwd: 'D:\\Work2\\MultiA' })
+    const b = await h.profile({ name: uniq('Mac 配置'), agent: 'claude', machine: pcB, cwd: '/Users/wenbo/MultiA' })
+    const p = await h.project({ name: uniq('多设备项目'), profileIds: [a.id, b.id] })
+    assert.equal(p.profileId, a.id, '第一套当兜底')
+    assert.deepEqual([...p.profileIds].sort((x: number, y: number) => x - y), [a.id, b.id].sort((x, y) => x - y))
+
+    const t = await h.task({ projectId: p.id })
+    // 挂多套时不把任务钉死在某套配置上，否则换台电脑派活就会带着另一台的目录
+    assert.equal(t.profileId, null)
+    assert.equal(t.cwd, null)
+
+    // 指到 B 电脑派活：用 B 那套的目录，不是第一套的
+    const started = await h.call('POST', `/tasks/${t.id}/start`, { machine: pcB })
+    assert.equal(started.status, 200, JSON.stringify(started.body))
+    const run = await waitFor(() => msgsB.find(m => m.type === 'run.start' && m.runId === started.body.runId))
+    assert.equal(run.cwd, '/Users/wenbo/MultiA')
+
+    // 已经填了目录（比如在 A 电脑上派过）就不再被配置覆盖
+    const pinned = await h.task({ projectId: p.id, machine: pcA, cwd: 'D:\\Work2\\SelfPick' })
+    assert.equal(pinned.cwd, 'D:\\Work2\\SelfPick')
+  })
+
+  it('只能挂自己的配置', async () => {
+    const mine = await h.project({ name: uniq('我的多设备项目') })
+    const other = await makeUser(h.pool)
+    const made = await h.call('POST', '/profiles', { name: uniq('别人的配置'), agent: 'claude' }, other.token)
+    assert.equal(made.status, 200, JSON.stringify(made.body))
+    const bad = await h.call('PATCH', `/projects/${mine.id}`, { profileIds: [made.body.profile.id] })
+    assert.equal(bad.status, 404)
+    // 失败后原来的挂载不变
+    assert.deepEqual((await h.call('GET', `/projects/${mine.id}`)).body.project.profileIds, [])
   })
 
   it('不能引用别人的项目', async () => {

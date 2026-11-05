@@ -18,8 +18,8 @@ export type ProfileInput = Partial<Omit<Profile, "id" | "tasks" | "createdAt" | 
 export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; profileId: number | null; tasks: number; createdAt: string; updatedAt: string };
 export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
-/** 项目：一个代码库的身份与背景知识，可指向一套默认执行配置 */
-export type Project = { id: number; name: string; brief: string; profileId: number | null; tasks: number; createdAt: string; updatedAt: string };
+/** 项目：一个代码库的身份与背景知识，可挂多套执行配置（每台电脑一套），派活时按机器挑 */
+export type Project = { id: number; name: string; brief: string; profileId: number | null; profileIds: number[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
 /** 角色助手：一句话需求交给电脑端的 agent 整理成草稿，人确认后才建角色 */
@@ -80,9 +80,57 @@ export type ReviewDigest = { kind: "review"; builtAt: string; sessionId: string 
 /** 失败上下文：run 失败时预收集的错误与最后几条消息 */
 export type FailureDigest = { kind: "failure"; builtAt: string; runId: string; sessionId: string | null; error: string; tail: { role: string; text: string }[] };
 export type TaskDigests = { review: ReviewDigest | null; failure: FailureDigest | null };
+/** 任务产物：跑完自动生成的 Markdown 文档；edited = 人改过，之后不再被自动重建覆盖 */
+export type TaskArtifact = { taskId: number; md: string; source: "digest" | "agent" | "user"; edited: boolean; createdAt: string; updatedAt: string };
+/** 项目近况：任务完成时追加的一句结论，派活时注入提示 */
+export type BriefEntry = { id: number; text: string; taskId: number | null; at: string };
 /** 验收检查项：来自任务清单（或人工添加），可判通过/打回，打回原因沉淀为标准 */
 export type ReviewItem = { id: number; key: string; title: string; status: "pending" | "pass" | "fail"; note: string; manual: boolean; updatedAt: string };
 export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] };
+
+/** 处理意见：会话跑完后攒出来的「接下来做什么」，确认后才变成任务 */
+export type ProposalKind = "continue" | "followup" | "fix";
+/** 项目经理排好的执行人：角色是人，配置是地方（执行工具 + 电脑 + 目录） */
+export type Assignee = {
+  roleId: number | null;
+  roleName: string;
+  roleTitle: string;
+  agent: string;
+  profileId: number | null;
+  profileName: string;
+  machine: string;
+  cwd: string;
+};
+export type Proposal = {
+  id: number;
+  sessionId: string;
+  sessionTitle: string;
+  sessionAgent: string;
+  sessionProject: string;
+  taskId: number | null;
+  kind: ProposalKind;
+  title: string;
+  notes: string;
+  checklist: string[];
+  priority: Task["priority"];
+  roleId: number | null;
+  projectId: number | null;
+  profileId: number | null;
+  assignee: Assignee;
+  evidence: Evidence[];
+  note: string;
+  origin: "heuristic" | "agent";
+  status: "pending" | "accepted" | "discarded";
+  createdTaskId: number | null;
+  eventAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type ProposalInput = Partial<Pick<Proposal, "title" | "notes" | "checklist" | "priority" | "roleId" | "projectId" | "profileId">>;
+
+/** 项目经理：全局一个，负责细化意见，可选地把已确认的任务自动派出去 */
+export type DispatchManager = { roleId: number | null; enabled: boolean; maxRunning: number; maxPerHour: number; updatedAt: string | null };
+export type ManagerState = { manager: DispatchManager; roles?: Role[]; running: number; recent: number; quota: number };
 /** Thread 事件：任务视角的统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要） */
 export type ThreadEvent =
   | { type: "message"; at: string; sessionId: string; role: string; text: string; sourceId?: string }
@@ -255,6 +303,26 @@ export class Api {
   resetAssistant = () => this.call<{ ok: true }>("POST", "/assistant/reset", {});
   linkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("POST", `/tasks/${id}/sessions`, {sessionId})).task;
   digests = (id: number) => this.call<TaskDigests>("GET", `/tasks/${id}/digest`);
+  artifact = (id: number) => this.call<{ artifact: TaskArtifact | null; path: string }>("GET", `/tasks/${id}/artifact`);
+  saveArtifact = (id: number, md: string) => this.call<{ artifact: TaskArtifact }>("PATCH", `/tasks/${id}/artifact`, { md });
+  rebuildArtifact = (id: number, force = false) =>
+    this.call<{ artifact: TaskArtifact; path: string }>("POST", `/tasks/${id}/artifact/rebuild`, { force });
+  deleteArtifact = (id: number) => this.call<{ ok: true }>("DELETE", `/tasks/${id}/artifact`);
+  projectBrief = async (id: number) => (await this.call<{ entries: BriefEntry[] }>("GET", `/projects/${id}/brief`)).entries;
+  addBrief = async (id: number, text: string) =>
+    (await this.call<{ entries: BriefEntry[] }>("POST", `/projects/${id}/brief`, { text })).entries;
+  deleteBrief = async (id: number, entryId: number) =>
+    (await this.call<{ entries: BriefEntry[] }>("DELETE", `/projects/${id}/brief/${entryId}`)).entries;
+  // 处理意见：sessionId 传了就看这一条会话的全部意见，不传就是全局待处理
+  proposals = async (sessionId?: string) =>
+    (await this.call<{ proposals: Proposal[] }>("GET", `/proposals${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`)).proposals;
+  /** 让项目经理重写这条意见：借电脑上已登录的 agent，电脑离线时直接 409 */
+  refineProposal = (id: number) => this.call<{ runId: string }>("POST", `/proposals/${id}/refine`, {});
+  confirmProposal = (id: number, input: ProposalInput & { dispatch?: boolean }) =>
+    this.call<{ task: Task; proposal: Proposal; dispatched: { queued: boolean } | null; dispatchError: string }>("POST", `/proposals/${id}/confirm`, input);
+  discardProposal = (id: number) => this.call<{ proposal: Proposal }>("POST", `/proposals/${id}/discard`);
+  dispatchManager = () => this.call<ManagerState>("GET", "/dispatch/manager");
+  saveDispatchManager = (patch: Partial<DispatchManager>) => this.call<ManagerState>("PATCH", "/dispatch/manager", patch);
   review = (id: number) => this.call<Review>("GET", `/tasks/${id}/review`);
   addReviewItem = (id: number, title: string) => this.call<{ item: ReviewItem }>("POST", `/tasks/${id}/review`, { title });
   decideReviewItem = (taskId: number, itemId: number, status: "pending" | "pass" | "fail", note = "") => this.call<{ item: ReviewItem }>("PATCH", `/tasks/${taskId}/review/${itemId}`, { status, note });
@@ -314,6 +382,7 @@ export type Handlers = {
   onTask(task: Task): void;
   onTaskRemoved(id: number): void;
   onTaskDigest(taskId: number, kind: "review" | "failure", digest: unknown): void;
+  onArtifact(taskId: number, artifact: TaskArtifact): void;
   onSession(s: Session, notify: boolean): void;
   onRemoved(id: string): void;
   /** 新开的临时会话拿到真实 id */
@@ -324,6 +393,8 @@ export type Handlers = {
   /** Watchdog 升级提醒：stall = 会话长时间无事件疑似卡死；abort-spree = 同一会话反复失败 */
   onWatchdog(issue: "stall" | "abort-spree", s: Session): void;
   onAgents(agents: string[]): void;
+  /** 处理意见新增或更新（细化完成也走这里，status 已是最新值） */
+  onProposal(p: Proposal): void;
   /** 服务端以 4401 关闭连接：登录已失效，不再自动重连 */
   onAuthExpired(): void;
 };
@@ -409,6 +480,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "goal.removed") h.onGoalRemoved(m.id);
         else if (m.type === "task") h.onTask(m.task);
         else if (m.type === "task.digest") h.onTaskDigest(m.taskId, m.kind === "failure" ? "failure" : "review", m.digest);
+        else if (m.type === "task.artifact" && m.artifact) h.onArtifact(m.taskId, m.artifact);
         else if (m.type === "task.removed") h.onTaskRemoved(m.id);
         else if (m.type === "session") h.onSession(m.session, !!m.notify);
         else if (m.type === "removed") h.onRemoved(m.id);
@@ -417,6 +489,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "message") h.onMessage(m.message);
         else if (m.type === "approval") h.onApproval(m.approval, !!m.notify);
         else if (m.type === "watchdog") h.onWatchdog(m.issue === "abort-spree" ? "abort-spree" : "stall", m.session);
+        else if (m.type === "proposal") h.onProposal(m.proposal);
         else if (m.type === "agents") h.onAgents(m.agents ?? []);
       } catch {
         /* 忽略坏消息 */

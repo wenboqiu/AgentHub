@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests, type BoardEntry } from "./lib/api";
+import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests, type TaskArtifact, type BoardEntry, type Proposal, type DispatchManager, type Project, type Role } from "./lib/api";
 import { desktop, isDesktop, loadConfig, saveConfig, type Config } from "./lib/platform";
 import { onNotificationClick, pushNotification, type NotifyTarget } from "./lib/desktopNotify";
 import SessionView from "./SessionView";
@@ -155,6 +155,14 @@ export default function App() {
   const [tasks,setTasks] = useState<Map<number,Task>>(new Map());
   // 投机预摘要：taskId -> {review, failure}，由 WS task.digest 实时更新
   const [digests,setDigests] = useState<Map<number,TaskDigests>>(new Map());
+  // 任务产物：taskId -> artifact，由 WS task.artifact 实时更新（跑完自动生成/人改/重建都会推）
+  const [artifacts,setArtifacts]=useState<Map<number,TaskArtifact>>(new Map());
+  // 处理意见：会话跑完后攒出来的任务草稿，确认前只是建议。WS proposal 实时更新。
+  const [proposals,setProposals] = useState<Map<number,Proposal>>(new Map());
+  // 项目经理与它需要的下拉选项（角色 / 项目）：一次拉齐，处理意见卡里直接改「交给谁」
+  const [manager,setManager] = useState<DispatchManager|null>(null);
+  const [roles,setRoles] = useState<Role[]>([]);
+  const [projects,setProjects] = useState<Project[]>([]);
   // 派活看板：排队 / 在跑 / 卡住 的聚合视图
   const [board,setBoard] = useState<{entries: BoardEntry[]; agents: string[]} | null>(null);
   const openId = detail?.kind === "session" ? detail.id : null;
@@ -251,6 +259,15 @@ export default function App() {
         setApprovals(new Map(aps.filter((a) => a.status === "pending").map((a) => [a.id, a])));
         setGoals(new Map(gs.map(g=>[g.id,g])));
         setTasks(new Map(ts.map(t=>[t.id,t])));
+        // 处理意见与项目经理不在快照里：单独拉一次（都是小请求）。proposals 只回待处理的，
+        // 所以与本地合并而不是整体替换——刚确认过的卡片要保留「已生成任务」的结论。
+        void api.proposals().then(list => setProposals(m => {
+          const n = new Map(m);
+          for (const p of list) n.set(p.id, p);
+          return n;
+        })).catch(() => {});
+        void api.dispatchManager().then(st => { setManager(st.manager); setRoles(st.roles ?? []); }).catch(() => {});
+        void api.projects().then(setProjects).catch(() => {});
         bus.emit({ kind: "resync" });
       },
       onSession: (s, notify) => {
@@ -302,11 +319,17 @@ export default function App() {
       onGoalRemoved: id=>setGoals(m=>{const n=new Map(m);n.delete(id);return n;}),
       onTask: t=>setTasks(m=>mergeEntity(m,t)),
       onTaskDigest: (taskId,kind,digest)=>setDigests(m=>{const cur=m.get(taskId)??{review:null,failure:null};return new Map(m).set(taskId,{...cur,[kind]:digest} as TaskDigests);}),
+      onArtifact: (taskId,artifact)=>setArtifacts(m=>new Map(m).set(taskId,artifact)),
       onTaskRemoved: id=>setTasks(m=>{const n=new Map(m);n.delete(id);return n;}),
+      onProposal: p=>setProposals(m=>new Map(m).set(p.id,p)),
     });
   }, [api, bus, expire]);
 
   const list = useMemo(() => [...sessions.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)), [sessions]);
+  const proposalList = useMemo(() => [...proposals.values()], [proposals]);
+  // 待确认的任务单：会话标签上挂个数字，别让人错过「等你点头才开工」的活
+  const pendingProposals = useMemo(() => proposalList.filter(p => p.status === "pending").length, [proposalList]);
+  const saveProposal = useCallback((p: Proposal) => setProposals(m => new Map(m).set(p.id, p)), []);
   const approvalSessions = useMemo(() => new Set([...approvals.values()].map((a) => a.sessionId)), [approvals]);
   const needsAttention = (s: Session) => isPending(s) || approvalSessions.has(s.id);
   const pending = list.filter(needsAttention);
@@ -420,7 +443,11 @@ export default function App() {
         cfg={cfg}
         api={api}
         notice={notice}
-        onClose={() => setView("list")}
+        onClose={() => {
+          setView("list");
+          // 设置页里改过项目经理：回到主界面时把开关状态刷新一次，任务单上的提示才对
+          void api?.dispatchManager().then(st => setManager(st.manager)).catch(() => {});
+        }}
         onSaved={(c, opts) => {
           setCfg(c);
           setNotice("");
@@ -446,13 +473,18 @@ export default function App() {
         tasks={taskList}
         onTask={openTask}
         onTaskSaved={saveTask}
+        proposals={proposalList.filter(p => p.sessionId === openId)}
+        roles={roles}
+        projects={projects}
+        autoDispatch={!!manager?.enabled}
+        onProposal={saveProposal}
       />
     );
   }
   if (detail && api) {
     if(detail.kind === "task") {
       const task=tasks.get(detail.id);
-      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} digest={digests.get(task.id)} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
+      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
     }
     if(detail.kind === "goal") {
       const goal=goals.get(detail.id);
@@ -487,7 +519,7 @@ export default function App() {
           <i /> {connText}
         </span>
         <span className="spacer" />
-        <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","board","goals","calendar"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}{t==="board" && stuckCount > 0 && <span className="count" aria-label={`${stuckCount} 个卡住的任务`}>{stuckCount}</span>}</button>)}</nav>
+        <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","board","goals","calendar"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}{t==="sessions" && pendingProposals > 0 && <span className="count" aria-label={`${pendingProposals} 份任务单待确认`}>{pendingProposals}</span>}{t==="board" && stuckCount > 0 && <span className="count" aria-label={`${stuckCount} 个卡住的任务`}>{stuckCount}</span>}</button>)}</nav>
         <span className="spacer" />
         <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>

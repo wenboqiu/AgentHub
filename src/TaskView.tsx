@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { Api, EvidenceKind, Goal, Profile, Project, Review, ReviewItem, Role, Session, Task, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import type { Api, EvidenceKind, Goal, Profile, Project, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
 import { localDateTime } from "./ScheduleFields";
@@ -21,11 +21,15 @@ const toIso = (v: string) => v ? new Date(v).toISOString() : null;
  * 任务详情：所有字段就地编辑、改动即时保存（参考 Linear / Todoist 的详情页），
  * 「完成」是主操作放在标题左侧，删除这类危险操作沉到页面底部。
  */
-export default function TaskView({ task, goals, sessions, agents, api, digest: liveDigest, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; digest?: TaskDigests; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
+export default function TaskView({ task, goals, sessions, agents, api, digest: liveDigest, artifact: liveArtifact, onArtifact, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; digest?: TaskDigests; artifact?: TaskArtifact; onArtifact(a: TaskArtifact): void; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
   const [busy, setBusy] = useState(false), [err, setErr] = useState(""), [saved, setSaved] = useState(false);
   const [starting, setStarting] = useState(false), [message, setMessage] = useState(""), [linking, setLinking] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [fetchedDigest, setFetchedDigest] = useState<TaskDigests | null>(null);
+  // 任务产物：跑完自动生成，可改可导出。liveArtifact 是 WS 推来的最新一份
+  const [fetchedArtifact, setFetchedArtifact] = useState<TaskArtifact | null>(null);
+  const [artifactName, setArtifactName] = useState("");
+  const [editingArtifact, setEditingArtifact] = useState(false), [artifactDraft, setArtifactDraft] = useState("");
   const [timeline, setTimeline] = useState<ThreadEvent[] | null>(null);
   const [review, setReview] = useState<Review | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -39,6 +43,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   useEffect(() => {
     let alive = true;
     api.digests(task.id).then(d => { if (alive) setFetchedDigest(d); }).catch(() => {});
+    api.artifact(task.id).then(r => { if (alive) { setFetchedArtifact(r.artifact); setArtifactName(r.path); } }).catch(() => {});
     // Thread 时间线：任务为锚点的统一事件流（消息 / 执行 / 提醒 / 摘要）
     api.thread(task.id).then(r => { if (alive) setTimeline(r.events); }).catch(() => { if (alive) setTimeline([]); });
     // 验收：检查项 + 证据 + 打回沉淀的标准
@@ -54,6 +59,32 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     return () => { alive = false; };
   }, [api]);
   const digest: TaskDigests | null = liveDigest ?? fetchedDigest;
+  const artifact = liveArtifact ?? fetchedArtifact;
+  const takeArtifact = (a: TaskArtifact) => { setFetchedArtifact(a); onArtifact(a); };
+  const saveArtifact = () => void guard(async () => {
+    if (!artifactDraft.trim()) { setErr("产物内容不能为空"); return; }
+    takeArtifact((await api.saveArtifact(task.id, artifactDraft)).artifact);
+    setEditingArtifact(false);
+  });
+  // 重建会覆盖人改过的版本，所以人改过的要再确认一次
+  const rebuildArtifact = () => void guard(async () => {
+    if (artifact?.edited && !window.confirm("这份产物你改过，重建会覆盖你的修改。继续？")) return;
+    const r = await api.rebuildArtifact(task.id, true);
+    takeArtifact(r.artifact); setArtifactName(r.path); setEditingArtifact(false);
+  });
+  const removeArtifact = () => void guard(async () => {
+    if (!window.confirm("删除这份产物？任务本身不受影响，下次跑完会重新生成。")) return;
+    await api.deleteArtifact(task.id);
+    setFetchedArtifact(null); setEditingArtifact(false);
+  });
+  const downloadArtifact = () => {
+    if (!artifact) return;
+    const name = (artifactName || `docs/tasks/${task.id}-task.md`).split("/").pop() || `task-${task.id}.md`;
+    const url = URL.createObjectURL(new Blob([artifact.md], { type: "text/markdown;charset=utf-8" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+  };
   const flash = () => { setSaved(true); window.clearTimeout(flashTimer.current); flashTimer.current = window.setTimeout(() => setSaved(false), 1600); };
   const elapsed = (iso: string) => { const s = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} 小时 ${m} 分` : `${m} 分 ${s % 60} 秒`; };
   /** 时间线里执行节点的耗时：只有两端都有才显示，不拿"现在"凑 */
@@ -207,6 +238,43 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         <p className="hint">摘要在会话完成或失败时由服务端后台预生成，打开详情即可看到，不用等终端加载。</p>
       </section>
     )}
+
+    <section className="detail-section">
+      <h3>
+        任务产物
+        {artifact && <span className="dim"> · {artifact.edited ? "人改过" : artifact.source === "agent" ? "执行端交付" : "自动生成"} · {new Date(artifact.updatedAt).toLocaleString()}</span>}
+      </h3>
+      {artifact ? (editingArtifact ? (
+        <div className="artifact-edit">
+          <textarea value={artifactDraft} onChange={e => setArtifactDraft(e.target.value)} rows={18} spellCheck={false} />
+          <div className="action-bar">
+            <button className="primary" disabled={busy} onClick={saveArtifact}>保存</button>
+            <button disabled={busy} onClick={() => setEditingArtifact(false)}>取消</button>
+            <span className="hint">Markdown；保存后会标记为「人改过」，自动重建不再覆盖。</span>
+          </div>
+        </div>
+      ) : (
+        <>
+          <pre className="artifact-md">{artifact.md}</pre>
+          <div className="action-bar">
+            <button disabled={busy} onClick={() => { setArtifactDraft(artifact.md); setEditingArtifact(true); }}><Icon name="edit" />编辑</button>
+            <button disabled={busy} onClick={rebuildArtifact}>按最新会话重建</button>
+            <button disabled={busy} onClick={downloadArtifact}>导出 .md</button>
+            <button className="link" disabled={busy} onClick={removeArtifact}>删除</button>
+          </div>
+          <p className="hint">每个任务跑完自动留一份：做了什么、怎么验证、影响面、后续与风险。导出文件名 {artifactName || `docs/tasks/${task.id}-task.md`}。</p>
+        </>
+      )) : (
+        <>
+          <p className="dim">这个任务还没有产物。跑过一次后服务端会自动生成。</p>
+          {(task.sessionIds.length > 0 || task.status === "review" || task.status === "done") && (
+            <div className="action-bar">
+              <button disabled={busy} onClick={rebuildArtifact}>按现有材料生成</button>
+            </div>
+          )}
+        </>
+      )}
+    </section>
 
     {timeline !== null && timeline.length > 0 && (
       <section className="detail-section">

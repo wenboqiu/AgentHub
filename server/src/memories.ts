@@ -126,15 +126,17 @@ export type InstructionInput = {
   role: { name: string; title: string; context: string }
   /** 这次派活选中的项目，没选就是纯通用准则 */
   project: Pick<Project, 'name' | 'brief'> | null
+  /** 项目最近的进展（任务完成时自动追加的一条句），时间正序 */
+  recent?: string[]
   memories: string[]
 }
 
 /**
- * 把「员工是谁 + 在哪个项目 + 记得什么」拼成交给执行端的系统提示。
- * 分段而不是一大坨，是为了让模型能区分「长期准则」和「这个项目的经验」。
- * 超出预算时从最低优先级开始砍：通用经验 → 项目经验 → 项目背景 → 准则。
+ * 把「员工是谁 + 在哪个项目 + 最近发生了什么 + 记得什么」拼成交给执行端的系统提示。
+ * 分段而不是一大坨，是为了让模型能区分「长期准则」「项目背景」和「最近进展」。
+ * 超出预算时从最低优先级开始砍：通用经验 → 项目经验 → 项目近况 → 项目背景 → 准则。
  */
-export function composeInstructions({ role, project, memories }: InstructionInput): string {
+export function composeInstructions({ role, project, recent = [], memories }: InstructionInput): string {
   const head: string[] = []
   const who = role.name.trim()
   if (who || role.title.trim()) head.push(`【角色】${[who, role.title.trim()].filter(Boolean).join(' · ')}`)
@@ -145,6 +147,18 @@ export function composeInstructions({ role, project, memories }: InstructionInpu
   if (project) {
     body.push(`【项目】${project.name}`)
     if (project.brief.trim()) body.push(`【项目背景】${clamp(project.brief.trim(), 1500)}`)
+    // 近况是动态的：只带最近几条，多了会把经验挤出预算
+    const lines = recent.map(r => r.trim()).filter(Boolean).slice(-8)
+    if (lines.length) {
+      const joined: string[] = []
+      let used = 0
+      for (const line of lines) {
+        if (used + line.length > 800) break
+        joined.push(`- ${line}`)
+        used += line.length + 1
+      }
+      if (joined.length) body.push(`【项目近况】\n${joined.join('\n')}`)
+    }
   }
 
   const base = assemble(head, body, []).length

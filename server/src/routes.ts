@@ -58,7 +58,8 @@ import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor
 import { dispatchBoard } from './board.ts'
 import { applyProfile, deleteProfile, findProfile, getProfile, listProfiles, saveProfile } from './profiles.ts'
 import { applyRole, deleteRole, findRole, getRole, listRoles, roleModel, saveRole } from './roles.ts'
-import { deleteProject, findProject, getProject, listProjects, saveProject } from './projects.ts'
+import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listProjects, pickProjectProfile, recentBrief, saveProject } from './projects.ts'
+import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
 import {
   ASSISTANT_TITLE,
@@ -75,6 +76,19 @@ import {
   resetThread,
   startThread,
 } from './assistant.ts'
+import {
+  PROPOSAL_TITLE,
+  generateProposal,
+  getProposal,
+  listProposals,
+  markProposal,
+  markRefineRun,
+  proposalPatch,
+  recordRefine,
+  refineMessage,
+  toChecklist,
+} from './proposals.ts'
+import { getManager, quota, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -99,6 +113,8 @@ export type RouteOptions = {
   queueDrainLimit?: number
   queueMaxAttempts?: number
   queueSweepIntervalMs?: number
+  /** 项目经理自动派发的巡检间隔（默认 60 秒） */
+  dispatchIntervalMs?: number
 }
 
 type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
@@ -289,12 +305,28 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
     return saveTask(pool, userId, patch, task.id)
   }
-  // 选了项目而任务还没挂配置：用项目的默认配置补齐执行环境（角色挂的配置优先，已填字段不覆盖）
+  // 选了项目而任务还没挂配置：项目只挂一套时直接带上；挂多套时留给派活按机器挑，
+  // 免得把任务钉在另一台电脑的目录上
   const projectDefaults = async (userId: number, task: Task, b: Record<string, unknown>): Promise<Task> => {
     if (!('projectId' in b) || task.projectId === null || task.profileId !== null) return task
     const project = await findProject(pool, userId, task.projectId)
-    if (!project || project.profileId === null) return task
-    return saveTask(pool, userId, { profileId: project.profileId }, task.id)
+    if (!project || project.profileIds.length !== 1) return task
+    return saveTask(pool, userId, { profileId: project.profileIds[0] }, task.id)
+  }
+  // 建任务的两条入口共用：「新建任务」和「确认处理意见」走的必须是同一套补值链——
+  // 角色决定执行工具并可带出自己的配置，项目补默认配置，配置再补齐字段与检查项模板。
+  // 分成两个入口各写一遍的话，从会话生成的任务和手建的任务迟早会长得不一样。
+  const createTaskWithDefaults = async (userId: number, body: Record<string, unknown>): Promise<Task> => {
+    let task = await saveTask(pool, userId, body)
+    task = await roleDefaults(userId, task, body)
+    task = await projectDefaults(userId, task, body)
+    if (task.profileId !== null) {
+      const profile = await getProfile(pool, userId, task.profileId)
+      const patch = await applyProfile(pool, userId, task, profile)
+      if (!('priority' in body) && profile.priority !== 'medium') patch.priority = profile.priority
+      task = await saveTask(pool, userId, patch, task.id)
+    }
+    return task
   }
   // 通知过滤管线：提醒广播和快照里的提醒都带 notify（静音的照常入列，只是不弹通知）
   const checkReminders = async (user?: number) => {
@@ -311,6 +343,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       for (const t of tasks) {
         const digest = await buildReviewDigest(pool,userId,t.id)
         if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
+        // 每个任务跑完都要有文档产物：这里用摘要兜底生成一份骨架，执行端以后交的会覆盖它
+        const artifact = await buildArtifact(pool,userId,t.id)
+        if (artifact) broadcast(userId,{type:'task.artifact',taskId:t.id,artifact})
+        // 同时往项目近况里记一句：下次派活时项目经理就知道这个项目刚做完什么
+        if (t.projectId !== null) {
+          await appendBrief(pool,userId,t.projectId,`「${t.title}」${summarize(digest?.lastReply ?? '','已完成',120)}`,t.id)
+        }
       }
     }
   }
@@ -346,6 +385,57 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       throw new TaskError('电脑端不在线',409)
     }
     return {runId,sessionId:pendingId,...(task ? {task} : {})}
+  }
+
+  // 派活编排：手动「开始」与项目经理自动派发共用这一条路径。
+  // 先算清「谁来做（角色/配置→执行工具与模型）、在哪做（电脑+目录）、说什么（首条消息）」，
+  // 电脑在线就立刻开跑，离线就入队等它上线（排队逻辑不变）。
+  // fallbackRoleId 只在任务自己没挂角色时兜底：项目经理派活时用它指定的那个角色。
+  const startTaskDispatch = async (userId: number, taskId: number, b: Record<string, unknown>, fallbackRoleId: number | null = null) => {
+    const task = await getTask(pool, userId, taskId)
+    // 任务是「谁来做」优先按角色定：角色可以指定执行工具、模型和上下文
+    const role = (await findRole(pool, userId, task.roleId)) ?? (await findRole(pool, userId, fallbackRoleId))
+    // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
+    const project = await findProject(pool, userId, task.projectId)
+    // 任务关联了配置但字段还空着（比如配置是后改的）：派活时用配置兜底；任务没选配置就用角色挂的那个
+    const explicitProfile = await findProfile(pool, userId, task.profileId)
+      ?? await findProfile(pool, userId, role?.profileId ?? null)
+    const online = agentList(userId)
+    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台（配置兜底放在后面）
+    let machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 4000)
+    // 项目可以挂多套配置（每台电脑一套），按这次要去的机器挑对应那套，目录才不会串设备
+    const profile = explicitProfile ?? await pickProjectProfile(pool, userId, project?.id ?? null, machine, online)
+    if (!machine && profile?.machine) machine = profile.machine
+    const agent = b.agent ?? role?.agent ?? task.agent ?? profile?.agent
+    if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
+    if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
+    const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录', 4000)
+    const text = taskText(b.text ?? (task.notes || task.title), '第一条消息', 8000)
+    // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
+    const memories = role ? await pickMemories(pool, userId, role.id, task.projectId) : []
+    // 项目近况：最近几条任务结论，让接手的人知道这个项目眼下到哪一步了
+    const recent = await recentBrief(pool, userId, task.projectId)
+    const instructions = composeInstructions({
+      role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
+      project,
+      recent,
+      memories: memories.map(m => m.content),
+    })
+    const dispatch = { model: roleModel(role), instructions }
+    // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么都定下来了）
+    if (!executors.has(execKey(userId, machine))) {
+      await enqueueDispatch(pool, userId, task.id, { machine, agent, cwd, text, ...dispatch })
+      const queued = await saveTask(pool, userId, { agent, machine, cwd }, task.id)
+      pushTask(userId, queued)
+      return { queued: true, task: queued }
+    }
+    // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
+    if (await dequeueDispatch(pool, userId, task.id)) pushTask(userId, await getTask(pool, userId, task.id))
+    const res = await startSession(userId, { agent, machine, cwd }, task.title, text, 'fresh', '', task.id, undefined, dispatch)
+    // 执行器太旧：模型和上下文会随 run.start 发过去但被忽略，得让用户知道角色没真正生效
+    const degraded = !executors.get(execKey(userId, machine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
+    if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
+    return degraded ? { ...res, queued: false, roleDegraded: true } : { ...res, queued: false }
   }
 
   // 电脑上线后把排队的活按入队顺序投递；失败累计次数，超过上限就放弃并记录
@@ -435,6 +525,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
             : false
           pushSession(req.userId,r.session,notify)
           await syncTask(req.userId,r.session.id,r.session.state)
+          // 会话跑完：攒一条处理意见等人确认。补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，
+          // 否则「问角色」也会产出一条待办，细化还会无限套娃。
+          if (r.session.state === 'done' && !ev.quiet &&
+              !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
+            const proposal = await generateProposal(pool, req.userId, r.session, r.session.eventAt)
+              .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
+            if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+          }
           // Watchdog：反复失败达到阈值时提醒一次（running 清零计数）
           if ((ev.state === 'aborted' || ev.state === 'running') && !ev.quiet &&
               spree.record(req.userId, r.session.id, ev.state)) {
@@ -650,6 +748,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.get('/projects/:id', async req => serial(async () => ({
     project: await getProject(pool, req.userId, entityId((req.params as {id:string}).id)),
   })))
+  // 项目近况：任务完成时自动追加，也可人手写一条/删掉写错的。派活时取最近几条注入提示
+  app.get('/projects/:id/brief', async req => serial(async () => ({
+    entries: await listBrief(pool, req.userId, entityId((req.params as {id:string}).id)),
+  })))
+  app.post('/projects/:id/brief', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getProject(pool, req.userId, id)
+    const b = object(req.body ?? {})
+    await appendBrief(pool, req.userId, id, taskText(b.text, '近况', 240))
+    return { entries: await listBrief(pool, req.userId, id) }
+  }))
+  app.delete('/projects/:id/brief/:entryId', async req => serial(async () => {
+    const p = req.params as {id:string;entryId:string}
+    const id = entityId(p.id)
+    await deleteBrief(pool, req.userId, id, entityId(p.entryId))
+    return { entries: await listBrief(pool, req.userId, id) }
+  }))
   app.post('/goals', async req => serial(async () => {
     const goal = await saveGoal(pool,req.userId,req.body)
     broadcast(req.userId,{type:'goal',goal}); return {goal}
@@ -667,19 +782,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return {ok:true}
   }))
   app.post('/tasks', async req => serial(async () => {
-    const b = object(req.body ?? {})
-    let task = await saveTask(pool,req.userId,req.body)
-    // 选了角色：角色决定执行工具，并可带出自己的默认配置
-    task = await roleDefaults(req.userId, task, b)
-    // 选了项目而没挂配置：用项目的默认配置补上，下面这段就会把它展开
-    task = await projectDefaults(req.userId, task, b)
-    // 建任务时选了配置：空着的执行字段由配置补齐，检查项模板并入清单（优先级只在没显式指定时跟随）
-    if (task.profileId !== null) {
-      const profile = await getProfile(pool, req.userId, task.profileId)
-      const patch = await applyProfile(pool, req.userId, task, profile)
-      if (!('priority' in b) && profile.priority !== 'medium') patch.priority = profile.priority
-      task = await saveTask(pool, req.userId, patch, task.id)
-    }
+    // 三条补值链（角色 → 项目 → 配置）与「确认处理意见」共用，见 createTaskWithDefaults
+    const task = await createTaskWithDefaults(req.userId, object(req.body ?? {}))
     pushTask(req.userId,task); return {task}
   }))
   app.patch('/tasks/:id', async req => serial(async () => {
@@ -697,6 +801,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 标记完成时收尾手动计时的执行记录，日历才能看到真实的结束时间
     if ((req.body as {status?:unknown}|null)?.status === 'done')
       for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
+    // 手动推进到待验收/已完成也补一份产物：不依赖会话事件，「每个任务都有文档」才成立
+    if (b.status === 'review' || b.status === 'done') {
+      const artifact = await buildArtifact(pool,req.userId,id)
+      if (artifact) broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
+      // 项目近况：同一任务只记一条（唯一索引兜住），已由会话完成写过时这里不会重复
+      if (b.status === 'done' && task.projectId !== null) await appendBrief(pool,req.userId,task.projectId,`「${task.title}」已完成`,id)
+    }
     pushTask(req.userId,task); return {task}
   }))
   app.delete('/tasks/:id', async req => serial(async () => {
@@ -732,6 +843,39 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await getTask(pool,req.userId,id)
     return getDigests(pool,req.userId,id)
   }))
+  // 任务产物：跑完自动生成一份 Markdown 骨架，人可改、可重建、可删。path 是导出时建议的文件名
+  app.get('/tasks/:id/artifact', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const task = await getTask(pool,req.userId,id)
+    // 老任务没赶上自动生成：打开时补一次，人改过的不会被覆盖
+    const artifact = await getArtifact(pool,req.userId,id) ?? await buildArtifact(pool,req.userId,id)
+    return { artifact, path: artifactPath(id, task.title) }
+  }))
+  app.patch('/tasks/:id/artifact', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    const b = object(req.body ?? {})
+    if (typeof b.md !== 'string') throw new TaskError('产物内容必须是文本')
+    const artifact = await saveArtifact(pool,req.userId,id,b.md)
+    broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
+    return { artifact }
+  }))
+  // 重建：会用最新的会话材料覆盖骨架。人改过的要显式 force 才覆盖
+  app.post('/tasks/:id/artifact/rebuild', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const task = await getTask(pool,req.userId,id)
+    const b = object(req.body ?? {})
+    const artifact = await buildArtifact(pool,req.userId,id,{ force: b.force === true })
+    if (!artifact) throw new TaskError('这个任务还没有可整理的材料', 409)
+    broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
+    return { artifact, path: artifactPath(id, task.title) }
+  }))
+  app.delete('/tasks/:id/artifact', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    await deleteArtifact(pool,req.userId,id)
+    return { ok: true }
+  }))
   // Thread 视图：任务 = 统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要）
   app.get('/threads/task/:id', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
@@ -766,46 +910,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const task = await linkSession(pool,req.userId,entityId(p.id),p.sessionId,true)
     pushTask(req.userId,task); return {task}
   }))
-  app.post('/tasks/:id/start', async req => serial(async () => {
-    const task = await getTask(pool,req.userId,entityId((req.params as {id:string}).id)), b = object(req.body ?? {})
-    // 任务是「谁来做」优先按角色定：角色可以指定执行工具、模型和上下文
-    const role = await findRole(pool, req.userId, task.roleId)
-    // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
-    const project = await findProject(pool, req.userId, task.projectId)
-    // 任务关联了配置但字段还空着（比如配置是后改的）：派活时用配置兜底；任务没选配置就用角色/项目挂的那个
-    const profile = await findProfile(pool, req.userId, task.profileId)
-      ?? await findProfile(pool, req.userId, role?.profileId ?? null)
-      ?? await findProfile(pool, req.userId, project?.profileId ?? null)
-    const agent = b.agent ?? role?.agent ?? task.agent ?? profile?.agent
-    if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
-    if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
-    const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录',4000)
-    const online = agentList(req.userId)
-    const machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''),'电脑名',4000)
-    const text = taskText(b.text ?? (task.notes || task.title),'第一条消息',8000)
-    // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
-    const memories = role ? await pickMemories(pool, req.userId, role.id, task.projectId) : []
-    const instructions = composeInstructions({
-      role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
-      project,
-      memories: memories.map(m => m.content),
-    })
-    const dispatch = { model: roleModel(role), instructions }
-    // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么都定下来了）
-    if (!executors.has(execKey(req.userId,machine))) {
-      await enqueueDispatch(pool, req.userId, task.id, { machine, agent, cwd, text, ...dispatch })
-      const queued = await saveTask(pool, req.userId, { agent, machine, cwd }, task.id)
-      pushTask(req.userId, queued)
-      return { queued: true, task: queued }
-    }
-    // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
-    if (await dequeueDispatch(pool, req.userId, task.id)) pushTask(req.userId, await getTask(pool, req.userId, task.id))
-    const res = await startSession(req.userId,{agent,machine,cwd},task.title,text,'fresh','',task.id,undefined,dispatch)
-    // 执行器太旧：模型和上下文会随 run.start 发过去但被忽略，得让用户知道角色没真正生效
-    const degraded = !executors.get(execKey(req.userId,machine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
-    if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
-    return degraded ? { ...res, roleDegraded: true } : res
-  }))
+  app.post('/tasks/:id/start', async req => serial(async () =>
+    startTaskDispatch(req.userId, entityId((req.params as {id:string}).id), object(req.body ?? {}))))
   app.delete('/tasks/:id/queue', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
     await getTask(pool,req.userId,id)
@@ -813,6 +919,118 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const task = await getTask(pool,req.userId,id)
     pushTask(req.userId,task); return {task}
   }))
+  // ---------- 处理意见：会话跑完 → 攒一件事 → 人确认才建任务 ----------
+  // 意见挂在会话上（会话可能还没挂任务），确认后才变成任务；生成与确认都不改会话本身。
+  app.get('/proposals', async req => {
+    const q = req.query as { sessionId?: string; limit?: string }
+    const sessionId = typeof q.sessionId === 'string' && q.sessionId ? q.sessionId : undefined
+    const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '50', 10) || 50, 1), 200)
+    return { proposals: await listProposals(pool, req.userId, { sessionId, limit }) }
+  })
+  // 细化：借电脑上已登录的 agent 重写这份意见。和角色助手同一条通道，服务端仍然没有模型凭据。
+  app.post('/proposals/:id/refine', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const proposal = await getProposal(pool, req.userId, id)
+    if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
+    const b = object(req.body ?? {})
+    const session = await getSession(pool, req.userId, proposal.sessionId)
+    const online = agentList(req.userId)
+    const machine = taskText(b.machine ?? session?.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 200)
+    if (!executors.has(execKey(req.userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
+    const manager = await getManager(pool, req.userId)
+    const role = await findRole(pool, req.userId, manager.roleId)
+    // 谁来判断：优先用项目经理角色配的执行工具；没配就跟着原会话那台用同一个工具
+    const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode'
+      ? role.agent
+      : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode') ? session.agent : 'claude')
+    const [msgs, task, roles, projects] = await Promise.all([
+      listMessages(pool, req.userId, proposal.sessionId, 8),
+      proposal.taskId === null ? Promise.resolve(null) : getTask(pool, req.userId, proposal.taskId).catch(() => null),
+      listRoles(pool, req.userId),
+      listProjects(pool, req.userId),
+    ])
+    const prompt = refineMessage({
+      sessionTitle: proposal.sessionTitle,
+      agent: proposal.sessionAgent,
+      project: proposal.sessionProject,
+      task: task ? { title: task.title, notes: task.notes, todo: task.checklist.filter(i => !i.done).map(i => i.text) } : null,
+      tail: msgs.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => ({ role: m.role, text: m.text })),
+      evidence: proposal.evidence,
+      draft: {
+        title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
+        // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
+        assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
+      },
+      roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
+      projects: projects.map(p => ({ id: p.id, name: p.name })),
+    })
+    // 项目经理自己的上下文就是它做判断的准则，拼在首条消息前面（与派活时的系统提示同源）
+    const brief = role?.context ? `${role.context}\n\n${prompt}` : prompt
+    const res = await startSession(
+      req.userId, { agent, machine, cwd: session?.cwd ?? '' },
+      `${PROPOSAL_TITLE}${proposal.title.slice(0, 40)}`, prompt, 'fresh', '', undefined, undefined, undefined, brief,
+    )
+    await markRefineRun(pool, req.userId, id, res.runId)
+    return { runId: res.runId }
+  }))
+  // 确认：这张任务单已经是「谁做、在哪做、做什么」都齐了的，确认即落库。
+  // 默认顺手派发（人点了确认就是要它开始）；dispatch:false 表示只建任务，留着以后自己派或交给项目经理。
+  app.post('/proposals/:id/confirm', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const proposal = await getProposal(pool, req.userId, id)
+    if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
+    const b = object(req.body ?? {})
+    const patch = proposalPatch(b)
+    // 执行人优先取项目经理排好的（角色 + 配置），界面改了哪个字段就按界面的来。
+    // 配置只带「明确指派过的那一套」：项目兜底配置留给派发时按在线机器挑，别把任务钉在离线的电脑上。
+    const body: Record<string, unknown> = {
+      title: proposal.title,
+      notes: proposal.notes,
+      priority: proposal.priority,
+      roleId: proposal.assignee.roleId,
+      projectId: proposal.projectId,
+      profileId: proposal.profileId,
+      checklist: toChecklist(proposal.checklist),
+    }
+    // 清单传的是文本数组，转成任务的 {id,text,done}
+    for (const [k, v] of Object.entries(patch)) {
+      body[k] = k === 'checklist'
+        ? toChecklist(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [])
+        : v
+    }
+    const task = await createTaskWithDefaults(req.userId, body)
+    const linked = await linkSession(pool, req.userId, task.id, proposal.sessionId)
+    await markProposal(pool, req.userId, id, 'accepted', task.id)
+    pushTask(req.userId, linked)
+    // 派发失败不影响任务已建好这件事，把原因带回去让界面提示
+    let dispatched: { queued: boolean } | null = null
+    let dispatchError = ''
+    if (b.dispatch !== false) {
+      try { dispatched = await startTaskDispatch(req.userId, linked.id, {}) }
+      catch (e) { dispatchError = e instanceof Error ? e.message : String(e) }
+    }
+    return { task: await getTask(pool, req.userId, linked.id), proposal: await getProposal(pool, req.userId, id), dispatched, dispatchError }
+  }))
+  app.post('/proposals/:id/discard', async req => serial(async () => ({
+    proposal: await markProposal(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded'),
+  })))
+
+  // ---------- 项目经理：全局一个，负责细化意见 + （可选）自动派发已确认的任务 ----------
+  app.get('/dispatch/manager', async req => serial(async () => {
+    const manager = await getManager(pool, req.userId)
+    const [roles, running, recent] = await Promise.all([
+      listRoles(pool, req.userId),
+      runningCount(pool, req.userId),
+      recentAutoCount(pool, req.userId),
+    ])
+    return { manager, roles, running, recent, quota: quota(manager, running, recent) }
+  }))
+  app.patch('/dispatch/manager', async req => serial(async () => {
+    const manager = await saveManager(pool, req.userId, req.body)
+    const [running, recent] = await Promise.all([runningCount(pool, req.userId), recentAutoCount(pool, req.userId)])
+    return { manager, running, recent, quota: quota(manager, running, recent) }
+  }))
+
   // 派活看板：排队中 / 在跑 / 卡住（进行中无运行）的任务聚到一张板上
   app.get('/dispatch/board', async req => serial(async () =>
     dispatchBoard(pool, req.userId, agentList(req.userId))))
@@ -1134,6 +1352,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (role === 'assistant') {
           const draft = await recordReply(pool, userId, run.id, saved.id, saved.text).catch(() => null)
           if (draft) broadcast(userId, { type: 'assistant.draft', draft })
+          // 处理意见细化：这条回复属于某条待细化的意见就就地更新（明确 skip 的意见会被关掉）
+          const refined = await recordRefine(pool, userId, run.id, saved.text).catch(() => null)
+          if (refined) {
+            broadcast(userId, { type: 'proposal', proposal: refined.proposal })
+            if (refined.action === 'skipped') broadcast(userId, { type: 'proposal.skipped', proposal: refined.proposal })
+          }
         }
         return
       }
@@ -1287,11 +1511,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     })().catch(e => app.log.error(e, '清理过期排队派发失败'))
   }, opts.queueSweepIntervalMs ?? 60_000)
   queueTimer.unref()
+  // 项目经理：定期看有没有「人已确认、还没派出去」的任务。挑活与限额在 dispatch-manager 里，
+  // 这里只把派发动作注入进去（和手动「开始」走同一个 startTaskDispatch）。
+  // 跑在 serial 链里：避免和手动派发、事件处理同时抢同一个任务。
+  const dispatchTimer = setInterval(() => {
+    void serial(() => runDispatchTick({
+      pool,
+      dispatch: (userId, taskId, fallbackRoleId) => startTaskDispatch(userId, taskId, {}, fallbackRoleId),
+    })).then(r => {
+      if (r.dispatched || r.failed) app.log.info(r, '项目经理自动派发')
+    }).catch(e => app.log.error(e, '自动派发失败'))
+  }, opts.dispatchIntervalMs ?? 60_000)
+  dispatchTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
     clearInterval(reminderTimer)
     clearInterval(watchdogTimer)
     clearInterval(queueTimer)
+    clearInterval(dispatchTimer)
     for (const c of clients) c.sock.close()
     for (const c of executors.values()) c.sock.close()
   })

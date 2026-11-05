@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api, type Device, type NotifyKind, type NotifySettings } from "./lib/api";
 import Profiles from "./Profiles";
+import Manager from "./Manager";
 import Roles from "./Roles";
 import Projects from "./Projects";
 import Icon from "./Icon";
@@ -73,7 +74,7 @@ type Props = {
 };
 
 /** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
-type Page = "root" | "account" | "notify" | "roles" | "projects" | "profiles" | "desktop" | "android";
+type Page = "root" | "account" | "notify" | "roles" | "projects" | "profiles" | "manager" | "desktop" | "android";
 
 const PAGE_TITLE: Record<Exclude<Page, "root">, string> = {
   account: "账号与安全",
@@ -81,6 +82,7 @@ const PAGE_TITLE: Record<Exclude<Page, "root">, string> = {
   roles: "角色",
   projects: "项目",
   profiles: "项目配置",
+  manager: "项目经理",
   desktop: "本机执行与采集",
   android: "Android 后台提醒",
 };
@@ -396,6 +398,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               <SettingsRow icon="people" title="角色" summary="执行工具、模型与上下文，按项目攒经验" badge={countText(counts?.roles, "个")} onClick={() => setPage("roles")} />
               <SettingsRow icon="folder" title="项目" summary="项目说明与约定，派活时带给执行端" badge={countText(counts?.projects, "个")} onClick={() => setPage("projects")} />
               <SettingsRow icon="sliders" title="项目配置" summary="电脑、目录、默认优先级与检查项模板" badge={countText(counts?.profiles, "个")} onClick={() => setPage("profiles")} />
+              <SettingsRow icon="board" title="项目经理" summary="把处理意见排成任务单，按限额派出确认过的任务" onClick={() => setPage("manager")} />
             </ul>
 
             {(isDesktop || isAndroid) && (
@@ -559,6 +562,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
         {page === "projects" && api && <Projects api={api} />}
 
         {page === "profiles" && api && <Profiles api={api} />}
+
+        {page === "manager" && api && <Manager api={api} />}
 
         {page === "desktop" && isDesktop && (
           <>

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isRunActive, type Api, type Approval, type Message, type Run, type Session, type Task } from "./lib/api";
+import { isRunActive, type Api, type Approval, type Message, type Project, type Proposal, type Role, type Run, type Session, type Task } from "./lib/api";
 import { desktop, isAndroid, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
 import MessageActions from "./MessageActions";
+import ProposalCard from "./ProposalCard";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
@@ -40,6 +41,13 @@ type Props = {
   tasks: Task[];
   onTask(id:number):void;
   onTaskSaved(task:Task):void;
+  /** 这条会话的处理意见（含已处理过的，用来显示「已生成任务」） */
+  proposals: Proposal[];
+  roles: Role[];
+  projects: Project[];
+  /** 项目经理开了自动派发：卡片上多一个「生成并派发」 */
+  autoDispatch: boolean;
+  onProposal(p: Proposal): void;
 };
 
 /** 不能发消息的原因与各种阻塞判定，见 lib/sendBlock（纯逻辑，单独测试） */
@@ -68,11 +76,13 @@ const parseQuestions = (detail: string): UserQuestion[] | null => {
   }
 };
 
-export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved }: Props) {
+export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, roles, projects, autoDispatch, onProposal }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
+  // 任务单一次只处理一张，避免连点生成两个任务
+  const [proposalBusy, setProposalBusy] = useState(false);
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
@@ -424,6 +434,16 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           ))}
         </ul>
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
+        {/* 任务单：会话跑完后由项目经理排好「做什么、谁来做、在哪做」，等人确认 */}
+        {proposals.length > 0 && (
+          <section className="proposal-list" aria-label="项目经理的任务单">
+            {proposals.map(p => (
+              <ProposalCard key={p.id} api={api} proposal={p} roles={roles} projects={projects}
+                autoDispatch={autoDispatch} busy={proposalBusy} onBusy={setProposalBusy}
+                onError={setErr} onChanged={onProposal} onTask={onTaskSaved} />
+            ))}
+          </section>
+        )}
       </main>
       {/* 底部确认面板：待确认请求从屏幕底部弹出（参考 WorkBuddy），可收起为浮动徽标 */}
       {approvals.length > 0 && !sheetOpen && (

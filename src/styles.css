@@ -601,6 +601,18 @@ header h1 { white-space: nowrap; }
 .profile-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .profile-card label { font-size: 13px; }
 
+/* 项目挂多套配置：一格一套，勾选即挂上 */
+.profile-picks { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.profile-picks-head { grid-column: 1 / -1; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; font-weight: 550; }
+.profile-picks-head .dim { font-weight: 400; font-size: 12px; }
+.profile-picks .pick { display: flex; flex-direction: row; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); cursor: pointer; min-width: 0; }
+.profile-picks .pick.on { border-color: var(--accent); }
+.profile-picks .pick input { width: 18px; height: 18px; margin: 2px 0 0; flex-shrink: 0; }
+.pick-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.pick-main strong { font-size: 13px; }
+.pick-main .dim { font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 560px) { .profile-picks { grid-template-columns: 1fr; } }
+
 /* 角色列表：默认收起成一行摘要，点开才编辑 */
 .role-head { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 0; padding: 2px 0; border: 0; border-radius: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .role-head strong { flex-shrink: 0; }
@@ -675,3 +687,41 @@ header h1 { white-space: nowrap; }
   .assistant-send .dim { display: none; }
   .assistant-send button { flex: 1; }
 }
+
+/* 任务单：会话跑完后项目经理排的活。比消息重、比任务详情轻，确认前就能改 */
+.proposal-list { display: flex; flex-direction: column; gap: 14px; margin: 18px 0 8px; }
+.proposal-card { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: var(--shadow); }
+.proposal-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.proposal-head strong { font-size: 14px; }
+.proposal-origin { margin-left: auto; font-size: 12px; }
+.proposal-kind { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+.proposal-kind.fix { background: var(--priority-high-bg); color: var(--priority-high); }
+.proposal-kind.continue { background: var(--ok-bg); color: var(--ok); }
+.proposal-assignee { margin: 0 0 12px; padding: 12px; border-radius: 12px; background: var(--field); }
+.proposal-assignee .form-grid { gap: 12px; }
+.proposal-place { margin: 8px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.proposal-card > label { display: block; margin-bottom: 10px; }
+.proposal-evidence { margin: 4px 0 10px; }
+.proposal-evidence ul { margin: 8px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; }
+.proposal-verdict { margin: 14px 0 4px; padding: 10px 14px; border-radius: 12px; background: var(--ok-bg); color: var(--ok); font-size: 13px; }
+.proposal-verdict.dim { background: var(--field); color: var(--dim); }
+@media (max-width: 560px) {
+  .proposal-card { padding: 12px; }
+  .proposal-origin { margin-left: 0; }
+}
+
+/* 任务产物：一份可直接读、可编辑、可导出的 Markdown。等宽字体 + 自动换行，长行不横滚 */
+.artifact-md { margin: 0 0 12px; padding: 14px 16px; max-height: 460px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--field); color: var(--fg); font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.artifact-edit textarea { min-height: 320px; font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.artifact-edit .action-bar { margin-top: 10px; }
+
+/* 项目近况：一条一行、时间在左，长文本自动换行 */
+.brief { margin: 12px 0; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--field); }
+.brief summary { cursor: pointer; font-weight: 550; display: flex; gap: 10px; flex-wrap: wrap; align-items: baseline; }
+.brief summary .dim { font-weight: 400; font-size: 12px; }
+.brief-list { list-style: none; margin: 10px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.brief-list li { display: flex; gap: 10px; align-items: baseline; font-size: 13px; }
+.brief-list .dim { flex-shrink: 0; font-size: 12px; }
+.brief-text { flex: 1; overflow-wrap: anywhere; }
+.brief-add { display: flex; gap: 8px; }
+.brief-add input { flex: 1; }

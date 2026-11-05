@@ -10,6 +10,9 @@ import { migrateRoles } from './roles.ts'
 import { migrateProjects } from './projects.ts'
 import { migrateMemories } from './memories.ts'
 import { migrateAssistant } from './assistant.ts'
+import { migrateProposals } from './proposals.ts'
+import { migrateArtifacts } from './artifacts.ts'
+import { migrateDispatchManager } from './dispatch-manager.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -202,6 +205,11 @@ export async function migrate(pool: pg.Pool) {
     await migrateMemories(client)
     // 角色助手的草稿引用 roles，排在最后
     await migrateAssistant(client)
+    // 处理意见挂在会话上（不设外键：会话被清理后意见仍可追溯），自动派发配置引用 roles
+    await migrateProposals(client)
+    await migrateDispatchManager(client)
+    // 任务产物引用 tasks；项目近况的表在 migrateProjects 里一起建（同属项目上下文）
+    await migrateArtifacts(client)
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()
