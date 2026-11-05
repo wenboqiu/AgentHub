@@ -225,7 +225,10 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .spawn-panel > h2 { margin-top:0; color:var(--fg); }
 .msg { max-width: min(85%,960px); padding: 16px 20px; border-radius: 22px; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--card); line-height: 1.7; }
 .msg.user { align-self: flex-end; background: var(--accent); color: var(--on-accent); border-bottom-right-radius: 7px; }
-.msg.assistant { align-self: flex-start; border-bottom-left-radius: 7px; }
+/* 对话流对齐 WorkBuddy：只有用户消息是气泡，assistant 回复平铺直书，不套框 */
+.msg.assistant { align-self: flex-start; background: transparent; border-radius: 0; padding: 0; }
+.message-entry.assistant > .msg-time { margin: 4px 0 0; }
+.message-entry.assistant .msg-image { margin-top: 8px; }
 .msg.tool, .msg.system { align-self: flex-start; max-width: 100%; background: transparent; padding: 0 4px; font-size: 12px; color: var(--dim); }
 .msg.tool { font-family: ui-monospace, Consolas, monospace; }
 .msg.approval { align-self: stretch; max-width: 100%; background: var(--alert-bg); color: var(--alert); font-size: 14px; }
@@ -664,7 +667,7 @@ header h1 { white-space: nowrap; }
 .box-head h2 { margin: 12px 4px; }
 
 /* 角色助手：对话 + 草稿卡。agent 出 JSON，人确认才落库 */
-.assistant { margin: 4px 0 20px; padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--field); }
+/* 注意：不能有裸 `.assistant` 选择器——对话流消息的 li 也带 assistant 类，会被误加边框底色 */
 .assistant-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .assistant-head h2 { margin: 0; font-size: 15px; color: var(--fg); font-weight: 620; }
 .assistant-actions { display: flex; gap: 8px; }
