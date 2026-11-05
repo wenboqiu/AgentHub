@@ -767,8 +767,30 @@ pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<crate::mess
             Ok(crate::message_history::parse("codex", &text, HISTORY_COUNT))
         }
         "zcode" => crate::zcode_exec::history(key, HISTORY_COUNT).ok_or("没找到这个会话的本地记录".into()),
+        // WorkBuddy 只读不聊，但 transcript 里正文齐全：按 sessionId 在各工作区目录下找 {key}.jsonl
+        "workbuddy" => {
+            let p = find_workbuddy_transcript(&home.join(".workbuddy").join("projects"), key).ok_or("没找到这个会话的本地记录")?;
+            let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
+            Ok(crate::message_history::parse("workbuddy", &text, HISTORY_COUNT))
+        }
         _ => Err("不认识的 agent".into()),
     }
+}
+
+/// WorkBuddy 的 transcript 按 `projects\<工作区>\<sessionId>.jsonl` 存放，工作区名不可控，
+/// 只能逐个目录找文件名；key 先过 valid_key 防路径注入（与 claude 同一规则）
+fn find_workbuddy_transcript(projects: &Path, key: &str) -> Option<PathBuf> {
+    if !valid_key(key) {
+        return None;
+    }
+    let file = format!("{key}.jsonl");
+    for ws in std::fs::read_dir(projects).ok()?.flatten() {
+        let p = ws.path().join(&file);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------- 进程辅助
@@ -2513,6 +2535,13 @@ mod tests {
         std::fs::write(day.join("rollout-2026-10-31T10-00-00-aaaa-bbbb.jsonl"), "z").unwrap();
         assert!(find_codex_rollout(&d.join("sessions"), "aaaa-bbbb").is_some());
         assert!(find_codex_rollout(&d.join("sessions"), "cccc").is_none());
+        // WorkBuddy：projects 下逐个工作区找 {sessionId}.jsonl；key 不可信时直接拒绝
+        let wb = d.join("wb-projects");
+        std::fs::create_dir_all(wb.join("workspace-a")).unwrap();
+        std::fs::write(wb.join("workspace-a").join("sess-1.jsonl"), "w").unwrap();
+        assert!(find_workbuddy_transcript(&wb, "sess-1").unwrap().ends_with("sess-1.jsonl"));
+        assert!(find_workbuddy_transcript(&wb, "missing").is_none());
+        assert!(find_workbuddy_transcript(&wb, "..\\evil").is_none());
         // 读末尾：丢掉被截断的第一行
         let f = d.join("t.jsonl");
         std::fs::write(&f, "line1\nline2\nline3\n").unwrap();

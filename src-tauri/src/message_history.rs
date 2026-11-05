@@ -1,5 +1,6 @@
 //! Preserve native message identity and completed branch boundaries in history.
 use crate::runner::{truncate_history_text, valid_key};
+use chrono::TimeZone;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -18,7 +19,15 @@ pub struct HistoryMessage {
 
 fn key(v: &Value) -> Option<String> { v.as_str().filter(|s| valid_key(s)).map(String::from) }
 fn at(v: &Value) -> Option<String> {
-    v["timestamp"].as_str().filter(|s| !s.trim().is_empty()).map(String::from)
+    if let Some(s) = v["timestamp"].as_str().filter(|s| !s.trim().is_empty()) {
+        return Some(s.to_owned());
+    }
+    // WorkBuddy transcript 的 timestamp 是毫秒数字（Claude/Codex 是 ISO 字符串）
+    let ms = v["timestamp"].as_i64()?;
+    chrono::Local
+        .timestamp_millis_opt(ms)
+        .single()
+        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Millis, false))
 }
 fn text(v: &Value) -> String {
     if let Some(s) = v.as_str() { return s.to_owned(); }
@@ -27,6 +36,9 @@ fn text(v: &Value) -> String {
 }
 
 pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
+    if agent == "workbuddy" {
+        return parse_workbuddy(data, limit);
+    }
     let mut messages: Vec<HistoryMessage> = Vec::new();
     let mut turn: Option<String> = None;
     let mut final_index: Option<usize> = None;
@@ -68,9 +80,84 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
     messages
 }
 
+/// WorkBuddy transcript（`~\.workbuddy\projects\…\<sessionId>.jsonl`）：
+/// 每行 `{"type":"message","role":"user"|"assistant","status":…,"timestamp":毫秒,"content":[{type:"input_text"|"output_text",…}]}`
+/// 正文齐全但没有消息 id，分支能力用不上（workbuddy 本就只读），source/branch 留空。
+/// 注入块处理与 workbuddy.rs 的 user_text 同规则：剥 system-reminder / user_query 包裹，纯注入消息跳过。
+fn parse_workbuddy(data: &str, limit: usize) -> Vec<HistoryMessage> {
+    let mut messages: Vec<HistoryMessage> = Vec::new();
+    for line in data.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        if v["type"] != "message" { continue; }
+        let Some(role) = v["role"].as_str().filter(|r| matches!(*r, "user" | "assistant")) else { continue };
+        let mut content = text(&v["content"]);
+        if role == "user" {
+            if let Some(i) = content.rfind("</system-reminder>") {
+                content = content[i + "</system-reminder>".len()..].to_owned();
+            }
+            content = content.trim_start_matches(['>', ' ', '\n', '\t']).to_owned();
+            if let Some(rest) = content.strip_prefix("<user_query>") {
+                if let Some(end) = rest.rfind("</user_query>") {
+                    content = rest[..end].to_owned();
+                }
+            }
+            // 剩下的还是注入块（cb_summary / task-notification 等），不当用户消息
+            if content.trim_start().starts_with('<') { continue; }
+        }
+        if content.trim().is_empty() { continue; }
+        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: None, branch_point: None, at: at(&v) });
+    }
+    let n = messages.len().saturating_sub(limit);
+    messages.drain(..n);
+    messages
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workbuddy_keeps_visible_text_and_drops_injections() {
+        let wrapped = serde_json::json!({
+            "type":"message","role":"user","status":"completed","timestamp":1_793_590_000_000i64,
+            "content":[{"type":"input_text","text":"<system-reminder data-role=\"user-context\">注入</system-reminder>\n> <user_query>真正的提问</user_query>"}]
+        })
+        .to_string();
+        let injected = serde_json::json!({
+            "type":"message","role":"user","status":"completed","timestamp":1_793_590_000_001i64,
+            "content":[{"type":"input_text","text":"<cb_summary> Summary of the conversation"}]
+        })
+        .to_string();
+        let answer = serde_json::json!({
+            "type":"message","role":"assistant","status":"completed","timestamp":1_793_590_000_002i64,
+            "content":[{"type":"output_text","text":"好的"}]
+        })
+        .to_string();
+        let meta = serde_json::json!({"type":"session-meta","sessionId":"abc","timestamp":1}).to_string();
+        let generating = serde_json::json!({
+            "type":"message","role":"assistant","status":"generating","timestamp":1_793_590_000_003i64,
+            "content":[{"type":"output_text","text":""}]
+        })
+        .to_string();
+        let messages = parse("workbuddy", &format!("{wrapped}\n{injected}\n{answer}\n{meta}\n{generating}"), 50);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "真正的提问");
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].source_id, None);
+        assert_eq!(messages[0].branch_point, None);
+        assert_eq!(messages[1].text, "好的");
+        // 毫秒时间戳转成 ISO，且保留原始先后顺序
+        assert!(messages[0].at.as_deref().is_some_and(|s| s.starts_with("2026-")));
+        assert!(messages[1].at.as_deref().is_some_and(|s| s.starts_with("2026-")));
+        // limit 生效
+        assert_eq!(parse("workbuddy", &format!("{wrapped}\n{answer}"), 1).len(), 1);
+    }
+
+    #[test]
+    fn claude_timestamps_stay_strings() {
+        let data = r#"{"type":"user","uuid":"u1","timestamp":"2026-11-02T01:10:00.000Z","message":{"content":"hi"}}"#;
+        assert_eq!(parse("claude", data, 50)[0].at.as_deref(), Some("2026-11-02T01:10:00.000Z"));
+    }
+
     #[test]
     fn claude_keeps_agenthub_terminal_inputs_when_history_is_refreshed() {
         let data = r#"{"type":"user","uuid":"from-agenthub","isMeta":true,"origin":{"kind":"peer","from":"AgentHub"},"message":{"content":"continue"}}

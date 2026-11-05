@@ -897,7 +897,6 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const session = await getSession(pool, userId, id)
     if (!session) return reply.code(404).send({ error: '会话不存在' })
     if (session.agent === 'doubao') return reply.code(409).send({ error: '豆包暂不支持读取完整对话记录' })
-    if (session.agent === 'workbuddy') return reply.code(409).send({ error: 'WorkBuddy 暂不支持读取完整对话记录' })
     if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     const requestId = randomUUID()
     const waiting = new Promise<HistoryResult | null>(resolve => {

@@ -118,11 +118,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   }, [api, bus, id]);
 
   // 打开详情页时自动从电脑上拉一次最新记录（服务端存的可能是旧的）；每个会话只自动拉一次
+  // WorkBuddy 只读不聊，但 transcript 在电脑上，历史照样能拉
   const online = !!session && agents.includes(session.machine);
   const [syncing, setSyncing] = useState(false);
   const autoLoaded = useRef("");
   useEffect(() => {
-    if (!id || !online || isListenOnly(session?.agent) || isPendingSession(id) || autoLoaded.current === id) return;
+    if (!id || !online || isPendingSession(id) || autoLoaded.current === id) return;
     autoLoaded.current = id;
     let gone = false;
     setSyncing(true);
@@ -315,7 +316,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const stop = () => run && guard("stop", () => api.stop(run.id));
   // 手动同步电脑上的记录；失败要提示（自动同步失败才静默保留旧记录）
   const loadHistory = () => {
-    if (syncing || !online || isListenOnly(session.agent)) return;
+    if (syncing || !online) return;
     let gone = false;
     setSyncing(true);
     setErr("");
@@ -353,7 +354,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <span className="spacer" />
         <span className="machine">
           <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
-          {!pendingSession && !isListenOnly(session.agent) && (
+          {!pendingSession && (
             <button
               className={`icon-button${syncing ? " spin" : ""}`}
               aria-label="刷新电脑上的记录"
@@ -405,7 +406,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       <main className="chat">
         {syncing && <p className="hint" role="status">正在同步电脑上的记录…</p>}
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `正在监听 ${agentName(session.agent)} 会话状态，暂不提供完整对话记录。请在 ${agentName(session.agent)} 中查看和继续对话。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
+        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。点右上角的刷新按钮从电脑上拉取 ${agentName(session.agent)} 的对话记录；继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>
@@ -415,7 +416,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
               {m.role==="assistant" && <MessageActions message={m} api={api}
-                branchReason={active || session.state==="running" ? "请等待会话运行结束" : !agents.includes(session.machine) ? "电脑端不在线" : !m.branchPoint ? "请刷新记录，或等待完整回复结束后再分支" : ""}
+                branchReason={isListenOnly(session.agent) ? `${agentName(session.agent)} 只读，暂不支持分支` : active || session.state==="running" ? "请等待会话运行结束" : !agents.includes(session.machine) ? "电脑端不在线" : !m.branchPoint ? "请刷新记录，或等待完整回复结束后再分支" : ""}
+                rateReason={isListenOnly(session.agent) && !m.sourceId ? "只读会话的记录暂不支持评价" : undefined}
                 onRated={updated=>setMessages(items=>items.map(item=>item.id===updated.id ? updated : item))}
                 onBranch={()=>{setBranchMessage(m);setSpawnText("");setSpawnOpen(true);window.scrollTo({top:0,behavior:"auto"});}}/>}
             </li>
