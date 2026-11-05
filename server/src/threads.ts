@@ -8,7 +8,8 @@ import { listMessages } from './db.ts'
 
 export type ThreadEvent =
   | { type: 'message'; at: string; sessionId: string; role: string; text: string; sourceId?: string }
-  | { type: 'run'; at: string; runId: string; status: string; error: string; title: string }
+  /** 一次执行拆成开始/结束两个节点：只留一个（结束时刻）看不出它跑了多久、和别的会话是否并行 */
+  | { type: 'run'; at: string; phase: 'start' | 'end'; runId: string; status: string; error: string; title: string; startedAt?: string }
   | { type: 'reminder'; at: string; kind: 'start' | 'due'; title: string; acked: boolean }
   | { type: 'digest'; at: string; kind: 'review' | 'failure'; text: string }
 
@@ -35,7 +36,13 @@ export async function taskThread(pool: pg.Pool, userId: number, taskId: number, 
       [userId, taskId, sessionIds.length ? sessionIds : ['__none__']],
     )
   ).rows
-  for (const r of runRows) events.push({ type: 'run', at: at(r.updated_at), runId: r.id, status: r.status, error: r.error, title: r.title })
+  for (const r of runRows) {
+    const startedAt = at(r.created_at)
+    const base = { type: 'run' as const, runId: r.id, status: r.status, error: r.error, title: r.title }
+    events.push({ ...base, phase: 'start', at: startedAt })
+    // 排队中／运行中还没有结束时刻，updated_at 只是最后一次状态变化，不当结束时间用
+    if (!['queued', 'running'].includes(r.status)) events.push({ ...base, phase: 'end', at: at(r.updated_at), startedAt })
+  }
   // 时间提醒（含已处理状态）
   const reminderRows = (
     await pool.query<{ kind: string; scheduled_at: Date; acked: boolean }>(

@@ -39,7 +39,7 @@ export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: str
 /** Thread 事件：任务视角的统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要） */
 export type ThreadEvent =
   | { type: "message"; at: string; sessionId: string; role: string; text: string; sourceId?: string }
-  | { type: "run"; at: string; runId: string; status: string; error: string; title: string }
+  | { type: "run"; at: string; phase: "start" | "end"; runId: string; status: string; error: string; title: string; startedAt?: string }
   | { type: "reminder"; at: string; kind: "start" | "due"; title: string; acked: boolean }
   | { type: "digest"; at: string; kind: "review" | "failure"; text: string };
 

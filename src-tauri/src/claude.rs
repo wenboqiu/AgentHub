@@ -1,6 +1,7 @@
 //! Claude Code：hook JSON -> 事件，transcript 末尾取摘要，hook 安装/卸载
 
-use crate::forwarder::Event;
+use crate::activity::{buckets_of, capped, tail_timestamps};
+use crate::forwarder::{Bucket, Event};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::io::{Read, Seek, SeekFrom};
@@ -12,6 +13,9 @@ const NOTIFY_MATCHER: &str = "permission_prompt|agent_needs_input|elicitation_di
 const NOTIFY_TYPES: [&str; 3] = ["permission_prompt", "agent_needs_input", "elicitation_dialog"];
 const EVENTS: [&str; 5] = ["SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"];
 const TAIL_BYTES: u64 = 256 * 1024;
+/// 活动桶回看窗口：hook 每次触发都重扫一遍，服务端对同一桶取 GREATEST，重复上报幂等
+const ACTIVITY_WINDOW_MS: i64 = 90 * 60_000;
+const ACTIVITY_BYTES: u64 = 2 * 1024 * 1024;
 
 pub fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -123,6 +127,20 @@ pub fn hook_to_event(v: &Value, pid: Option<u32>) -> Option<Event> {
 }
 
 // ---------- hook 安装 / 卸载 ----------
+
+/// 消息行算活动：Claude 的 transcript 里 user / assistant 行都带 timestamp
+fn is_activity_line(line: &str) -> bool {
+    (line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")) && line.contains("\"timestamp\":\"")
+}
+
+/// hook 只带状态，日历要的"活动分段"得从 transcript 里取。
+/// 每次 hook 触发时扫一遍文件尾部（最近 90 分钟），聚成 5 分钟桶随事件上报。
+pub fn activity_buckets(v: &Value) -> Vec<Bucket> {
+    let Some(path) = str_field(v, "transcript_path").filter(|p| !p.is_empty()) else { return Vec::new() };
+    let since = chrono::Utc::now().timestamp_millis() - ACTIVITY_WINDOW_MS;
+    let ms = tail_timestamps(Path::new(&path), ACTIVITY_BYTES, since, is_activity_line);
+    capped(buckets_of(&ms))
+}
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -334,6 +352,28 @@ mod tests {
         let v = json!({"hook_event_name":"Stop","session_id":"s","transcript_path":p.to_string_lossy()});
         let e = hook_to_event(&v, None).unwrap();
         assert_eq!(e.summary.unwrap().chars().count(), 300);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn hook_carries_recent_activity_from_transcript() {
+        let now = chrono::Utc::now();
+        let ts = |mins: i64| (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let dir = std::env::temp_dir().join(format!("agenthub-act-hook-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.jsonl");
+        let body = [
+            format!(r#"{{"type":"user","timestamp":"{}","message":{{"content":"旧问题"}}}}"#, ts(180)),
+            format!(r#"{{"type":"assistant","timestamp":"{}","message":{{"content":[{{"type":"text","text":"答"}}]}}}}"#, ts(3)),
+            format!(r#"{{"type":"user","timestamp":"{}","message":{{"content":"追问"}}}}"#, ts(1)),
+        ]
+        .join("\n");
+        std::fs::write(&p, body).unwrap();
+        let v = json!({"hook_event_name":"UserPromptSubmit","session_id":"s","transcript_path":p.to_string_lossy()});
+        // 90 分钟窗口外的活动不算，窗口内的两条落进桶里
+        assert_eq!(activity_buckets(&v).iter().map(|b| b.count).sum::<u32>(), 2);
+        // 没有 transcript_path 时不报错，也不上报
+        assert!(activity_buckets(&json!({"hook_event_name":"UserPromptSubmit"})).is_empty());
         let _ = std::fs::remove_dir_all(dir);
     }
 

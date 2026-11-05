@@ -10,14 +10,15 @@
 //! - 因此本模块只做状态与消息监听，不参与远程执行。
 
 use crate::{
+    activity::buckets_of,
     claude::{home_dir, now_iso, truncate_chars},
     codex::complete_prefix_len,
-    forwarder::{Bucket, Event, Forwarder},
+    forwarder::{Event, Forwarder},
 };
 use chrono::TimeZone;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -112,16 +113,6 @@ fn user_text(v: &Value) -> Option<String> {
     let flat = one_line(visible);
     // 剩下的还是注入块（<cb_summary>、<task-notification> 等）就不当标题
     (!flat.is_empty() && !flat.starts_with('<')).then_some(flat)
-}
-
-/// 时间戳聚合成 5 分钟桶，与服务端 session_activity 同粒度
-fn buckets_of(ms: &[i64]) -> Vec<Bucket> {
-    const BUCKET_MS: i64 = 5 * 60_000;
-    let mut m: BTreeMap<i64, u32> = BTreeMap::new();
-    for t in ms {
-        *m.entry(t.div_euclid(BUCKET_MS) * BUCKET_MS).or_insert(0) += 1;
-    }
-    m.into_iter().map(|(b, c)| Bucket { at: iso(b), count: c }).collect()
 }
 
 impl FileState {

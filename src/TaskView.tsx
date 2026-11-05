@@ -56,6 +56,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const digest: TaskDigests | null = liveDigest ?? fetchedDigest;
   const flash = () => { setSaved(true); window.clearTimeout(flashTimer.current); flashTimer.current = window.setTimeout(() => setSaved(false), 1600); };
   const elapsed = (iso: string) => { const s = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60); return h ? `${h} 小时 ${m} 分` : `${m} 分 ${s % 60} 秒`; };
+  /** 时间线里执行节点的耗时：只有两端都有才显示，不拿"现在"凑 */
+  const gap = (from: string, to: string) => { const s = Math.max(0, Math.round((Date.parse(to) - Date.parse(from)) / 1000)), h = Math.floor(s / 3600), m = Math.round(s % 3600 / 60); return h ? `${h} 小时 ${m} 分` : `${Math.max(1, m)} 分`; };
 
   const guard = async (fn: () => Promise<unknown>) => { setBusy(true); setErr(""); try { await fn(); flash(); } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); } };
   const patch = (v: TaskInput) => void guard(async () => onSaved(await api.updateTask(task.id, v)));
@@ -218,7 +220,9 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
               <span className="tl-time">{new Date(e.at).toLocaleString()}</span>
               <span className="tl-body">
                 {e.type === "message" && <>{ROLE_LABEL[e.role] ?? e.role}：{e.text.slice(0, 200)}</>}
-                {e.type === "run" && <>执行 {RUN_LABEL[e.status] ?? e.status}{e.error ? ` · ${e.error.slice(0, 120)}` : ""}</>}
+                {e.type === "run" && (e.phase === "start"
+                  ? <>开始执行{e.status === "queued" ? "（排队中）" : ""}</>
+                  : <>执行{RUN_LABEL[e.status] ?? e.status}{e.startedAt ? ` · 耗时 ${gap(e.startedAt, e.at)}` : ""}{e.error ? ` · ${e.error.slice(0, 120)}` : ""}</>)}
                 {e.type === "reminder" && <>{e.title}{e.acked ? "（已处理）" : ""}</>}
                 {e.type === "digest" && <>{e.kind === "failure" ? "失败上下文" : "验收摘要"}：{e.text.slice(0, 200) || "（无内容）"}</>}
               </span>

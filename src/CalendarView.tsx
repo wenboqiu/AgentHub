@@ -8,6 +8,12 @@ const DAY = 86_400_000;
 const BUCKET = 5 * 60_000;
 /** 相邻活动桶间隔不超过这个值就算同一段（中间没人动才断开） */
 const MERGE_GAP = 10 * 60_000;
+/**
+ * 超过这么久没有任何新活动，"进行中"就不再往当前时刻延伸。
+ * 状态是服务端最后收到的那条事件，AgentHub 没开／进程早死了也照样是 running，
+ * 一路延伸到 now 会凭空多出几小时；口径与服务端 Watchdog 的 45 分钟一致。
+ */
+const LIVE_GRACE = 45 * 60_000;
 const dateKey = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`;
 const hm = (iso: string) => { const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
 /** 毫秒时长转人话：不足 1 分钟 / X 分钟 / X 小时 Y 分 */
@@ -511,8 +517,8 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         : Array.from({ length: tickCount }, (_, i) => { const d = new Date(viewStart + i * tickMs); return <span key={i} className={dateKey(d) === today ? "today" : ""}>{`${pad(d.getHours())}:${pad(d.getMinutes())}`}</span>; })}</div>
       <div className="tl-legend">
         <span><i className="lg-plan" aria-hidden="true"/>计划</span>
-        <span><i className="lg-act" aria-hidden="true"/>实际执行</span>
-        <span><i className="lg-span" aria-hidden="true"/>对话跨度</span>
+        <span title="按消息时间戳聚成 5 分钟活动桶；桶间隔不超过 10 分钟合并成一段，因此时长是估算值"><i className="lg-act" aria-hidden="true"/>实际执行</span>
+        <span title="第一次活动到最后一次活动；同样按活动桶估算，进行中才延伸到当前时刻"><i className="lg-span" aria-hidden="true"/>对话跨度</span>
         <span><i className="lg-due" aria-hidden="true"/>截止</span>
         <span><i className="lg-done" aria-hidden="true"/>完成</span>
         <label className="tl-check" title="计划跨越当前视图、但完成时间更早的任务；在本视图内完成的始终显示"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)}/>显示已完成的旧任务</label>
@@ -573,9 +579,16 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
             e = e === null ? re : Math.max(e, re);
           }
           if (s === null) return null;
-          if (markerState?.cls === "running") e = Math.max(e ?? s, now);
-          return { start: s, end: Math.max(e ?? s, s + BUCKET) };
+          // 进行中才延伸到当前时刻；但"最后有证据的时刻"已经过去很久时，状态多半是残留的，
+          // 实线只画到最后活动，剩下的用虚线表示"不知道还在不在跑"（见下面的 unknown 段）
+          const live = markerState?.cls === "running";
+          const lastEvidence = e ?? s;
+          const stale = live && now - lastEvidence > LIVE_GRACE;
+          if (live && !stale) e = Math.max(lastEvidence, now);
+          return { start: s, end: Math.max(e ?? s, s + BUCKET), stale, lastEvidence };
         })() : null;
+        // 状态还挂着 running 但很久没有新活动：不再播"正在跑"的呼吸动画
+        const liveRunning = markerState?.cls === "running" && !span?.stale;
         return <div className={`tl-row${p ? " has-plan" : ""}`} key={row.key}>
           <span className="tl-label" title={row.label}>{row.label}</span>
           <div className={`tl-track${scale === "day" ? " hours" : ""}`}>
@@ -593,12 +606,20 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
               const left = pct(Math.max(viewStart, span.start));
               const right = pct(Math.min(viewEnd, span.end));
               const width = Math.max(0.8, right - left);
-              return <button className={`tl-span${markerState?.cls === "running" ? " running" : ""}`}
+              return <button className={`tl-span${liveRunning ? " running" : ""}${span.stale ? " stalled" : ""}`}
                 style={{ left: `${left}%`, width: `${width}%` }}
-                title={`对话跨度 ${hm(new Date(span.start).toISOString())}–${hm(new Date(span.end).toISOString())} · 跨度 ${durLabel(span.end - span.start)}`}
+                title={`对话跨度 ${hm(new Date(span.start).toISOString())}–${hm(new Date(span.end).toISOString())} · 约 ${durLabel(span.end - span.start)}（按 5 分钟活动桶估算）${span.stale ? "；状态仍是进行中，但已长时间没有新活动，按最后活动收尾" : ""}`}
                 onClick={() => sessionId && onOpenSession(sessionId)}>
-                {width > 10 && <span>{durLabel(span.end - span.start)}</span>}
+                {width > 10 && <span>约{durLabel(span.end - span.start)}</span>}
               </button>;
+            })()}
+            {/* 状态残留：最后活动之后到"现在"这段只能确认"不知道"，虚线画出来，不冒充执行时间 */}
+            {span && span.stale && (() => {
+              const left = pct(Math.max(viewStart, span.lastEvidence));
+              const right = pct(Math.min(viewEnd, now));
+              if (right - left < 0.2) return null;
+              return <span className="tl-span-unknown" style={{ left: `${left}%`, width: `${right - left}%` }}
+                title={`${hm(new Date(span.lastEvidence).toISOString())} 之后没有新活动（${durLabel(now - span.lastEvidence)}），无法确认是否仍在执行`} aria-hidden="true" />;
             })()}
             {row.runs.filter(e => endOf(e, now) > viewStart && itemAt(e) < viewEnd).map(e => {
               const st = statusOf(e, now);
@@ -607,8 +628,8 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
             })}
             {segs.map(sg => {
               const { left, width } = clampPos(sg.start, Math.min(sg.end, viewEnd));
-              return <button key={sg.start} className={`tl-block act${markerState?.cls === "running" ? " running" : ""}`} style={{ left: `${left}%`, width: `${width}%` }}
-                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, viewEnd)).toISOString())} · 持续 ${durLabel(Math.min(sg.end, viewEnd) - sg.start)} · ${sg.count} 条消息`}
+              return <button key={sg.start} className={`tl-block act${liveRunning ? " running" : ""}`} style={{ left: `${left}%`, width: `${width}%` }}
+                title={`活动 ${hm(new Date(sg.start).toISOString())}–${hm(new Date(Math.min(sg.end, viewEnd)).toISOString())} · 约 ${durLabel(Math.min(sg.end, viewEnd) - sg.start)} · ${sg.count} 条消息（5 分钟粒度，间隔 10 分钟内合并）`}
                 onClick={() => sessionId && onOpenSession(sessionId)} />;
             })}
             {!row.runs.length && !segs.length && row.marker && itemAt(row.marker) >= viewStart && itemAt(row.marker) <= viewEnd && (() => {
@@ -650,7 +671,10 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         return <li key={e.id}><button className="entity-row" onClick={() => open(e)}>
           <span className="entity-main">
             <strong>{execTitle(e)}</strong>
-            <span className="dim">{timeRange(e)}{e.sessionState && e.sessionId && dayActiveMs.has(e.sessionId) ? ` · 活动 ${durLabel(dayActiveMs.get(e.sessionId)!)}` : ""} · {execMeta(e)}{!e.sessionState && st.detail && st.cls !== "failed" ? ` · ${st.detail}` : ""}</span>
+            <span className="dim">{timeRange(e)}{e.sessionState && e.sessionId && dayActiveMs.has(e.sessionId) ? ` · 活动约 ${durLabel(dayActiveMs.get(e.sessionId)!)}` : ""}
+              {/* 状态是最后一条上报；久无活动时要说清楚"可能已停滞"，别让人当成还在跑 */}
+              {e.sessionState === "running" && now - Date.parse(e.createdAt) > LIVE_GRACE ? ` · ${Math.round((now - Date.parse(e.createdAt)) / 60000)} 分钟无新活动，状态可能已停滞` : ""}
+              {` · ${execMeta(e)}`}{!e.sessionState && st.detail && st.cls !== "failed" ? ` · ${st.detail}` : ""}</span>
             {st.detail && st.cls === "failed" && <span className="dim exec-error">{st.detail}</span>}
           </span>
           <span className={`exec-status ${st.cls}`}>{st.label}</span>

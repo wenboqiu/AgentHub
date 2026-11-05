@@ -9,13 +9,14 @@
 //! - Therefore this module only does state and message metadata listening, and does not participate in remote execution.
 
 use crate::{
+    activity::buckets_of,
     claude::{home_dir, now_iso, truncate_chars},
-    forwarder::{Bucket, Event, Forwarder},
+    forwarder::{Event, Forwarder},
 };
 use chrono::TimeZone;
 use serde_json::Value;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -45,16 +46,6 @@ fn iso(ms: i64) -> String {
 
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// 时间戳聚合成 5 分钟桶，与服务端 session_activity 同粒度
-fn buckets_of(ms: &[i64]) -> Vec<Bucket> {
-    const BUCKET_MS: i64 = 5 * 60_000;
-    let mut m: BTreeMap<i64, u32> = BTreeMap::new();
-    for t in ms {
-        *m.entry(t.div_euclid(BUCKET_MS) * BUCKET_MS).or_insert(0) += 1;
-    }
-    m.into_iter().map(|(b, c)| Bucket { at: iso(b), count: c }).collect()
 }
 
 #[derive(Default)]

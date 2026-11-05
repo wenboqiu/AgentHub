@@ -44,7 +44,11 @@ pub fn spawn(fwd: Forwarder, status: CollectorStatus) {
                 continue;
             }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
-                if let Some(ev) = claude::hook_to_event(&v, pid) {
+                if let Some(mut ev) = claude::hook_to_event(&v, pid) {
+                    // hook 本身只有状态：活动桶顺路从 transcript 取，日历才有跨度和分段
+                    if ev.buckets.is_empty() {
+                        ev.buckets = claude::activity_buckets(&v);
+                    }
                     fwd.push(ev);
                 }
             }

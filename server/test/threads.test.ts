@@ -40,7 +40,7 @@ describe('Thread 统一事件流', () => {
     await say(`claude:${key}`, '改了配置文件', 'user')
     await say(`claude:${key}`, '已完成修改并通过测试')
     // 执行记录挂在关联会话上（远程发消息产生的 run）
-    await pool.query("INSERT INTO runs(id, user_id, session_id, task_id, machine, status, error) VALUES($1,$2,$3,NULL,'thread机','failed','命令退出码 1')", [randomUUID(), a.id, `claude:${key}`])
+    await pool.query("INSERT INTO runs(id, user_id, session_id, task_id, machine, status, error, created_at, updated_at) VALUES($1,$2,$3,NULL,'thread机','failed','命令退出码 1', now() - interval '5 minutes', now() - interval '4 minutes')", [randomUUID(), a.id, `claude:${key}`])
     await event(key, 'done') // → review + 验收摘要
     const r = await call('GET', `/threads/task/${t.id}`)
     assert.equal(r.status, 200)
@@ -52,6 +52,15 @@ describe('Thread 统一事件流', () => {
     assert.ok(digest.text.includes('已完成修改'))
     const run = events.find(e => e.type === 'run')!
     assert.equal(run.status, 'failed')
+    // 执行拆成开始/结束两个节点：开始节点给出真正开跑的时刻，结束节点带上耗时起点
+    const runEvents = events.filter(e => e.type === 'run') as any[]
+    assert.equal(runEvents.length, 2)
+    const start = runEvents.find(e => e.phase === 'start')!
+    const end = runEvents.find(e => e.phase === 'end')!
+    assert.equal(start.startedAt, undefined)
+    assert.equal(end.startedAt, start.at)
+    assert.ok(Date.parse(end.at) > Date.parse(start.at), '结束节点应该晚于开始节点')
+    assert.equal(end.error, '命令退出码 1')
     const reminder = events.find(e => e.type === 'reminder')!
     assert.equal(reminder.kind, 'due')
     assert.equal(reminder.acked, false)

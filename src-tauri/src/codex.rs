@@ -1,5 +1,6 @@
 //! Codex：轮询 ~/.codex/sessions 下的 rollout 会话文件（不碰 config.toml）
 
+use crate::activity::{buckets_of, capped, ms_of_iso, LOOKBACK_MS};
 use crate::claude::{home_dir, truncate_chars};
 use crate::forwarder::{Event, Forwarder};
 use serde_json::Value;
@@ -67,6 +68,8 @@ pub struct FileState {
     session_id: Option<String>,
     cwd: String,
     title: Option<String>,
+    /// 还没随事件上报的消息时间戳（ms）：时间轴的活动分段与对话跨度靠它
+    pending: Vec<i64>,
 }
 
 impl FileState {
@@ -74,11 +77,30 @@ impl FileState {
         FileState { session_id: fallback_id, ..Default::default() }
     }
 
+    /// 活动桶跟着状态事件一起走：Codex 没有 hook，不发这个日历上就没有跨度
+    fn attach_buckets(&mut self, out: &mut [Event], now: &str) {
+        let Some(last) = out.last_mut() else { return };
+        if self.pending.is_empty() {
+            return;
+        }
+        let cutoff = ms_of_iso(now).map(|n| n - LOOKBACK_MS).unwrap_or(0);
+        let ms: Vec<i64> = self.pending.drain(..).filter(|m| *m >= cutoff).collect();
+        if ms.is_empty() {
+            return;
+        }
+        last.buckets = capped(buckets_of(&ms));
+    }
+
     /// 喂入新增的完整行。首次（first）只上报最终状态一次且 quiet；之后每个状态变化都上报
     pub fn feed(&mut self, lines: &[&str], first: bool, now: &str) -> Vec<Event> {
         let mut out: Vec<Event> = Vec::new();
         let mut last_at = String::new();
         for l in lines {
+            if let Some(ms) = activity_ms(l) {
+                if self.pending.len() < 20_000 {
+                    self.pending.push(ms);
+                }
+            }
             match parse_line(l) {
                 Some(Line::Meta { session_id, cwd }) => {
                     if session_id.is_some() {
@@ -111,8 +133,11 @@ impl FileState {
                 }
                 None => self.event("idle", None, if last_at.is_empty() { now.to_string() } else { last_at }, true, now),
             };
-            return if self.session_id.is_some() { vec![ev] } else { vec![] };
+            let mut evs = if self.session_id.is_some() { vec![ev] } else { vec![] };
+            self.attach_buckets(&mut evs, now);
+            return evs;
         }
+        self.attach_buckets(&mut out, now);
         out
     }
 
@@ -131,6 +156,20 @@ impl FileState {
             buckets: Vec::new(),
         }
     }
+}
+
+/// 消息行算活动（user / assistant），工具调用与元数据不算：日历画的是"有人在动"的节奏。
+/// 整行解析一次即可，rollout 每条 response_item 本来就要过一遍 parse_line。
+fn activity_ms(line: &str) -> Option<i64> {
+    if !line.contains("\"response_item\"") {
+        return None;
+    }
+    let v: Value = serde_json::from_str(line).ok()?;
+    let role = v.get("payload")?.get("role")?.as_str()?;
+    if role != "user" && role != "assistant" {
+        return None;
+    }
+    ms_of_iso(v.get("timestamp")?.as_str()?)
 }
 
 fn session_dirs(root: &Path) -> Vec<PathBuf> {
@@ -285,6 +324,18 @@ mod tests {
         let mut st = FileState::new(None);
         let evs = st.feed(&[META], true, "now");
         assert_eq!((evs.len(), evs[0].state.as_str(), evs[0].quiet), (1, "idle", true));
+    }
+
+    #[test]
+    fn activity_buckets_ride_on_the_status_event_once() {
+        let mut st = FileState::new(None);
+        let evs = st.feed(&[META, USER, START, DONE], false, "2026-10-31T01:05:00.000Z");
+        // 只有最后一个状态事件带桶，避免同一批活动重复上报
+        assert_eq!(evs.iter().filter(|e| !e.buckets.is_empty()).count(), 1);
+        assert_eq!(evs.last().unwrap().buckets.iter().map(|b| b.count).sum::<u32>(), 1);
+        // 上报后清空：状态没变时不会凭空再带一份
+        let more = st.feed(&[START], false, "2026-10-31T01:06:00.000Z");
+        assert!(more.iter().all(|e| e.buckets.is_empty()));
     }
 
     #[test]

@@ -429,6 +429,9 @@ header h1 { white-space: nowrap; }
 .tl-span { position: absolute; top: 4px; height: 10px; min-height: 0; padding: 0 9px; border-radius: 999px; border: 1px dashed color-mix(in srgb, var(--dim) 55%, transparent); background: color-mix(in srgb, var(--dim) 8%, transparent); color: var(--dim); font-size: 10px; font-weight: 600; display: inline-flex; align-items: center; overflow: hidden; white-space: nowrap; cursor: pointer; }
 .tl-span span { overflow: hidden; text-overflow: ellipsis; }
 .tl-span.running { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 9%, transparent); color: var(--accent); }
+/* 状态残留：最后活动之后到"现在"的空白不确定段，点线表示"不知道还在不在跑" */
+.tl-span.stalled { border-style: dotted; opacity: .8; }
+.tl-span-unknown { position: absolute; top: 8px; height: 0; border-top: 2px dotted color-mix(in srgb, var(--dim) 40%, transparent); pointer-events: none; }
 /* 会话活动片段：没有精确起止，颜色淡一档以区别于 run 的真实执行区间 */
 .tl-block.act { background: color-mix(in srgb, var(--accent) 42%, transparent); }
 .tl-block.act.stopped { background: color-mix(in srgb, var(--dim) 55%, transparent); }

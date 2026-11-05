@@ -1,6 +1,8 @@
 // 桌面专用模块（托盘、本地采集器、Codex 轮询、上报、窗口跳转）都在 cfg(desktop) 下；
 // Android 构建只跑 UI，不编译这些。
 #[cfg(desktop)]
+mod activity;
+#[cfg(desktop)]
 mod claude;
 #[cfg(desktop)]
 mod claude_live;
