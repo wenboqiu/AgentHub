@@ -36,7 +36,7 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
     c.note,
   ].filter(Boolean);
 }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "profileId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | keyof Schedule>>;
 /** 项目配置：一组执行环境 + 默认优先级 + 检查项模板，起个名字复用 */
 export type Profile = { id: number; name: string; agent: Task["agent"]; machine: string | null; cwd: string | null; priority: Task["priority"]; checklist: string[]; tasks: number; createdAt: string; updatedAt: string };
@@ -118,6 +118,12 @@ export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: str
 /** 处理意见：会话跑完后攒出来的「接下来做什么」，确认后才变成任务 */
 export type ProposalKind = "continue" | "followup" | "fix";
 /** 项目经理排好的执行人：角色是人，配置是地方（执行工具 + 电脑 + 目录） */
+/** 开跑方式：fork = 接着原会话的上下文，fresh = 新建会话从这个任务开始 */
+export type Delivery = "fork" | "fresh";
+
+/** 原会话这一侧能不能续：工具支不支持、是不是还在跑（能不能对上执行人由界面再判一次） */
+export type ForkInfo = { agent: string; machine: string; cwd: string; ok: boolean; reason: string };
+
 export type Assignee = {
   roleId: number | null;
   roleName: string;
@@ -141,6 +147,10 @@ export type Proposal = {
   checklist: string[];
   /** 项目经理声明的执行边界：确认后原样落到任务上 */
   constraints: TaskConstraints;
+  /** 打算怎么开场：接着原会话的上下文（fork）还是新建会话（fresh） */
+  delivery: Delivery;
+  /** 原会话能不能续：工具支不支持、是不是还在跑 */
+  fork: ForkInfo;
   priority: Task["priority"];
   roleId: number | null;
   projectId: number | null;
@@ -381,8 +391,8 @@ export class Api {
     (await this.call<{ proposals: Proposal[] }>("GET", `/proposals${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`)).proposals;
   /** 让项目经理重写这条意见：借电脑上已登录的 agent，电脑离线时直接 409 */
   refineProposal = (id: number) => this.call<{ runId: string }>("POST", `/proposals/${id}/refine`, {});
-  confirmProposal = (id: number, input: ProposalInput & { dispatch?: boolean }) =>
-    this.call<{ task: Task; proposal: Proposal; dispatched: { queued: boolean } | null; dispatchError: string }>("POST", `/proposals/${id}/confirm`, input);
+  confirmProposal = (id: number, input: ProposalInput & { dispatch?: boolean; delivery?: Delivery }) =>
+    this.call<{ task: Task; proposal: Proposal; dispatched: { queued: boolean; delivery?: { mode: Delivery; reason: string } } | null; dispatchError: string }>("POST", `/proposals/${id}/confirm`, input);
   discardProposal = (id: number) => this.call<{ proposal: Proposal }>("POST", `/proposals/${id}/discard`);
   dispatchManager = () => this.call<ManagerState>("GET", "/dispatch/manager");
   saveDispatchManager = (patch: Partial<DispatchManager>) => this.call<ManagerState>("PATCH", "/dispatch/manager", patch);

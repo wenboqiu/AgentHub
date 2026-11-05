@@ -81,16 +81,20 @@ import {
   startThread,
 } from './assistant.ts'
 import {
+  NO_FORK,
   PROPOSAL_TITLE,
+  forkInfo,
   generateProposal,
   getProposal,
   listProposals,
   markProposal,
   markRefineRun,
+  planDelivery,
   proposalPatch,
   recordRefine,
   refineMessage,
   toChecklist,
+  type Delivery,
 } from './proposals.ts'
 import { getManager, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
@@ -482,6 +486,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
     const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录', 4000)
+    // 开跑方式：任务上记着「第一次接着哪个会话」（确认任务单时定的），请求里显式给了就用请求的。
+    // 能不能续按最终的工具 / 电脑 / 目录现算——角色可能被改过，续不上就退回新会话，不硬来。
+    const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : task.startMode
+    const forkFrom = typeof b.forkFrom === 'string' ? b.forkFrom : task.forkFrom
+    let mode: Delivery = 'fresh', sessionKey = '', deliveryReason = '新建会话，从这个任务开始'
+    if (want === 'fork') {
+      const src = forkFrom ? await getSession(pool, userId, forkFrom).catch(() => null) : null
+      const plan = planDelivery('fork', src ? forkInfo(src) : NO_FORK, { agent: agent ?? '', machine, cwd })
+      mode = plan.mode
+      deliveryReason = plan.reason
+      // 会话键是 agent 自己那半截 id（claude:xxx → xxx）；拼不出来就别假装能续
+      if (mode === 'fork' && src && src.id.includes(':')) sessionKey = src.id.slice(src.id.indexOf(':') + 1)
+      if (!sessionKey) mode = 'fresh'
+    }
     const text = taskText(b.text ?? (task.notes || task.title), '第一条消息', 8000)
     // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
     const memories = role ? await pickMemories(pool, userId, role.id, task.projectId) : []
@@ -498,20 +516,28 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       boundaryLine(task.constraints),
     ].filter(Boolean).join('\n\n')
     const dispatch = { model: roleModel(role), instructions }
-    // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么都定下来了）
+    // 开跑方式只用一次：无论排队还是立刻开跑，都在这儿清掉，重试时才不会又续回老上下文
+    const settle = async () => {
+      if (want !== 'fork') return
+      await saveTask(pool, userId, { startMode: 'fresh', forkFrom: null }, task.id).catch(() => undefined)
+    }
+    // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么、怎么开场都定下来了）
     if (!executors.has(execKey(userId, machine))) {
-      await enqueueDispatch(pool, userId, task.id, { machine, agent, cwd, text, ...dispatch })
+      await enqueueDispatch(pool, userId, task.id, { machine, agent, cwd, text, mode, sessionKey, ...dispatch })
+      await settle()
       const queued = await saveTask(pool, userId, { agent, machine, cwd }, task.id)
       pushTask(userId, queued)
-      return { queued: true, task: queued }
+      return { queued: true, task: queued, delivery: { mode, reason: deliveryReason } }
     }
     // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
     if (await dequeueDispatch(pool, userId, task.id)) pushTask(userId, await getTask(pool, userId, task.id))
-    const res = await startSession(userId, { agent, machine, cwd }, task.title, text, 'fresh', '', task.id, undefined, dispatch)
+    const res = await startSession(userId, { agent, machine, cwd }, task.title, text, mode, sessionKey, task.id, undefined, dispatch)
+    await settle()
     // 执行器太旧：模型和上下文会随 run.start 发过去但被忽略，得让用户知道角色没真正生效
     const degraded = !executors.get(execKey(userId, machine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
     if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
-    return degraded ? { ...res, queued: false, roleDegraded: true } : { ...res, queued: false }
+    const delivery = { mode, reason: deliveryReason }
+    return degraded ? { ...res, queued: false, roleDegraded: true, delivery } : { ...res, queued: false, delivery }
   }
 
   // 电脑上线后把排队的活按入队顺序投递；失败累计次数，超过上限就放弃并记录
@@ -520,7 +546,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!executors.has(execKey(userId, machine))) return
       let ok = false
       try {
-        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, 'fresh', '', item.taskId, undefined, { model: item.model, instructions: item.instructions })
+        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, item.mode, item.sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
         ok = true
       } catch (e) {
         const attempts = await bumpAttempts(pool, userId, item.taskId)
@@ -1035,6 +1061,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       draft: {
         title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
         constraints: proposal.constraints,
+        delivery: proposal.delivery,
         // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
         assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
       },
@@ -1063,6 +1090,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const patch = proposalPatch(b)
     // 执行人优先取项目经理排好的（角色 + 配置），界面改了哪个字段就按界面的来。
     // 配置只带「明确指派过的那一套」：项目兜底配置留给派发时按在线机器挑，别把任务钉在离线的电脑上。
+    // 去向：界面可以改，没改就按项目经理给的那条。写进任务里而不是只传给这次派发——
+    // 「只建任务」之后由项目经理自动派发时，也得按同样的方式开场。
+    const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : proposal.delivery
     const body: Record<string, unknown> = {
       title: proposal.title,
       notes: proposal.notes,
@@ -1073,6 +1103,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       checklist: toChecklist(proposal.checklist),
       // 项目经理声明的执行边界跟着任务走：代批和派发都要用它
       constraints: proposal.constraints,
+      startMode: want,
+      forkFrom: want === 'fork' ? proposal.sessionId : null,
     }
     // 清单传的是文本数组，转成任务的 {id,text,done}
     for (const [k, v] of Object.entries(patch)) {
@@ -1085,7 +1117,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await markProposal(pool, req.userId, id, 'accepted', task.id)
     pushTask(req.userId, linked)
     // 派发失败不影响任务已建好这件事，把原因带回去让界面提示
-    let dispatched: { queued: boolean } | null = null
+    let dispatched: { queued: boolean; delivery?: { mode: Delivery; reason: string } } | null = null
     let dispatchError = ''
     if (b.dispatch !== false) {
       try { dispatched = await startTaskDispatch(req.userId, linked.id, {}) }

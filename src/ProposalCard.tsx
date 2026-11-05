@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
-import type { Api, Profile, Project, Proposal, ProposalInput, Role, Task } from "./lib/api";
+import type { Api, Delivery, Profile, Project, Proposal, ProposalInput, Role, Task } from "./lib/api";
 import { constraintsSummary } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+import { planDelivery } from "./lib/delivery";
 
 // 任务单卡：会话跑完后，项目经理先替人把「接下来做什么、谁来做、在哪做」排好，
 // 人只需要看一眼、改不改都行，点「确认并派发」它就真的开工。
@@ -19,7 +20,7 @@ const KIND_LABEL: Record<Proposal["kind"], string> = {
 
 const PRIORITY_LABEL: Record<Task["priority"], string> = { high: "高", medium: "中", low: "低" };
 
-type Form = { title: string; notes: string; checklist: string; priority: Task["priority"]; roleId: string; projectId: string };
+type Form = { title: string; notes: string; checklist: string; priority: Task["priority"]; roleId: string; projectId: string; delivery: Delivery };
 
 const toForm = (p: Proposal): Form => ({
   title: p.title,
@@ -28,6 +29,7 @@ const toForm = (p: Proposal): Form => ({
   priority: p.priority,
   roleId: p.assignee.roleId === null ? "" : String(p.assignee.roleId),
   projectId: p.projectId === null ? "" : String(p.projectId),
+  delivery: p.delivery,
 });
 
 export default function ProposalCard({
@@ -94,6 +96,8 @@ export default function ProposalCard({
   const agent = role?.agent || profile?.agent || (sameRole ? proposal.assignee.agent : "");
   const machine = profile?.machine ?? (sameRole ? proposal.assignee.machine : "");
   const cwd = profile?.cwd ?? (sameRole ? proposal.assignee.cwd : "");
+  // 去向按「现在选的执行人」预览：换人 / 换机器之后能不能续，当场就能看出来
+  const plan = planDelivery(form.delivery, proposal.fork, { agent, machine, cwd });
 
   const fields = (): ProposalInput => ({
     title: form.title.trim(),
@@ -105,12 +109,14 @@ export default function ProposalCard({
   });
 
   const confirm = (dispatch: boolean) => act(async () => {
-    const res = await api.confirmProposal(proposal.id, { ...fields(), dispatch });
+    const res = await api.confirmProposal(proposal.id, { ...fields(), dispatch, delivery: form.delivery });
     onChanged(res.proposal);
     onTask(res.task);
+    // 服务端按最终的工具/电脑/目录再判一次，这里报的是它实际用的方式
+    const d = res.dispatched?.delivery;
     const how = res.dispatched ? (res.dispatched.queued ? "已排队，等那台电脑上线就开跑" : "已派发，正在做")
       : autoDispatch ? "已建任务，项目经理会接手派发" : "已建任务，还没派发";
-    setDone({ kind: "created", text: `已生成任务「${res.task.title}」，${how}。` });
+    setDone({ kind: "created", text: `已生成任务「${res.task.title}」，${how}${d ? `（${d.reason}）` : ""}。` });
     if (res.dispatchError) onError(`任务已建好，但派发没成功：${res.dispatchError}`);
   });
 
@@ -144,6 +150,22 @@ export default function ProposalCard({
           {[agent ? AGENT_LABEL[agent] ?? agent : "执行工具未定", machine || "电脑待定", cwd || "目录待定"].join(" · ")}
           {profile ? `（配置：${profile.name}）` : ""}
         </p>
+      </div>
+
+      {/* 从哪开始：接着原会话的上下文，还是新开一个。换了工具 / 电脑 / 目录就续不上，选项直接灰掉 */}
+      <div className="delivery-pick">
+        <span className="delivery-label">从哪开始</span>
+        <div className="delivery-opts" role="radiogroup" aria-label="从哪开始">
+          <button type="button" role="radio" aria-checked={plan.mode === "fork"}
+            className={plan.mode === "fork" ? "delivery-opt on" : "delivery-opt"}
+            disabled={busy || plan.blocked} title={plan.blocked ? plan.reason : "把原会话的上下文接过来"}
+            onClick={() => set({ delivery: "fork" })}>接着原会话</button>
+          <button type="button" role="radio" aria-checked={plan.mode === "fresh"}
+            className={plan.mode === "fresh" ? "delivery-opt on" : "delivery-opt"}
+            disabled={busy} title="新开一个会话，只带任务单里的说明"
+            onClick={() => set({ delivery: "fresh" })}>从零开始</button>
+        </div>
+        <p className="hint delivery-note">{plan.blocked ? `续不上：${plan.reason}` : plan.reason}</p>
       </div>
 
       <label>要做什么

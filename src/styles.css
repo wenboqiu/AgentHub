@@ -756,3 +756,12 @@ header h1 { white-space: nowrap; }
 .tier-badge { display: inline-block; margin-right: 6px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); font-size: 11px; font-weight: 600; }
 .tier-badge.danger { border-color: var(--alert); color: var(--alert); }
 .tier-badge.gray { border-color: var(--accent); color: var(--accent); }
+
+/* 从哪开始：接着原会话还是新开，选项本身就说清条件 */
+.delivery-pick { display: grid; gap: 8px; }
+.delivery-label { font-size: 13px; font-weight: 550; }
+.delivery-opts { display: flex; flex-wrap: wrap; gap: 8px; }
+.delivery-opt { min-height: 0; padding: 7px 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--field); color: var(--dim); font-size: 13px; }
+.delivery-opt.on { border-color: var(--accent); color: var(--accent); background: var(--card); font-weight: 600; }
+.delivery-opt:disabled { opacity: .45; cursor: not-allowed; }
+.delivery-note { margin: 0; font-size: 12px; }

@@ -21,6 +21,8 @@ type DB = Pick<pg.Pool, 'query'>
 
 export type ProposalKind = 'continue' | 'followup' | 'fix'
 export type ProposalOrigin = 'heuristic' | 'agent'
+/** 开跑方式：fork = 接着原会话那条线（带上下文），fresh = 新建会话从这个任务开始 */
+export type Delivery = 'fork' | 'fresh'
 export type ProposalStatus = 'pending' | 'accepted' | 'discarded'
 export type Priority = 'high' | 'medium' | 'low'
 
@@ -34,6 +36,21 @@ export type Assignee = {
   profileName: string
   machine: string
   cwd: string
+}
+
+/**
+ * 原会话本身能不能被续上：只描述会话这边的事实（工具支不支持、是不是还在跑）。
+ * 「执行人是不是同一个工具/同一台电脑/同一个目录」属于派发那一刻才知道的事，
+ * 由 planDelivery 拿这份事实和最终执行人去比。
+ */
+export type ForkInfo = {
+  agent: string
+  machine: string
+  cwd: string
+  /** 会话这一侧是否可续 */
+  ok: boolean
+  /** 不可续的原因；可续时为空 */
+  reason: string
 }
 
 export type Proposal = {
@@ -51,6 +68,10 @@ export type Proposal = {
   checklist: string[]
   /** 项目经理声明的执行边界：确认后原样落到任务上 */
   constraints: TaskConstraints
+  /** 项目经理打算怎么开场；确认时可以改，派发时按条件裁一次 */
+  delivery: Delivery
+  /** 原会话能不能续（会话侧的事实，界面据此判断 fork 选项可不可点） */
+  fork: ForkInfo
   priority: Priority
   roleId: number | null
   projectId: number | null
@@ -79,6 +100,8 @@ export type ProposalDraft = {
   checklist: string[]
   /** 执行边界；不声明就空着（没声明 = 不收窄，按全局策略代批） */
   constraints?: TaskConstraints
+  /** 开跑方式；不声明就按 kind 给默认（接着做/先修 → 续上下文，新的一段 → 从零开始） */
+  delivery?: Delivery
   priority: Priority
   roleId: number | null
   projectId: number | null
@@ -92,11 +115,51 @@ const MAX_NOTES = 4000
 const MAX_ITEMS = 20
 const MAX_ITEM = 200
 const MAX_EVIDENCE = 6
+/** 没声明去向时的默认：接着做 / 回去修沿用上下文，新的一段工作从零开始 */
+const defaultDelivery = (kind: ProposalKind): Delivery => (kind === 'followup' ? 'fresh' : 'fork')
 /** 细化会话的标题前缀：这类会话不再生成新的处理意见（否则会无限套娃），也不弹通知 */
 export const PROPOSAL_TITLE = '意见细化：'
 
 const EMPTY_ASSIGNEE: Assignee = {
   roleId: null, roleName: '', roleTitle: '', agent: '', profileId: null, profileName: '', machine: '', cwd: '',
+}
+
+/**
+ * 能「接着原会话」的工具。豆包和 WorkBuddy 只听状态、根本没有可续的会话；
+ * ZCode 能同目录新开，但没有按会话分叉的通道。这三家只能从零开始。
+ */
+const FORK_AGENTS = new Set(['claude', 'codex'])
+
+const AGENT_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', doubao: '豆包', workbuddy: 'WorkBuddy' }
+const agentName = (a: string): string => AGENT_NAME[a] ?? (a || '未知工具')
+
+export const NO_FORK: ForkInfo = { agent: '', machine: '', cwd: '', ok: false, reason: '找不到原会话' }
+
+/** 会话这一侧能不能续：工具支持 + 现在不在跑（在跑的会话不能分叉） */
+export function forkInfo(s: Pick<Session, 'agent' | 'machine' | 'cwd' | 'state'>): ForkInfo {
+  const base = { agent: s.agent, machine: s.machine, cwd: s.cwd }
+  if (!FORK_AGENTS.has(s.agent)) return { ...base, ok: false, reason: `${agentName(s.agent)} 不能接着原会话` }
+  if (s.state === 'running') return { ...base, ok: false, reason: '原会话还在跑，等它结束才能续' }
+  return { ...base, ok: true, reason: '' }
+}
+
+/**
+ * 真的开跑时用什么方式。想续但条件不满足就退回 fresh —— 不悄悄按自己的想法做，
+ * 退回的理由要能说清楚，否则人只会觉得「我明明选了接着做」。
+ */
+export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: string; machine: string; cwd: string }): { mode: Delivery; reason: string } {
+  if (want !== 'fork') return { mode: 'fresh', reason: '新建会话，从这个任务开始' }
+  if (!fork.ok) return { mode: 'fresh', reason: fork.reason }
+  if (target.agent !== fork.agent) {
+    return { mode: 'fresh', reason: `执行人是 ${agentName(target.agent)}，原会话是 ${agentName(fork.agent)}，续不上` }
+  }
+  if (target.machine && target.machine !== fork.machine) {
+    return { mode: 'fresh', reason: `换了电脑，原会话在 ${fork.machine}` }
+  }
+  if (target.cwd && target.cwd !== fork.cwd) {
+    return { mode: 'fresh', reason: '任务目录和原会话不同，续不上上下文' }
+  }
+  return { mode: 'fork', reason: `接着原会话的上下文（${agentName(fork.agent)} · ${fork.machine}）` }
 }
 
 export async function migrateProposals(db: DB) {
@@ -114,6 +177,7 @@ export async function migrateProposals(db: DB) {
     notes text NOT NULL DEFAULT '',
     checklist jsonb NOT NULL DEFAULT '[]'::jsonb,
     constraints jsonb NOT NULL DEFAULT '{}'::jsonb,
+    delivery text NOT NULL DEFAULT 'fresh' CHECK (delivery IN ('fork','fresh')),
     priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
     role_id bigint,
     project_id bigint,
@@ -131,6 +195,7 @@ export async function migrateProposals(db: DB) {
   // 老库补列：执行人挂的配置（新库建表时已有）
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS profile_id bigint')
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
+  await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'fresh'`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_pending ON session_proposals(user_id,status,created_at DESC)')
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_session ON session_proposals(user_id,session_id)')
 }
@@ -147,6 +212,9 @@ const row = (r: any): Proposal => ({
   notes: r.notes ?? '',
   checklist: Array.isArray(r.checklist) ? r.checklist.filter((t: unknown): t is string => typeof t === 'string') : [],
   constraints: normalizeConstraints(r.constraints),
+  delivery: r.delivery === 'fork' ? 'fork' : 'fresh',
+  // 会话侧的能力由 fillAssignees 补（这里没有会话信息）
+  fork: NO_FORK,
   priority: r.priority ?? 'medium',
   roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id),
   projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id),
@@ -240,11 +308,23 @@ export async function pickAssignee(db: DB, user: number, input: {
   return { roleId: input.taskRoleId, profileId: input.taskProfileId, reason: '没有可判断的依据，执行人留空由你选' }
 }
 
-/** 批量展开执行人（列表与单条都走这里，保证界面看到的东西一致） */
+/**
+ * 批量展开执行人与「原会话能不能续」（列表与单条都走这里，保证界面看到的东西一致）。
+ * 会话按一条 IN 查询捞回来，不做 N+1。
+ */
 export async function fillAssignees(db: DB, user: number, list: Proposal[]): Promise<Proposal[]> {
   if (!list.length) return list
   const ctx = await assigneeCtx(db, user)
-  return list.map(p => ({ ...p, assignee: assigneeOf(ctx, p.roleId, p.profileId, p.projectId) }))
+  const ids = [...new Set(list.map(p => p.sessionId))]
+  const sessions = new Map(
+    (await db.query('SELECT id,agent,machine,cwd,state FROM sessions WHERE user_id=$1 AND id = ANY($2::text[])', [user, ids]))
+      .rows.map((r: any) => [r.id as string, forkInfo({ agent: r.agent, machine: r.machine ?? '', cwd: r.cwd ?? '', state: r.state })]),
+  )
+  return list.map(p => ({
+    ...p,
+    assignee: assigneeOf(ctx, p.roleId, p.profileId, p.projectId),
+    fork: sessions.get(p.sessionId) ?? NO_FORK,
+  }))
 }
 
 // ---------- 规则档：从已有材料里拼一份草稿 ----------
@@ -313,6 +393,8 @@ export function heuristicDraft(input: {
       checklist: todo.slice(0, MAX_ITEMS).map(t => t.slice(0, MAX_ITEM)),
       // 接着做同一件事：边界沿用原任务，不要因为换了会话就悄悄放开
       constraints: task.constraints,
+      // 上下文就在刚才那个会话里：接着做、回去修，都该续上；续不上派发时会自动退回新会话
+      delivery: 'fork',
       priority: task.priority === 'high' ? 'high' : 'medium',
       roleId: task.roleId,
       projectId: task.projectId,
@@ -336,6 +418,7 @@ export function heuristicDraft(input: {
       ].filter(Boolean).join('\n\n'),
       checklist: [],
       priority: 'high',
+      delivery: 'fork',
       roleId: task?.roleId ?? null,
       projectId: task?.projectId ?? null,
       profileId: task?.profileId ?? null,
@@ -355,6 +438,8 @@ export function heuristicDraft(input: {
       ].filter(Boolean).join('\n\n'),
       checklist: [],
       priority: 'medium',
+      // 新的一段工作：另起会话，只带任务单里的说明
+      delivery: 'fresh',
       roleId: task?.roleId ?? null,
       projectId: task?.projectId ?? null,
       profileId: task?.profileId ?? null,
@@ -374,6 +459,8 @@ export function heuristicDraft(input: {
       ].filter(Boolean).join('\n\n'),
       checklist: [],
       priority: 'medium',
+      // 新的一段工作：另起会话，只带任务单里的说明
+      delivery: 'fresh',
       roleId: task?.roleId ?? null,
       projectId: task?.projectId ?? null,
       profileId: task?.profileId ?? null,
@@ -447,13 +534,14 @@ async function saveProposal(pool: DB, userId: number, input: {
   const r = await pool.query(
     `INSERT INTO session_proposals(
        user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
-       kind,title,notes,checklist,constraints,priority,role_id,project_id,profile_id,evidence,note,origin)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,profile_id,evidence,note,origin)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      ON CONFLICT (user_id,session_id,event_at) DO NOTHING RETURNING *`,
     [userId, input.sessionId, input.sessionTitle.slice(0, 200), input.sessionAgent, input.sessionProject.slice(0, 200),
       input.taskId, input.eventAt, input.draft.kind, input.draft.title.slice(0, MAX_TITLE),
       input.draft.notes.slice(0, MAX_NOTES), JSON.stringify(input.draft.checklist),
       JSON.stringify(normalizeConstraints(input.draft.constraints)),
+      input.draft.delivery ?? defaultDelivery(input.draft.kind),
       input.draft.priority, input.draft.roleId, input.draft.projectId, input.draft.profileId,
       JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin],
   )
@@ -477,7 +565,7 @@ async function saveProposal(pool: DB, userId: number, input: {
 export const REFINE_CONTRACT = `你在 AgentHub 里当项目经理，读完一段刚结束的会话，写一张能直接开工的任务单。
 
 只回一个 JSON 对象（可以用 \`\`\`json 包起来），不要写解释、寒暄或额外段落。字段：
-{"kind":"continue | followup | fix","title":"任务标题","notes":"背景与验证方式","checklist":["验收要点"],"priority":"high | medium | low","roleId":null,"projectId":null,"constraints":{"paths":["允许改的相对目录"],"net":false,"push":false,"scripts":false,"note":"一句话边界"},"note":"你的判断依据或缺口"}
+{"kind":"continue | followup | fix","title":"任务标题","notes":"背景与验证方式","checklist":["验收要点"],"priority":"high | medium | low","roleId":null,"projectId":null,"delivery":"fork | fresh","constraints":{"paths":["允许改的相对目录"],"net":false,"push":false,"scripts":false,"note":"一句话边界"},"note":"你的判断依据或缺口"}
 
 规矩：
 - title 动词开头，说清「接下来做什么」，不超过 80 字；不要复述会话内容。
@@ -488,6 +576,10 @@ export const REFINE_CONTRACT = `你在 AgentHub 里当项目经理，读完一�
 - roleId 是执行人：从【可用角色】里挑最合适的编号，优先已经在这个项目/这段会话里做过活的角色；
   没有把握就沿用原任务的执行人；实在没有合适的给 null，让人来定。你自己不做实现。
 - projectId 只能取【可用项目】里的编号，判断不了就给 null。
+- delivery 是执行者怎么开场：fork = 接着这段会话的上下文继续（同一套判断、同一个思路），
+  fresh = 另起一个会话从这个任务本身开始。continue 和 fix 一般给 fork；followup 是新的一段工作，
+  给 fresh 更省上下文。只有执行人和原会话是同一个工具、同一台电脑、同一个目录时才续得上，
+  续不上会自动退回 fresh，所以你按「哪种更合适」写就行，不用替它判断可行性。
 - constraints 是这个任务的执行边界，执行中超出边界的动作会停下来问人，所以按「这个任务真的需要什么」写：
   · paths：这个任务预计要改哪些目录（相对项目根的路径前缀，如 "server/src"、"docs"）。空数组 = 不限目录，能少写就少写。
   · net：需要装依赖或调用外部接口才 true；push：任务明确要求提交推送才 true；scripts：需要跑项目自定义脚本（npm run xxx 之类）才 true。
@@ -504,7 +596,7 @@ export function refineMessage(input: {
   task: { title: string; notes: string; todo: string[] } | null
   tail: { role: string; text: string }[]
   evidence: Evidence[]
-  draft: { title: string; notes: string; checklist: string[]; assignee?: string; constraints?: TaskConstraints } | null
+  draft: { title: string; notes: string; checklist: string[]; assignee?: string; constraints?: TaskConstraints; delivery?: Delivery } | null
   roles: { id: number; name: string; title: string; agent?: string }[]
   projects: { id: number; name: string }[]
 }): string {
@@ -524,6 +616,7 @@ export function refineMessage(input: {
     parts.push(`【规则档草稿，供参考，可以推翻】\n标题：${input.draft.title}\n说明：${input.draft.notes.slice(0, 600)}`
       + (input.draft.checklist.length ? `\n清单：${input.draft.checklist.join('；')}` : '')
       + (input.draft.assignee ? `\n现在的执行人：${input.draft.assignee}` : '')
+      + `\n现在的去向：${input.draft.delivery === 'fork' ? '接着原会话' : '从零开始'}`
       + (input.draft.constraints && hasConstraints(input.draft.constraints) ? `\n现在声明的边界：${boundaryLine(input.draft.constraints)}` : ''))
   }
   if (input.roles.length) parts.push(`【可用角色（名字/职责/执行工具）】${input.roles.map(r => `${r.id}=${r.name}${r.title ? ` / ${r.title}` : ''}${r.agent ? ` / ${r.agent}` : ''}`).join('；')}`)
@@ -575,6 +668,7 @@ export function parseRefine(raw: string): ParsedRefine | null {
         checklist,
         // 边界解析不出来就当没声明：宁可多问一句，也不替人放开
         constraints: normalizeConstraints(obj.constraints ?? NO_CONSTRAINTS),
+        delivery: obj.delivery === 'fork' || obj.delivery === 'fresh' ? obj.delivery : defaultDelivery(kind),
         priority,
         roleId: num(obj.roleId),
         projectId: num(obj.projectId),
@@ -590,12 +684,12 @@ export function parseRefine(raw: string): ParsedRefine | null {
 export async function replaceDraft(pool: DB, userId: number, id: number, draft: ProposalDraft): Promise<Proposal> {
   const r = await pool.query(
     `UPDATE session_proposals SET kind=$3,title=$4,notes=$5,checklist=$6,priority=$7,
-       role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),
+       role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),delivery=$12,
        profile_id=COALESCE($11,(SELECT r.profile_id FROM roles r WHERE r.user_id=$1 AND r.id=$8),profile_id)
      WHERE user_id=$1 AND id=$2 AND status='pending' RETURNING *`,
     [userId, id, draft.kind, draft.title.slice(0, MAX_TITLE), draft.notes.slice(0, MAX_NOTES),
       JSON.stringify(draft.checklist), draft.priority, draft.roleId, draft.projectId, draft.note.slice(0, 500),
-      draft.profileId],
+      draft.profileId, draft.delivery ?? defaultDelivery(draft.kind)],
   )
   if (!r.rows[0]) throw new TaskError('这条意见已经处理过了', 409)
   return (await fillAssignees(pool, userId, [row(r.rows[0])]))[0]

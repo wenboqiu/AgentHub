@@ -9,7 +9,7 @@
 处理意见 session_proposals   ← 规则档：最后一轮回复 + 证据链 + 未完成清单
    │  补执行人：原任务的角色 > 这个项目上做过最多的角色 > 唯一的角色
    ▼
-任务单（可改标题 / 说明 / 验收要点 / 优先级 / 执行人 / 项目 / 执行边界）
+任务单（可改标题 / 说明 / 验收要点 / 优先级 / 执行人 / 项目 / 执行边界 / 从哪开始）
    │  「让项目经理重写」可选：一次 run，用项目经理角色重排
    ▼
 人确认 ──► 建任务（和手建任务同一条补值链）──► 派发
@@ -48,6 +48,31 @@
 
 详见 `docs/approval-referee.md`。
 
+## 从哪开始：接着原会话，还是从零
+
+同一件事有两种开场方式，卡片上可以选，项目经理也会先替人排一个：
+
+| 方式 | 执行者拿到什么 | 什么时候合适 |
+|---|---|---|
+| **接着原会话**（`fork`） | 原会话的完整上下文，等于「同一个它」继续说 | 原任务没做完、回去修刚才那个报错 |
+| **从零开始**（`fresh`） | 只有任务单里的说明、清单和项目近况 | 新的一段工作，上下文反而是负担 |
+
+- **规则档**：`continue` / `fix` 给 `fork`，`followup` 给 `fresh`；项目经理细化时也可以在 `delivery` 里改。
+- **任务上记一次**（`tasks.start_mode` / `fork_from`）：确认时写进去，派发时用掉就清回 `fresh`。所以「只建任务」之后项目经理自动派发，也会按同样的方式开场；而重试、重新派发不会又续回那个老上下文。
+- **续不上的四种情况**会**自动退回新会话**，界面在点确认之前就会显示原因、把选项灰掉：
+
+| 条件 | 为什么 |
+|---|---|
+| 原会话是豆包 / WorkBuddy / ZCode | 前两者只听状态、没有可续的会话；ZCode 没有按会话分叉的通道 |
+| 执行人的工具 ≠ 原会话的工具 | 会话是各工具自己的，跨不过去 |
+| 换了电脑 | 会话文件在那台机器上 |
+| 任务目录 ≠ 原会话目录 | 相对路径、工作树状态都对不上 |
+| 原会话还在跑 | 分叉一个正在写的会话没人能解释 |
+
+判定分两层：会话这一侧能不能续由服务端给（`Proposal.fork`），跟执行人对不对得上由界面预览（`src/lib/delivery.ts`），真正派发时服务端按最终的工具 / 电脑 / 目录再算一次（`planDelivery`）并回传实际用的方式——所以卡上看到「接着原会话」，结果里也会这么写；中途换了执行人，结果里会说明为什么没续上。
+
+离线排队也带着这个决定（`task_dispatch_queue.mode` / `session_key`），电脑上线后照原样开场。
+
 ## 自动派发的边界
 
 1. 只派**由处理意见确认生成**的任务（`session_proposals.created_task_id` 指过去），历史 todo 一律不动；
@@ -62,12 +87,13 @@
 |---|---|---|
 | GET | `/proposals?sessionId=` | 待处理意见；带 `sessionId` 时返回该会话的全部 |
 | POST | `/proposals/:id/refine` | 让项目经理重写（要求电脑在线） |
-| POST | `/proposals/:id/confirm` | 确认建任务；`dispatch:false` 表示只建不发 |
+| POST | `/proposals/:id/confirm` | 确认建任务；`dispatch:false` 表示只建不发，`delivery` 可改成 `fork` / `fresh` |
 | POST | `/proposals/:id/discard` | 忽略 |
 | GET/PATCH | `/dispatch/manager` | 项目经理的角色、开关、并发与每小时上限 |
 
 ## 数据
 
-- `session_proposals`：意见即任务单草稿（`role_id` / `profile_id` 存执行人），`(user_id, session_id, event_at)` 唯一，一条会话多段完成可出多条。
+- `session_proposals`：意见即任务单草稿（`role_id` / `profile_id` 存执行人，`delivery` 存打算怎么开场），`(user_id, session_id, event_at)` 唯一，一条会话多段完成可出多条。
+- `tasks.start_mode` / `fork_from`：这个任务第一次派发时接着哪个会话；用掉即清，是「一次性的开场意图」而不是永久属性。
 - `dispatch_manager`：一个账号一个项目经理。
 - `dispatch_auto_log`：每次自动派发的留痕（dispatched / queued / failed + 原因）。

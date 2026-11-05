@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assigneeOf, heuristicDraft, nextStepLine, parseRefine, toChecklist } from '../src/proposals.ts'
+import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, toChecklist } from '../src/proposals.ts'
 import { DEFAULT_MANAGER, pickCandidates, quota } from '../src/dispatch-manager.ts'
 import type { Task } from '../src/tasks.ts'
 
@@ -11,6 +11,7 @@ const session = { title: '修登录超时', agent: 'claude' as const, project: '
 const mockTask = (over: Partial<Task> = {}): Task => ({
   id: 1, title: '修登录超时', notes: '会话 30 分钟就断', status: 'doing', priority: 'medium',
   checklist: [], constraints: { paths: [], net: false, push: false, scripts: false, note: '' },
+  startMode: 'fresh', forkFrom: null,
   goalId: null, projectId: 2, profileId: null, roleId: 3,
   agent: 'claude', machine: 'pc', cwd: 'D:/x', sessionIds: [],
   createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z', doneAt: null,
@@ -74,6 +75,75 @@ test('parseRefine：认代码块包裹、认 skip、垃圾输入给 null', () =>
   // 没有 title 的 JSON 不算草稿
   assert.equal(parseRefine('{"kind":"fix"}'), null)
   assert.equal(parseRefine('我觉得应该继续做'), null)
+})
+
+test('去向：接着做和回去修都续上下文，新的一段从零开始', () => {
+  const cont = heuristicDraft({
+    session,
+    task: mockTask({ checklist: [{ id: 'a', text: '补迁移', done: false }] }),
+    lastReply: '改完了',
+    evidence: [],
+  })
+  assert.equal(cont?.delivery, 'fork')
+  // 有失败现场：回去修，上下文就在刚才那个会话里
+  const fix = heuristicDraft({
+    session, task: null, lastReply: '跑完了',
+    evidence: [{ kind: 'test', label: '测试结果', value: '1 failed', at: null }],
+  })
+  assert.equal(fix?.delivery, 'fork')
+  // 新的一段工作：另起会话更省上下文
+  const next = heuristicDraft({ session, task: null, lastReply: '登录改好了。\n下一步：把刷新逻辑也补上', evidence: [] })
+  assert.equal(next?.delivery, 'fresh')
+})
+
+test('planDelivery：工具 / 电脑 / 目录任一不同就退回新会话', () => {
+  const fork = forkInfo({ agent: 'claude', machine: 'pc-home', cwd: 'D:/Work2/AgentHub', state: 'done' })
+  const target = { agent: 'claude', machine: 'pc-home', cwd: 'D:/Work2/AgentHub' }
+
+  const ok = planDelivery('fork', fork, target)
+  assert.equal(ok.mode, 'fork')
+  assert.match(ok.reason, /接着原会话/)
+
+  const other = planDelivery('fork', fork, { ...target, agent: 'codex' })
+  assert.equal(other.mode, 'fresh')
+  assert.match(other.reason, /续不上/)
+
+  assert.equal(planDelivery('fork', fork, { ...target, machine: 'mac' }).mode, 'fresh')
+  assert.equal(planDelivery('fork', fork, { ...target, cwd: 'D:/Work2/别的目录' }).mode, 'fresh')
+  // 主动选从零开始：不需要任何理由
+  assert.deepEqual(planDelivery('fresh', fork, target), { mode: 'fresh', reason: '新建会话，从这个任务开始' })
+})
+
+test('原会话能不能续：只做状态监听的和在跑的都不行', () => {
+  const base = { machine: 'pc', cwd: 'D:/x', state: 'done' as const }
+  assert.equal(forkInfo({ ...base, agent: 'claude' }).ok, true)
+  assert.equal(forkInfo({ ...base, agent: 'codex' }).ok, true)
+  // ZCode 能同目录新开，但没有按会话分叉的通道
+  const zcode = forkInfo({ ...base, agent: 'zcode' })
+  assert.equal(zcode.ok, false)
+  assert.match(zcode.reason, /ZCode/)
+  assert.equal(forkInfo({ ...base, agent: 'workbuddy' }).ok, false)
+  // 在跑的会话不能分叉
+  const running = forkInfo({ ...base, agent: 'claude', state: 'running' })
+  assert.equal(running.ok, false)
+  assert.match(running.reason, /还在跑/)
+})
+
+test('parseRefine：认 delivery，没写就按 kind 兜底', () => {
+  const fork = parseRefine('{"kind":"followup","title":"补文档","delivery":"fork"}')
+  assert.ok(fork && !fork.skip)
+  assert.equal(fork.draft.delivery, 'fork')
+  // 没声明的：continue / fix 续上下文，followup 从零开始
+  const fix = parseRefine('{"kind":"fix","title":"修超时"}')
+  assert.ok(fix && !fix.skip)
+  assert.equal(fix.draft.delivery, 'fork')
+  const follow = parseRefine('{"kind":"followup","title":"补文档"}')
+  assert.ok(follow && !follow.skip)
+  assert.equal(follow.draft.delivery, 'fresh')
+  // 乱写的值不采纳，按 kind 兜底
+  const junk = parseRefine('{"kind":"fix","title":"修超时","delivery":"resume"}')
+  assert.ok(junk && !junk.skip)
+  assert.equal(junk.draft.delivery, 'fork')
 })
 
 test('清单文本转任务结构：带稳定 id、默认未完成', () => {
