@@ -17,6 +17,7 @@ import {
   createPendingSession,
   createRun,
   createTaskRun,
+  annotateApproval,
   decideApproval,
   expireApproval,
   expireApprovalsOfRuns,
@@ -38,6 +39,7 @@ import {
   listSessions,
   pendingApprovals,
   removeSession,
+  reopenApproval,
   renamePendingSession,
   setRunStatus,
   setRunUsage,
@@ -90,7 +92,8 @@ import {
   refineMessage,
   toChecklist,
 } from './proposals.ts'
-import { getManager, quota, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
+import { getManager, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
+import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
 type Sock = {
@@ -297,6 +300,48 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const withProject = async (userId: number, a: Approval) => ({ ...a, project: (await getSession(pool, userId, a.sessionId))?.project ?? '' })
   const pushApproval = async (userId: number, a: Approval, notify: boolean) => broadcast(userId, { type: 'approval', approval: await withProject(userId, a), notify })
   const pushMessage = (userId: number, message: Message) => broadcast(userId, { type: 'message', message })
+
+  /**
+   * 会话卡在等授权时，先让项目经理看能不能自己放行。
+   * 放行 = 写裁决 + 通知执行器继续，人不再被打扰；判不了 = 把理由挂在记录上交给人。
+   * 两种情况都会推送，调用方不必再推一次。
+   */
+  const refereeHandle = async (userId: number, approval: Approval, machine: string): Promise<void> => {
+    const passToHuman = async (rule: string, reason: string, tier = '') => {
+      const noted = await annotateApproval(pool, userId, approval.id, rule, reason, tier)
+      await pushApproval(userId, noted ?? approval, true)
+    }
+    const manager = await getManager(pool, userId)
+    // 没开代批就按原样推给人，不要往每条审批上写「未开启」这种噪音
+    if (!manager.approve.enabled) return pushApproval(userId, approval, true)
+    const session = await getSession(pool, userId, approval.sessionId)
+    if (!session) return pushApproval(userId, approval, true)
+
+    // 这条审批属于哪个任务：任务自己声明的边界比全局策略更具体，先按它判
+    const linked = await tasksForSession(pool, userId, approval.sessionId).catch(() => [])
+    const grants = linked.find(t => hasConstraints(t.constraints))?.constraints
+    const verdict = judgeApproval({
+      tool: approval.tool, detail: approval.detail, cwd: session.cwd, policy: manager.approve, grants,
+    })
+    if (verdict.action !== 'allow') return passToHuman(verdict.rule, verdict.reason, verdict.tier)
+
+    // 代批也有配额：一小时内放行太多次，说明 agent 在跑飞，后面的全交给人
+    if ((await recentApproveCount(pool, userId)) >= manager.approve.maxPerHour) {
+      return passToHuman('quota', '这一小时的代批次数已用完')
+    }
+    const done = await decideApproval(pool, userId, approval.id, 'allowed', 'manager', verdict.rule, verdict.reason, verdict.tier)
+    // 人抢先点了：这条已经处理过，什么都别再发
+    if (!done) return
+    if (!sendExecutor(userId, machine, { type: 'approval.decide', approvalId: approval.id, decision: 'allow' })) {
+      // 执行器断了：退回待处理，别让记录显示「已放行」而实际没人继续
+      await reopenApproval(pool, userId, approval.id)
+      return passToHuman('offline', '项目经理已放行，但电脑端断开了')
+    }
+    // 时间线里留一句：谁批的、凭什么，事后能追
+    const line = `项目经理已放行：${approval.tool} ${approval.detail.replace(/\s+/g, ' ').slice(0, 200)}（${verdict.reason}）`
+    pushMessage(userId, await insertMessage(pool, userId, approval.sessionId, approval.runId, 'approval', line))
+    await pushApproval(userId, done, false)
+  }
   const pushRun = (userId: number, run: Run) => broadcast(userId, { type: 'run', run })
 
   const closeWhere = (pred: (c: Conn) => boolean) => {
@@ -442,12 +487,16 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const memories = role ? await pickMemories(pool, userId, role.id, task.projectId) : []
     // 项目近况：最近几条任务结论，让接手的人知道这个项目眼下到哪一步了
     const recent = await recentBrief(pool, userId, task.projectId)
-    const instructions = composeInstructions({
-      role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
-      project,
-      recent,
-      memories: memories.map(m => m.content),
-    })
+    const instructions = [
+      composeInstructions({
+        role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
+        project,
+        recent,
+        memories: memories.map(m => m.content),
+      }),
+      // 任务自己声明的边界：一开始就告诉它，省得做一半被卡住
+      boundaryLine(task.constraints),
+    ].filter(Boolean).join('\n\n')
     const dispatch = { model: roleModel(role), instructions }
     // 电脑离线不再直接失败：入队，等那台电脑上线后自动派发（派给谁、发什么都定下来了）
     if (!executors.has(execKey(userId, machine))) {
@@ -985,6 +1034,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       evidence: proposal.evidence,
       draft: {
         title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
+        constraints: proposal.constraints,
         // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
         assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
       },
@@ -1018,6 +1068,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       projectId: proposal.projectId,
       profileId: proposal.profileId,
       checklist: toChecklist(proposal.checklist),
+      // 项目经理声明的执行边界跟着任务走：代批和派发都要用它
+      constraints: proposal.constraints,
     }
     // 清单传的是文本数组，转成任务的 {id,text,done}
     for (const [k, v] of Object.entries(patch)) {
@@ -1243,7 +1295,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         answers = Object.fromEntries(entries.map(([k, v]) => [k, (v as unknown[]).map(x => cleanText(String(x), 500)).slice(0, 10)]))
       }
     }
-    const done = await decideApproval(pool, userId, id, decision === 'allow' ? 'allowed' : 'denied')
+    const done = await decideApproval(pool, userId, id, decision === 'allow' ? 'allowed' : 'denied', 'user')
     if (!done) return reply.code(409).send({ error: '这个授权请求已经处理过了' })
     const qs = done.tool === 'userInput' ? userInputQuestions(done.detail) : null
     const message = await insertMessage(
@@ -1423,9 +1475,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const approval = await createApproval(pool, userId, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
         // Codex 提问（request_user_input）：detail 是 questions 的 JSON，消息里给人看问题文本
         const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', approvalHeading(approval.tool, approval.detail))
-        await pushApproval(userId, approval, true)
         pushMessage(userId, message)
+        // 先告诉执行器这个审批拿到了 id，再发裁决；顺序反了执行器只能走迟到分支
         sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId: approval.id })
+        // 项目经理先看：能自己放行就直接让 agent 继续，判不了才弹给人
+        await refereeHandle(userId, approval, machine)
         return
       }
       case 'run.approvalExpired': {

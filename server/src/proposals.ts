@@ -2,6 +2,7 @@ import type pg from 'pg'
 import { listMessages, type Session } from './db.ts'
 import { TaskError, type Task } from './tasks.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
+import { NO_CONSTRAINTS, normalizeConstraints, hasConstraints, boundaryLine, type TaskConstraints } from './referee.ts'
 
 // 处理意见（Proposal）：一个会话跑完后，先替人把「接下来该做什么」想好，放在会话上等人确认。
 //
@@ -48,6 +49,8 @@ export type Proposal = {
   notes: string
   /** 只是文本；确认建任务时才补 id 和完成状态 */
   checklist: string[]
+  /** 项目经理声明的执行边界：确认后原样落到任务上 */
+  constraints: TaskConstraints
   priority: Priority
   roleId: number | null
   projectId: number | null
@@ -74,6 +77,8 @@ export type ProposalDraft = {
   title: string
   notes: string
   checklist: string[]
+  /** 执行边界；不声明就空着（没声明 = 不收窄，按全局策略代批） */
+  constraints?: TaskConstraints
   priority: Priority
   roleId: number | null
   projectId: number | null
@@ -108,6 +113,7 @@ export async function migrateProposals(db: DB) {
     title text NOT NULL,
     notes text NOT NULL DEFAULT '',
     checklist jsonb NOT NULL DEFAULT '[]'::jsonb,
+    constraints jsonb NOT NULL DEFAULT '{}'::jsonb,
     priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
     role_id bigint,
     project_id bigint,
@@ -124,6 +130,7 @@ export async function migrateProposals(db: DB) {
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS refine_run_id text')
   // 老库补列：执行人挂的配置（新库建表时已有）
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS profile_id bigint')
+  await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_pending ON session_proposals(user_id,status,created_at DESC)')
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_session ON session_proposals(user_id,session_id)')
 }
@@ -139,6 +146,7 @@ const row = (r: any): Proposal => ({
   title: r.title,
   notes: r.notes ?? '',
   checklist: Array.isArray(r.checklist) ? r.checklist.filter((t: unknown): t is string => typeof t === 'string') : [],
+  constraints: normalizeConstraints(r.constraints),
   priority: r.priority ?? 'medium',
   roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id),
   projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id),
@@ -303,6 +311,8 @@ export function heuristicDraft(input: {
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
       checklist: todo.slice(0, MAX_ITEMS).map(t => t.slice(0, MAX_ITEM)),
+      // 接着做同一件事：边界沿用原任务，不要因为换了会话就悄悄放开
+      constraints: task.constraints,
       priority: task.priority === 'high' ? 'high' : 'medium',
       roleId: task.roleId,
       projectId: task.projectId,
@@ -437,12 +447,13 @@ async function saveProposal(pool: DB, userId: number, input: {
   const r = await pool.query(
     `INSERT INTO session_proposals(
        user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
-       kind,title,notes,checklist,priority,role_id,project_id,profile_id,evidence,note,origin)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       kind,title,notes,checklist,constraints,priority,role_id,project_id,profile_id,evidence,note,origin)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
      ON CONFLICT (user_id,session_id,event_at) DO NOTHING RETURNING *`,
     [userId, input.sessionId, input.sessionTitle.slice(0, 200), input.sessionAgent, input.sessionProject.slice(0, 200),
       input.taskId, input.eventAt, input.draft.kind, input.draft.title.slice(0, MAX_TITLE),
       input.draft.notes.slice(0, MAX_NOTES), JSON.stringify(input.draft.checklist),
+      JSON.stringify(normalizeConstraints(input.draft.constraints)),
       input.draft.priority, input.draft.roleId, input.draft.projectId, input.draft.profileId,
       JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin],
   )
@@ -454,7 +465,7 @@ async function saveProposal(pool: DB, userId: number, input: {
 export const REFINE_CONTRACT = `你在 AgentHub 里当项目经理，读完一段刚结束的会话，写一张能直接开工的任务单。
 
 只回一个 JSON 对象（可以用 \`\`\`json 包起来），不要写解释、寒暄或额外段落。字段：
-{"kind":"continue | followup | fix","title":"任务标题","notes":"背景与验证方式","checklist":["验收要点"],"priority":"high | medium | low","roleId":null,"projectId":null,"note":"你的判断依据或缺口"}
+{"kind":"continue | followup | fix","title":"任务标题","notes":"背景与验证方式","checklist":["验收要点"],"priority":"high | medium | low","roleId":null,"projectId":null,"constraints":{"paths":["允许改的相对目录"],"net":false,"push":false,"scripts":false,"note":"一句话边界"},"note":"你的判断依据或缺口"}
 
 规矩：
 - title 动词开头，说清「接下来做什么」，不超过 80 字；不要复述会话内容。
@@ -465,6 +476,11 @@ export const REFINE_CONTRACT = `你在 AgentHub 里当项目经理，读完一�
 - roleId 是执行人：从【可用角色】里挑最合适的编号，优先已经在这个项目/这段会话里做过活的角色；
   没有把握就沿用原任务的执行人；实在没有合适的给 null，让人来定。你自己不做实现。
 - projectId 只能取【可用项目】里的编号，判断不了就给 null。
+- constraints 是这个任务的执行边界，执行中超出边界的动作会停下来问人，所以按「这个任务真的需要什么」写：
+  · paths：这个任务预计要改哪些目录（相对项目根的路径前缀，如 "server/src"、"docs"）。空数组 = 不限目录，能少写就少写。
+  · net：需要装依赖或调用外部接口才 true；push：任务明确要求提交推送才 true；scripts：需要跑项目自定义脚本（npm run xxx 之类）才 true。
+  · 拿不准就一律 false —— 判不准的动作会停下来问人，比放开安全，也不会打断太久。
+  · note：一句话说明边界理由（如「只动服务端，前端这次不碰」），会拼进执行者的系统提示。
 - 如果这段会话没有值得继续做的事（闲聊、被打断、没有产出），只回 {"skip":true}。
 - 不要读写文件、不要执行命令；你只负责出任务单，人确认后才会建任务并派发。`
 
@@ -476,7 +492,7 @@ export function refineMessage(input: {
   task: { title: string; notes: string; todo: string[] } | null
   tail: { role: string; text: string }[]
   evidence: Evidence[]
-  draft: { title: string; notes: string; checklist: string[]; assignee?: string } | null
+  draft: { title: string; notes: string; checklist: string[]; assignee?: string; constraints?: TaskConstraints } | null
   roles: { id: number; name: string; title: string; agent?: string }[]
   projects: { id: number; name: string }[]
 }): string {
@@ -495,7 +511,8 @@ export function refineMessage(input: {
   if (input.draft) {
     parts.push(`【规则档草稿，供参考，可以推翻】\n标题：${input.draft.title}\n说明：${input.draft.notes.slice(0, 600)}`
       + (input.draft.checklist.length ? `\n清单：${input.draft.checklist.join('；')}` : '')
-      + (input.draft.assignee ? `\n现在的执行人：${input.draft.assignee}` : ''))
+      + (input.draft.assignee ? `\n现在的执行人：${input.draft.assignee}` : '')
+      + (input.draft.constraints && hasConstraints(input.draft.constraints) ? `\n现在声明的边界：${boundaryLine(input.draft.constraints)}` : ''))
   }
   if (input.roles.length) parts.push(`【可用角色（名字/职责/执行工具）】${input.roles.map(r => `${r.id}=${r.name}${r.title ? ` / ${r.title}` : ''}${r.agent ? ` / ${r.agent}` : ''}`).join('；')}`)
   if (input.projects.length) parts.push(`【可用项目】${input.projects.map(p => `${p.id}=${p.name}`).join('；')}`)
@@ -544,6 +561,8 @@ export function parseRefine(raw: string): ParsedRefine | null {
         title,
         notes: clamp(obj.notes, MAX_NOTES),
         checklist,
+        // 边界解析不出来就当没声明：宁可多问一句，也不替人放开
+        constraints: normalizeConstraints(obj.constraints ?? NO_CONSTRAINTS),
         priority,
         roleId: num(obj.roleId),
         projectId: num(obj.projectId),

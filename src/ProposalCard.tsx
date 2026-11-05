@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { Api, Profile, Project, Proposal, ProposalInput, Role, Task } from "./lib/api";
+import { constraintsSummary } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 
 // 任务单卡：会话跑完后，项目经理先替人把「接下来做什么、谁来做、在哪做」排好，
@@ -164,6 +165,14 @@ export default function ProposalCard({
           </select>
         </label>
       </div>
+
+      {/* 项目经理排任务单时一并定了「能碰哪」：建任务后就是代批的依据 */}
+      {constraintsSummary(proposal.constraints).length > 0 && (
+        <p className="proposal-bounds">
+          <span className="dim">执行边界</span>
+          {constraintsSummary(proposal.constraints).map(c => <span key={c} className="bound-chip">{c}</span>)}
+        </p>
+      )}
 
       {proposal.evidence.length > 0 && (
         <details className="proposal-evidence">

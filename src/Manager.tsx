@@ -80,6 +80,67 @@ export default function Manager({ api }: { api: Api }) {
           现在在跑 {state.running} 个、最近一小时自动派了 {state.recent} 次；这轮还能再派 {state.quota} 个。
         </p>
         <p className="hint">{PRIORITY_HINT}</p>
+      </section>
+
+      <section className="box">
+        <h2>代为审批</h2>
+        <p className="hint">
+          会话卡在等你授权时，先由规则判断：看得懂的（只读、项目内写文件、跑测试）直接放行，
+          让 agent 接着干；看不透的（删文件、推送、装包、改敏感文件、向你提问）一律交回给你。
+          它只会放行、不会拒绝——判不准就不批。
+        </p>
+        <p className="hint">
+          任务自己声明了「执行边界」（任务详情页）时，边界优先：写在那里的目录、联网、推远端、
+          跑脚本不再需要授权；反过来，写到边界外的动作会单独标出来交给你。
+        </p>
+        <div className="form-grid">
+          <label>代批开关
+            <select value={m.approve.enabled ? "on" : "off"} disabled={busy}
+              onChange={e => void save({ approve: { ...m.approve, enabled: e.target.value === "on" } })}>
+              <option value="off">关闭（每条都等我点）</option>
+              <option value="on">开启（安全的自动放行）</option>
+            </select>
+          </label>
+          <label>只读命令
+            <select value={m.approve.allowRead ? "on" : "off"} disabled={busy}
+              onChange={e => void save({ approve: { ...m.approve, allowRead: e.target.value === "on" } })}>
+              <option value="on">放行（ls / cat / git status 等）</option>
+              <option value="off">也问我</option>
+            </select>
+          </label>
+          <label>项目内写文件
+            <select value={m.approve.allowWrite ? "on" : "off"} disabled={busy}
+              onChange={e => void save({ approve: { ...m.approve, allowWrite: e.target.value === "on" } })}>
+              <option value="on">放行（不能越出项目目录）</option>
+              <option value="off">也问我</option>
+            </select>
+          </label>
+          <label>测试与构建
+            <select value={m.approve.allowTests ? "on" : "off"} disabled={busy}
+              onChange={e => void save({ approve: { ...m.approve, allowTests: e.target.value === "on" } })}>
+              <option value="on">放行（npm test / tsc 等）</option>
+              <option value="off">也问我</option>
+            </select>
+          </label>
+          <label>联网
+            <select value={m.approve.allowNetwork ? "on" : "off"} disabled={busy}
+              onChange={e => void save({ approve: { ...m.approve, allowNetwork: e.target.value === "on" } })}>
+              <option value="off">问我（装包、请求外网都拦）</option>
+              <option value="on">放行</option>
+            </select>
+          </label>
+          <label>每小时最多代批
+            <select value={String(m.approve.maxPerHour)} disabled={busy}
+              onChange={e => void save({ approve: { ...m.approve, maxPerHour: Number(e.target.value) } })}>
+              {[10, 20, 40, 60, 100, 200, 400].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+        </div>
+        <p className="hint">
+          无论怎么配，这些永远交给你：删除（rm）、git push / reset --hard、装包、发布、提权、
+          下载即执行、越出项目目录、读写 .env / 密钥、MCP 工具，以及 agent 向你提的问题。
+          超过每小时上限后，剩下的全部回到你手上。
+        </p>
         {msg && <p className="msg">{msg}</p>}
         {err && <p className="msg bad">{err}</p>}
       </section>

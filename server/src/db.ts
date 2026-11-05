@@ -12,6 +12,7 @@ import { migrateMemories } from './memories.ts'
 import { migrateAssistant } from './assistant.ts'
 import { migrateProposals } from './proposals.ts'
 import { migrateArtifacts } from './artifacts.ts'
+import { migrateReferee } from './referee.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
@@ -212,6 +213,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateDispatchManager(client)
     // 任务产物引用 tasks；项目近况的表在 migrateProjects 里一起建（同属项目上下文）
     await migrateArtifacts(client)
+    // 审批来源（人 / 项目经理代批）加在 approvals 上，表在建库时就存在了
+    await migrateReferee(client)
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()
@@ -452,6 +455,13 @@ export type Approval = {
   tool: string
   detail: string
   status: ApprovalStatus
+  /** 谁做的决定：user = 人点的，manager = 项目经理按规则代批 */
+  decidedBy: 'user' | 'manager'
+  /** 代批命中的规则 id 与一句话理由，界面要显示「为什么它敢批」 */
+  decisionRule: string
+  decisionReason: string
+  /** 裁决层级：pending 时是「为什么轮不到规则定」，decided 时是「凭什么放的」 */
+  decisionTier: string
   createdAt: string
   decidedAt: string | null
 }
@@ -465,6 +475,10 @@ type ApprovalRow = {
   tool: string
   detail: string
   status: ApprovalStatus
+  decided_by?: string | null
+  decision_rule?: string | null
+  decision_reason?: string | null
+  decision_tier?: string | null
   created_at: Date
   decided_at: Date | null
 }
@@ -499,6 +513,10 @@ const toApproval = (r: ApprovalRow): Approval => ({
   tool: r.tool,
   detail: r.detail,
   status: r.status,
+  decidedBy: r.decided_by === 'manager' ? 'manager' : 'user',
+  decisionRule: r.decision_rule ?? '',
+  decisionReason: r.decision_reason ?? '',
+  decisionTier: r.decision_tier ?? '',
   createdAt: r.created_at.toISOString(),
   decidedAt: r.decided_at ? r.decided_at.toISOString() : null,
 })
@@ -764,8 +782,33 @@ export async function getApproval(pool: pg.Pool, userId: number, id: string): Pr
 }
 
 // 只有 pending 才能被决定；返回 null 表示已经不是 pending
-export async function decideApproval(pool: pg.Pool, userId: number, id: string, status: 'allowed' | 'denied'): Promise<Approval | null> {
-  const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = $2, decided_at = now() WHERE user_id = $3 AND id = $1 AND status = 'pending' RETURNING *", [id, status, userId])
+export async function decideApproval(
+  pool: pg.Pool, userId: number, id: string, status: 'allowed' | 'denied',
+  by: 'user' | 'manager' = 'user', rule = '', reason = '', tier = '',
+): Promise<Approval | null> {
+  // status='pending' 是并发闸门：人点和代批同时发生时只有一个能落地
+  const r = await pool.query<ApprovalRow>(
+    "UPDATE approvals SET status=$2, decided_at=now(), decided_by=$4, decision_rule=$5, decision_reason=$6, decision_tier=$7 WHERE user_id=$3 AND id=$1 AND status='pending' RETURNING *",
+    [id, status, userId, by, rule.slice(0, 60), reason.slice(0, 300), tier.slice(0, 20)],
+  )
+  return r.rows[0] ? toApproval(r.rows[0]) : null
+}
+
+/** 代批看过了但不敢批：把规则和理由挂在待处理记录上，人点之前就能看到风险点 */
+export async function annotateApproval(pool: pg.Pool, userId: number, id: string, rule: string, reason: string, tier = ''): Promise<Approval | null> {
+  const r = await pool.query<ApprovalRow>(
+    "UPDATE approvals SET decision_rule=$3, decision_reason=$4, decision_tier=$5 WHERE user_id=$2 AND id=$1 AND status='pending' RETURNING *",
+    [id, userId, rule.slice(0, 60), reason.slice(0, 300), tier.slice(0, 20)],
+  )
+  return r.rows[0] ? toApproval(r.rows[0]) : null
+}
+
+/** 代批之后发现执行端没收到（断线）：把记录退回待处理，改由人来决定 */
+export async function reopenApproval(pool: pg.Pool, userId: number, id: string): Promise<Approval | null> {
+  const r = await pool.query<ApprovalRow>(
+    "UPDATE approvals SET status='pending', decided_at=NULL, decided_by='user', decision_rule='', decision_reason='', decision_tier='' WHERE user_id=$2 AND id=$1 AND status='allowed' RETURNING *",
+    [id, userId],
+  )
   return r.rows[0] ? toApproval(r.rows[0]) : null
 }
 

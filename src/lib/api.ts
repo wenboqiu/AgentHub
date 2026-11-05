@@ -9,8 +9,35 @@ export type NotifySettings = {
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
-export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "profileId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
+/** 任务的执行边界：派活时定下来，代批先按它判，也拼进执行者的系统提示 */
+export type TaskConstraints = {
+  /** 只允许改这些子目录（相对项目目录）；空 = 整个项目 */
+  paths: string[];
+  /** 联网与装依赖 */
+  net: boolean;
+  /** 推远端 */
+  push: boolean;
+  /** 跑项目里的自定义脚本 */
+  scripts: boolean;
+  /** 一句话说明，拼进系统提示 */
+  note: string;
+};
+export const NO_CONSTRAINTS: TaskConstraints = { paths: [], net: false, push: false, scripts: false, note: "" };
+export const hasConstraints = (c?: TaskConstraints | null): boolean =>
+  !!c && (c.paths.length > 0 || c.net || c.push || c.scripts || !!c.note);
+/** 界面上的短标签：这个任务被允许做什么 */
+export function constraintsSummary(c?: TaskConstraints | null): string[] {
+  if (!c) return [];
+  return [
+    c.paths.length ? `只改 ${c.paths.join("、")}` : "",
+    c.net ? "可联网" : "",
+    c.push ? "可推远端" : "",
+    c.scripts ? "可跑脚本" : "",
+    c.note,
+  ].filter(Boolean);
+}
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "profileId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | keyof Schedule>>;
 /** 项目配置：一组执行环境 + 默认优先级 + 检查项模板，起个名字复用 */
 export type Profile = { id: number; name: string; agent: Task["agent"]; machine: string | null; cwd: string | null; priority: Task["priority"]; checklist: string[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProfileInput = Partial<Omit<Profile, "id" | "tasks" | "createdAt" | "updatedAt">>;
@@ -112,6 +139,8 @@ export type Proposal = {
   title: string;
   notes: string;
   checklist: string[];
+  /** 项目经理声明的执行边界：确认后原样落到任务上 */
+  constraints: TaskConstraints;
   priority: Task["priority"];
   roleId: number | null;
   projectId: number | null;
@@ -129,7 +158,24 @@ export type Proposal = {
 export type ProposalInput = Partial<Pick<Proposal, "title" | "notes" | "checklist" | "priority" | "roleId" | "projectId" | "profileId">>;
 
 /** 项目经理：全局一个，负责细化意见，可选地把已确认的任务自动派出去 */
-export type DispatchManager = { roleId: number | null; enabled: boolean; maxRunning: number; maxPerHour: number; updatedAt: string | null };
+/** 代批策略：会话卡在等授权时，项目经理能自己放行哪些操作 */
+export type ApprovePolicy = {
+  enabled: boolean;
+  allowRead: boolean;
+  allowWrite: boolean;
+  allowTests: boolean;
+  allowNetwork: boolean;
+  /** 每小时最多代批几次，超了全交回给人 */
+  maxPerHour: number;
+};
+export type DispatchManager = {
+  roleId: number | null;
+  enabled: boolean;
+  maxRunning: number;
+  maxPerHour: number;
+  approve: ApprovePolicy;
+  updatedAt: string | null;
+};
 export type ManagerState = { manager: DispatchManager; roles?: Role[]; running: number; recent: number; quota: number };
 /** Thread 事件：任务视角的统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要） */
 export type ThreadEvent =
@@ -189,6 +235,12 @@ export type ActivityBucket = { sessionId: string; at: string; count: number };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";
 export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null }
 export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
+/** 交回给人时的那句话：硬红线、边界外、规则看不懂，处理方式不一样 */
+export const APPROVAL_TIER_LABEL: Record<string, string> = {
+  danger: "硬红线",
+  gray: "边界外",
+  unknown: "规则看不懂",
+};
 export type Approval = {
   id: string;
   runId: string;
@@ -196,6 +248,13 @@ export type Approval = {
   tool: string;
   detail: string;
   status: ApprovalStatus;
+  /** user = 人点的；manager = 项目经理按规则代批的 */
+  decidedBy: "user" | "manager";
+  /** 代批/交回的理由：待处理时说明「为什么它没敢批」 */
+  decisionRule: string;
+  decisionReason: string;
+  /** 裁决层级：danger 硬红线 / gray 看上下文 / unknown 规则看不懂 */
+  decisionTier: string;
   createdAt: string;
   decidedAt: string | null;
   project?: string;

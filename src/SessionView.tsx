@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isRunActive, type Api, type Approval, type Message, type Project, type Proposal, type Role, type Run, type Session, type Task } from "./lib/api";
+import { isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Project, type Proposal, type Role, type Run, type RunActivity, type Session, type Task } from "./lib/api";
 import { desktop, isAndroid, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
@@ -12,6 +12,7 @@ import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
 import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
+import { formatElapsed, liveLabel, runElapsed, runSummary } from "./lib/runMeta";
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -79,6 +80,8 @@ const parseQuestions = (detail: string): UserQuestion[] | null => {
 export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, roles, projects, autoDispatch, onProposal }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
+  /** 运行中：执行器刚上报的「正在做什么」（agent 自己的话），不是本地编的状态 */
+  const [activity, setActivity] = useState<RunActivity | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
   // 任务单一次只处理一张，避免连点生成两个任务
@@ -114,6 +117,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     if (!id) return;
     setMessages([]);
     setRun(null);
+    setActivity(null);
     setLoading(true);
     setErr("");
     setImages([]); // 附件不跟着串到别的会话
@@ -121,6 +125,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     const sync = syncSession(api, id, bus, (data) => {
       setMessages(data.messages);
       setRun(data.run);
+      setActivity(data.activity);
     }, (e) => setErr(e instanceof Error ? e.message : String(e)), () => setLoading(false));
     syncRef.current = sync;
     void sync.reload();
@@ -202,6 +207,16 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  // 运行中每秒走一次表：思考计时和「刚刚还在执行工具」都得靠它推进
+  const active = isRunActive(run);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [active, run?.id]);
   // 内容指纹：条数 + 总字数。回复是流式长出来的（同一条消息变长、条数不变），
   // 只盯条数会在回复变长时漏掉跟随，末尾就会滑到输入框后面。
   const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0);
@@ -224,7 +239,6 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     );
   }
 
-  const active = isRunActive(run);
   const terminalRun = !!run && messages.some(m=>m.runId===run.id && m.role==="system" && m.text.startsWith("已连接原终端"));
   const reason = sendBlockReason({ session, agents, running: active });
 
@@ -433,6 +447,18 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
             </li>
           ))}
         </ul>
+        {/* 运行中：这行只播报 agent 自己说了什么（思考原文 / 工具 / 正在写的正文），不编状态 */}
+        {active && !terminalRun && (
+          <div className="live-row" role="status" aria-live="polite">
+            <span className="live-dots" aria-hidden="true"><i /><i /><i /></span>
+            <span className="live-text" title={activity?.text || undefined}>
+              {approvals.length > 0 ? "等待你的确认" : liveLabel(activity, agentName(session.agent))}
+            </span>
+            <span className="live-time">{formatElapsed(run ? runElapsed(run, now) : 0)}</span>
+          </div>
+        )}
+        {/* 跑完：这一轮花了多久、烧了多少 token */}
+        {run && !active && <p className="run-meta">{runSummary(run, now)}</p>}
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
         {/* 任务单：会话跑完后由项目经理排好「做什么、谁来做、在哪做」，等人确认 */}
         {proposals.length > 0 && (
@@ -469,6 +495,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                     <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
                   </div>
                   <pre>{a.detail}</pre>
+                  {a.decisionReason && (
+                    <p className="approval-note">
+                      <span className={`tier-badge ${a.decisionTier || "unknown"}`}>{APPROVAL_TIER_LABEL[a.decisionTier] ?? "交回给人"}</span>
+                      项目经理看过了：{a.decisionReason}。需要你来定。
+                    </p>
+                  )}
                   <div className="btns">
                     <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
                       {deciding === a.id ? "处理中…" : "允许"}

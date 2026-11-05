@@ -1,8 +1,11 @@
 import type pg from 'pg'
 import { TaskError, object } from './tasks.ts'
+import { DEFAULT_POLICY, type RefereePolicy } from './referee.ts'
 
-// 项目经理：一个账号一个，负责两件事——把处理意见「细化」成人话，以及在开关打开时把
-// 人已经确认过的任务派出去。
+// 项目经理：一个账号一个，负责三件事——把处理意见「细化」成人话、在开关打开时把
+// 人已经确认过的任务派出去、以及在会话卡在等授权时按规则代批（judgeApproval）。
+//
+// 代批与自动派发是两个独立开关：可以只代批不派活，也可以只派活不代批。
 //
 // 自动化边界（重要，改这里之前先想清楚）：
 //   ① 只派「由处理意见确认生成」的任务（created_task_id 指向它），历史 todo 一律不动；
@@ -25,10 +28,15 @@ export type DispatchManager = {
   maxRunning: number
   /** 每小时最多自动派几次 */
   maxPerHour: number
+  /** 代批策略：waiting 时哪些操作可以不让真人点 */
+  approve: RefereePolicy
   updatedAt: string | null
 }
 
-export const DEFAULT_MANAGER: DispatchManager = { roleId: null, enabled: false, maxRunning: 2, maxPerHour: 6, updatedAt: null }
+export const DEFAULT_MANAGER: DispatchManager = {
+  roleId: null, enabled: false, maxRunning: 2, maxPerHour: 6,
+  approve: { ...DEFAULT_POLICY }, updatedAt: null,
+}
 const MAX_RUNNING_CAP = 10
 const MAX_PER_HOUR_CAP = 60
 const FAIL_LIMIT = 3
@@ -40,6 +48,12 @@ export async function migrateDispatchManager(db: DB) {
     enabled boolean NOT NULL DEFAULT false,
     max_running integer NOT NULL DEFAULT 2,
     max_per_hour integer NOT NULL DEFAULT 6,
+    approve_enabled boolean NOT NULL DEFAULT false,
+    approve_read boolean NOT NULL DEFAULT true,
+    approve_write boolean NOT NULL DEFAULT true,
+    approve_tests boolean NOT NULL DEFAULT true,
+    approve_network boolean NOT NULL DEFAULT false,
+    approve_per_hour integer NOT NULL DEFAULT 60,
     updated_at timestamptz NOT NULL DEFAULT now())`)
   // 自动派发留痕：谁派的、结果如何、为什么没派成。任务卡上要能回答「这是谁派给我的」
   await db.query(`CREATE TABLE IF NOT EXISTS dispatch_auto_log (
@@ -51,6 +65,15 @@ export async function migrateDispatchManager(db: DB) {
     error text NOT NULL DEFAULT '',
     created_at timestamptz NOT NULL DEFAULT now())`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_dispatch_auto_task ON dispatch_auto_log(user_id,task_id,created_at DESC)')
+  // 老库补列：代批是后加的，CREATE TABLE IF NOT EXISTS 不会给已有表加字段
+  for (const col of [
+    'approve_enabled boolean NOT NULL DEFAULT false',
+    'approve_read boolean NOT NULL DEFAULT true',
+    'approve_write boolean NOT NULL DEFAULT true',
+    'approve_tests boolean NOT NULL DEFAULT true',
+    'approve_network boolean NOT NULL DEFAULT false',
+    'approve_per_hour integer NOT NULL DEFAULT 60',
+  ]) await db.query(`ALTER TABLE dispatch_manager ADD COLUMN IF NOT EXISTS ${col}`)
 }
 
 const row = (r: any): DispatchManager => ({
@@ -58,6 +81,14 @@ const row = (r: any): DispatchManager => ({
   enabled: !!r.enabled,
   maxRunning: Number(r.max_running ?? 2),
   maxPerHour: Number(r.max_per_hour ?? 6),
+  approve: {
+    enabled: !!r.approve_enabled,
+    allowRead: r.approve_read !== false,
+    allowWrite: r.approve_write !== false,
+    allowTests: r.approve_tests !== false,
+    allowNetwork: !!r.approve_network,
+    maxPerHour: Number(r.approve_per_hour ?? 60),
+  },
   updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
 })
 
@@ -90,16 +121,31 @@ export async function saveManager(db: DB, user: number, raw: unknown): Promise<D
     if (typeof b.enabled !== 'boolean') throw new TaskError('开关必须是布尔值')
     enabled = b.enabled
   }
-  // 开着自动派发却没有项目经理：相当于「没人负责还自动开工」，直接拒绝
-  if (enabled && roleId === null) throw new TaskError('先选一个项目经理角色，再开启自动派发')
   const maxRunning = 'maxRunning' in b ? int(b.maxRunning, '并发上限', 1, MAX_RUNNING_CAP) : cur.maxRunning
   const maxPerHour = 'maxPerHour' in b ? int(b.maxPerHour, '每小时上限', 1, MAX_PER_HOUR_CAP) : cur.maxPerHour
+  const approve = { ...cur.approve }
+  if ('approve' in b) {
+    const a = object(b.approve ?? {})
+    for (const k of ['enabled', 'allowRead', 'allowWrite', 'allowTests', 'allowNetwork'] as const) {
+      if (k in a) {
+        if (typeof a[k] !== 'boolean') throw new TaskError(`${k} 必须是布尔值`)
+        approve[k] = a[k] as boolean
+      }
+    }
+    if ('maxPerHour' in a) approve.maxPerHour = int(a.maxPerHour, '每小时代批上限', 1, 600)
+  }
+  // 开着自动派发或代批却没有项目经理：等于「没人负责还自动放行」，直接拒绝
+  if ((enabled || approve.enabled) && roleId === null) throw new TaskError('先选一个项目经理角色，再开启自动派发或代批')
   const r = await db.query(
-    `INSERT INTO dispatch_manager(user_id,role_id,enabled,max_running,max_per_hour,updated_at)
-     VALUES($1,$2,$3,$4,$5,now())
-     ON CONFLICT (user_id) DO UPDATE SET role_id=$2, enabled=$3, max_running=$4, max_per_hour=$5, updated_at=now()
+    `INSERT INTO dispatch_manager(user_id,role_id,enabled,max_running,max_per_hour,
+       approve_enabled,approve_read,approve_write,approve_tests,approve_network,approve_per_hour,updated_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+     ON CONFLICT (user_id) DO UPDATE SET role_id=$2, enabled=$3, max_running=$4, max_per_hour=$5,
+       approve_enabled=$6, approve_read=$7, approve_write=$8, approve_tests=$9, approve_network=$10,
+       approve_per_hour=$11, updated_at=now()
      RETURNING *`,
-    [user, roleId, enabled, maxRunning, maxPerHour],
+    [user, roleId, enabled, maxRunning, maxPerHour,
+      approve.enabled, approve.allowRead, approve.allowWrite, approve.allowTests, approve.allowNetwork, approve.maxPerHour],
   )
   return row(r.rows[0])
 }
@@ -107,6 +153,15 @@ export async function saveManager(db: DB, user: number, raw: unknown): Promise<D
 /** 当前占用的并发：排队中 + 运行中的 run（不分来源，机器是同一台） */
 export async function runningCount(db: DB, user: number): Promise<number> {
   const r = await db.query("SELECT count(*) c FROM runs WHERE user_id=$1 AND status IN ('queued','running')", [user])
+  return Number(r.rows[0]?.c ?? 0)
+}
+
+/** 最近一小时已经代批了几次：超上限就全部交回给人 */
+export async function recentApproveCount(db: DB, user: number): Promise<number> {
+  const r = await db.query(
+    "SELECT count(*) c FROM approvals WHERE user_id=$1 AND decided_by='manager' AND decided_at > now() - interval '1 hour'",
+    [user],
+  )
   return Number(r.rows[0]?.c ?? 0)
 }
 

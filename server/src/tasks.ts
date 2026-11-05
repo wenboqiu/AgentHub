@@ -1,11 +1,13 @@
 import type pg from 'pg'
 import type { State } from './db.ts'
+// 边界形状由 referee 定义（纯函数、无运行时依赖），代批和存库共用同一份定义
+import { normalizeConstraints, type TaskConstraints } from './referee.ts'
 
 type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null }
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -29,7 +31,7 @@ export function id(raw: unknown): number {
 const iso = (v: Date) => v.toISOString()
 const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
 const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority, doneAt: r.done_at ? iso(r.done_at) : null })
-const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], goalId: r.goal_id === null ? null : Number(r.goal_id), projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id), profileId: r.profile_id === null || r.profile_id === undefined ? null : Number(r.profile_id), roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null, queuedAt: r.queued_at ? iso(r.queued_at) : null })
+const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], constraints: normalizeConstraints(r.constraints), goalId: r.goal_id === null ? null : Number(r.goal_id), projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id), profileId: r.profile_id === null || r.profile_id === undefined ? null : Number(r.profile_id), roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null, queuedAt: r.queued_at ? iso(r.queued_at) : null })
 // 排队态由 task_dispatch_queue 推导（任务被删时队列行随 FK 一起走）
 const TASK_COLUMNS = `t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids,
       (SELECT min(r.created_at) FROM runs r WHERE r.user_id=t.user_id AND r.task_id=t.id AND r.status IN ('queued','running')) timer_since,
@@ -72,6 +74,8 @@ export async function migrateTasks(db: DB) {
       ADD COLUMN IF NOT EXISTS remind_due boolean NOT NULL DEFAULT true`)
   }
   await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS checklist jsonb NOT NULL DEFAULT '[]'::jsonb`)
+  // 执行边界：派活时定下来，代批先按它判，也拼进执行端的系统提示
+  await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   // runs.task_id 指向任务；任务删除后执行记录保留，只解除关联
   await db.query(`DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'runs_task_id_fkey') THEN
@@ -131,6 +135,13 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
   if ('priority' in b) {
     if (!['high','medium','low'].includes(b.priority as string)) throw new TaskError('优先级不合法')
     out.priority = b.priority
+  }
+  // 执行边界只做声明：看不懂的目录会被丢掉，四项能力没声明就是不许
+  if (isTask && 'constraints' in b) {
+    if (b.constraints !== null && (typeof b.constraints !== 'object' || Array.isArray(b.constraints))) {
+      throw new TaskError('执行边界格式不正确')
+    }
+    out.constraints = JSON.stringify(normalizeConstraints(b.constraints))
   }
   if (!create && 'status' in b) {
     const valid = isTask ? ['todo','doing','review','done'] : ['active','done','archived']
