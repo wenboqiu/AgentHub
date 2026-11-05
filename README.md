@@ -193,22 +193,23 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 
 ## 打包后自动上传（Cloudreve）
 
-出包后把安装包推到 `https://share.wondergarden.top`（Cloudreve v4，WebDAV 入口 `/dav`）的 `cloudreve://my/Artifacts`。
+出包后把安装包推到 `https://share.wondergarden.top`（Cloudreve v4，WebDAV 入口 `/dav`），按 `Artifacts/AgentHub/<版本>/` 组织。上传逻辑在用户级技能 `~/.workbuddy/skills/release-uploader/`（跨项目通用），仓库里的 `scripts/publish-release.mjs` 只是把工作目录转发给技能。
 
 **一次性配置**
 
 1. Cloudreve 前台 →「连接与挂载」→「WebDAV」→ 创建账号。用户名是登录邮箱，密码是系统生成的 **WebDAV 专用密码**（不是网页登录密码）；账号没有 WebDAV 权限时先让管理员在「用户组」里勾上。
-2. 把 `.env.example` 复制成 `.env.local`（已被 `.gitignore` 的 `*.local` 忽略）并填：
+2. `.env.local`（已被 `.gitignore` 的 `*.local` 忽略）：
 
    ```ini
    CLOUDREVE_URL=https://share.wondergarden.top
    CLOUDREVE_USER=<登录邮箱>
    CLOUDREVE_PASS=<WebDAV 专用密码>
-   CLOUDREVE_DIR=/
-   CLOUDREVE_OPEN_PATH=my/Artifacts
+   CLOUDREVE_BASE_DIR=/
+   CLOUDREVE_OPEN_BASE=my/Artifacts
+   CLOUDREVE_LATEST=1
    ```
 
-   现有这个 WebDAV 账号的**根目录本身就是 `my/Artifacts`**（`PROPFIND /dav/` 返回 `displayname=Artifacts`），所以 `CLOUDREVE_DIR=/`，文件直接落在 `Artifacts` 里面；`CLOUDREVE_OPEN_PATH` 只用来拼「打开目录」的网页链接。
+   现有这个 WebDAV 账号的**根目录本身就是 `my/Artifacts`**（`PROPFIND /dav/` 返回 `displayname=Artifacts`），所以 `CLOUDREVE_BASE_DIR=/`；`CLOUDREVE_OPEN_BASE` 只用来拼「打开目录」的网页链接。
 
 3. 先跑一次体检（只读，不上传）：
 
@@ -219,23 +220,25 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 **日常出包**
 
 ```bash
-npm run release              # tauri build → 自动上传
-npm run publish:artifact     # 已经有产物了，只上传（--dry-run 只看会传哪个文件）
+npm run release              # tauri build → 自动上传（含 latest 镜像）
+npm run publish:artifact     # 已经有产物了，只上传（加 -- --dry-run 只看会传哪个文件）
 ```
 
-上传布局（同一份安装包写两处，`latest` 的下载地址固定不变，方便对外发链接）：
+上传布局（`CLOUDREVE_LATEST=1` 时同一份安装包写两处，`latest` 链接固定不变）：
 
 ```
-Artifacts/
-  v0.9.9/AgentHub_0.9.9_x64-setup.exe     # 版本归档
+Artifacts/AgentHub/
+  0.9.9/AgentHub_0.9.9_x64-setup.exe
+  0.9.9/manifest.json                     # project / version / files[].sha256 / builtAt
   latest/AgentHub_0.9.9_x64-setup.exe     # 固定命名，随时被新版本覆盖
-  latest/manifest.json                    # version / size / sha256 / builtAt
+  latest/manifest.json
 ```
 
-- 想只保留 `latest` 不留历史：`CLOUDREVE_KEEP_VERSIONS=0`。
-- `CLOUDREVE_DIR` 是**相对 WebDAV 账号根目录**的路径。现有账号根目录 = `my/Artifacts`，所以写 `/`；如果换成一个根目录是 `my` 的账号，就写 `Artifacts`（命令行等价 `--dir=Artifacts`）。
-- 404 目录会被脚本自动 `MKCOL` 创建；401 基本是「用了登录密码」或「账号没开 WebDAV 权限」。
-- `/dav/...` 直链要带 Basic Auth，不能当公开下载地址用；要对外发链接就在 Cloudreve 里给 `latest/` 建分享。`latest/manifest.json` 里的 `webUrl` 指向网页目录。
+- 版本号自动读 `tauri.conf.json`（其次 `package.json`/`Cargo.toml`），产物名里必须带这个版本号；对不上会直接报错退出（不会把旧包当新版本传）。刚改版本号没重新打包时用 `--version=<版本>` 或 `--file=<路径>` 显式指定，详见技能的 SKILL.md。
+- `CLOUDREVE_BASE_DIR` 是**相对 WebDAV 账号根目录**的路径。现有账号根目录 = `my/Artifacts`，所以写 `/`；如果换成一个根目录是 `my` 的账号，就写 `Artifacts`（命令行等价 `--dir=Artifacts`）。
+- 多级目录会被逐级 `MKCOL` 创建；PUT 覆盖同名文件是幂等的，重复执行安全。
+- 401 基本是「用了登录密码」或「账号没开 WebDAV 权限」。
+- `/dav/...` 直链要带 Basic Auth，不能当公开下载地址用；要对外发链接就在 Cloudreve 里给 `latest/` 建分享。manifest 里的 `webUrl` 指向网页目录。
 - macOS 的 `.app` 是目录、Android 的 apk 不在 `bundle/` 下，这两种用 `npm run publish:artifact -- --file=<路径>` 指定。
 
 ## 部署（Dokploy，本次未部署）

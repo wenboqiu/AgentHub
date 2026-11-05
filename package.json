@@ -9,9 +9,9 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "release": "tauri build && node scripts/publish-cloudreve.mjs",
-    "release:check": "node scripts/publish-cloudreve.mjs --check",
-    "publish:artifact": "node scripts/publish-cloudreve.mjs"
+    "release": "tauri build && node scripts/publish-release.mjs --latest",
+    "release:check": "node scripts/publish-release.mjs --check",
+    "publish:artifact": "node scripts/publish-release.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
