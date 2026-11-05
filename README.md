@@ -148,6 +148,20 @@ echo '{"hook_event_name":"Stop","session_id":"t1","cwd":"D:\\Work2\\Demo","trans
 echo '{}' | bash src-tauri/resources/agenthub-report.sh | wc -c   # 0
 ```
 
+## macOS 构建
+
+```bash
+npm ci
+npm run tauri build        # 产物 src-tauri/target/release/bundle/macos/AgentHub.app
+cp -R src-tauri/target/release/bundle/macos/AgentHub.app ~/Applications/
+xattr -dr com.apple.quarantine ~/Applications/AgentHub.app   # 未签名包首次启动被拦时
+```
+
+- 打包目标按平台拆：`tauri.conf.json` 里只留 `nsis`，macOS 由 `src-tauri/tauri.macos.conf.json` 覆盖成 `app`（两边写在一起会让对方的平台去找不存在的打包器）。
+- 机器上没有 Node 时，可直接下官方 darwin 包解到 `~/.local/node`，跑 npm 前 `export PATH=$HOME/.local/node/bin:$PATH`（否则 npm 的 shebang 找不到 node）。
+- 需要 dmg：在**已登录桌面**的会话里跑 `npm run tauri build -- --bundles app,dmg`。dmg 打包由 `bundle_dmg.sh` 调 Finder 摆图标，SSH 无人值守会一直卡在 `osascript` 上。
+- 仅 Windows 的能力（终端续聊、窗口/标签页跳转、进程链匹配）在 macOS 上会走降级分支直接报错；采集、会话、任务、通知正常。
+
 ## Android 构建
 
 ```bash
@@ -204,4 +218,4 @@ src-tauri/gen/android/gradlew --stop      # 构建结束后停掉 Gradle daemon
 - WorkBuddy 的完成提醒依赖静默确认窗口：模型长时间思考或工具执行期间不判结束，正常结束会比实际晚 20 秒（工具结果后 60 秒）才提醒；拿不到等待授权状态，因此不能在 AgentHub 里批授权。
 - WorkBuddy 的 transcript 结构没有对外承诺，升级后可能改变字段或目录，届时采集会失效需要重新适配。
 - ZCode 的 `~/.zcode/v2/sessions` 目录结构与其内部 `meta.status` 枚举没有对外承诺，升级后可能改变，届时采集会失效需要重新适配；从 Claude Code 迁移过来的会话（`migrationSource: claudeCode`）在 ZCode 和 Claude 两侧各显示一条。
-- 仅 Windows + Android，不做 iOS / macOS，多账号隔离（管理员建账号）。任务管理暂不包含到期提醒、重复任务、子任务和离线编辑。
+- 主力平台 Windows + Android；macOS 可自行源码构建（见「macOS 构建」，终端续聊/窗口跳转降级），不做 iOS。多账号隔离（管理员建账号）。任务管理暂不包含到期提醒、重复任务、子任务和离线编辑。
