@@ -13,6 +13,7 @@ const AGENT_LABELS: { key: keyof NotifySettings["agents"]; label: string }[] = [
   { key: "codex", label: "Codex" },
   { key: "doubao", label: "豆包" },
   { key: "workbuddy", label: "WorkBuddy" },
+  { key: "zcode", label: "ZCode" },
 ];
 const KIND_LABELS: { key: NotifyKind; label: string }[] = [
   { key: "done", label: "会话完成" },

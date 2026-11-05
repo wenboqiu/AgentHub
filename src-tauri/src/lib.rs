@@ -13,6 +13,8 @@ mod doubao;
 #[cfg(desktop)]
 mod workbuddy;
 #[cfg(desktop)]
+mod zcode;
+#[cfg(desktop)]
 mod collector;
 #[cfg(desktop)]
 mod config;
@@ -212,6 +214,7 @@ mod desktop {
                 codex::spawn(forwarder.clone());
                 crate::doubao::spawn(forwarder.clone());
                 crate::workbuddy::spawn(forwarder.clone());
+                crate::zcode::spawn(forwarder.clone());
                 crate::reconcile::spawn(shared.clone());
                 let remote_status = remote::spawn(shared.clone());
                 app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });

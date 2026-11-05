@@ -4,10 +4,11 @@ export const AGENT_LABEL: Record<string, string> = {
   codex: "Codex",
   doubao: "豆包",
   workbuddy: "WorkBuddy",
+  zcode: "ZCode",
 };
 
 /** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent */
-const LISTEN_ONLY = new Set(["doubao", "workbuddy"]);
+const LISTEN_ONLY = new Set(["doubao", "workbuddy", "zcode"]);
 
 export const isListenOnly = (agent: string | null | undefined): boolean => !!agent && LISTEN_ONLY.has(agent);
 

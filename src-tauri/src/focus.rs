@@ -171,13 +171,14 @@ pub(crate) mod win {
             }
             return Err("没找到该会话所在的窗口（可能已经关闭）".into());
         }
-        if agent == "codex" || agent == "doubao" || agent == "workbuddy" {
+        if agent == "codex" || agent == "doubao" || agent == "workbuddy" || agent == "zcode" {
             // Codex Desktop 的窗口进程是 ChatGPT.exe（实测），名字里没有 codex；
             // 其它形态按可执行名包含 codex 兜底。都要求有可见主窗口
             for (pid, p) in &procs {
                 let matched = match agent {
                     "codex" => is_codex_exe(&p.exe),
                     "doubao" => p.exe.eq_ignore_ascii_case("Doubao.exe"),
+                    "zcode" => p.exe.eq_ignore_ascii_case("ZCode.exe"),
                     _ => p.exe.eq_ignore_ascii_case("WorkBuddy.exe"),
                 };
                 if matched {
@@ -189,6 +190,7 @@ pub(crate) mod win {
             let name = match agent {
                 "codex" => "Codex",
                 "doubao" => "豆包",
+                "zcode" => "ZCode",
                 _ => "WorkBuddy",
             };
             return Err(format!("没找到 {name} 窗口"));

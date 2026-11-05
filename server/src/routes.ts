@@ -648,7 +648,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       ?? await findProfile(pool, req.userId, role?.profileId ?? null)
       ?? await findProfile(pool, req.userId, project?.profileId ?? null)
     const agent = b.agent ?? role?.agent ?? task.agent ?? profile?.agent
-    if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
+    if (agent === 'doubao' || agent === 'workbuddy' || agent === 'zcode') throw new TaskError('豆包、WorkBuddy、ZCode 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex') throw new TaskError('请选择 Claude 或 Codex')
     const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录',4000)
     const online = agentList(req.userId)
@@ -739,6 +739,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!session) return { code: 404, error: '会话不存在' } as const
       if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，请在豆包客户端中继续对话' } as const
       if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，请在 WorkBuddy 中继续对话' } as const
+      if (session.agent === 'zcode') return { code: 409, error: 'ZCode 仅支持状态监听，请在 ZCode 中继续对话' } as const
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running' && !stuckRunning(session)) return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
@@ -802,6 +803,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       let point:string|undefined
       if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，暂不支持新开或分支会话' } as const
       if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，暂不支持新开或分支会话' } as const
+      if (session.agent === 'zcode') return { code: 409, error: 'ZCode 仅支持状态监听，暂不支持新开或分支会话' } as const
       if(messageId!==undefined) {
         const message=await getMessage(pool,userId,id,messageId as number)
         if(!message) return {code:404,error:'回复不存在，请刷新记录'} as const
@@ -897,6 +899,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!session) return reply.code(404).send({ error: '会话不存在' })
     if (session.agent === 'doubao') return reply.code(409).send({ error: '豆包暂不支持读取完整对话记录' })
     if (session.agent === 'workbuddy') return reply.code(409).send({ error: 'WorkBuddy 暂不支持读取完整对话记录' })
+    if (session.agent === 'zcode') return reply.code(409).send({ error: 'ZCode 暂不支持读取完整对话记录' })
     if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     const requestId = randomUUID()
     const waiting = new Promise<HistoryResult | null>(resolve => {

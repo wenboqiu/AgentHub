@@ -121,6 +121,7 @@ progress::-moz-progress-bar { background: var(--ok); border-radius: 99px; }
 .tag.codex { background: var(--ok-bg); color: var(--codex); }
 .tag.doubao { background: var(--ok-bg); color: var(--codex); }
 .tag.workbuddy { background: var(--ok-bg); color: var(--codex); }
+.tag.zcode { background: var(--ok-bg); color: var(--codex); }
 .machine { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
 .machine .icon-button { width: 40px; min-height: 40px; padding: 8px; }
 .badge { margin-left: auto; font-size: 12px; color: var(--alert); font-weight: 600; }

@@ -4,12 +4,12 @@ export type ChecklistItem = { id: string; text: string; done: boolean };
 export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string; /** 服务端通知过滤后的结果：false 表示按账号规则静音（照常入列，不弹通知） */ notify?: boolean };
 export type NotifyKind = "done" | "aborted" | "reminder";
 export type NotifySettings = {
-  agents: Record<"claude" | "codex" | "doubao" | "workbuddy", boolean>;
+  agents: Record<"claude" | "codex" | "doubao" | "workbuddy" | "zcode", boolean>;
   minPriority: "high" | "medium" | "low";
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
-export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "profileId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | keyof Schedule>>;
 /** 项目配置：一组执行环境 + 默认优先级 + 检查项模板，起个名字复用 */
 export type Profile = { id: number; name: string; agent: Task["agent"]; machine: string | null; cwd: string | null; priority: Task["priority"]; checklist: string[]; tasks: number; createdAt: string; updatedAt: string };
@@ -67,7 +67,7 @@ export type Board = { entries: BoardEntry[]; agents: string[]; generatedAt: stri
 
 export type Session = {
   id: string;
-  agent: "claude" | "codex" | "doubao" | "workbuddy";
+  agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode";
   machine: string;
   cwd: string;
   project: string;
@@ -84,7 +84,7 @@ export type Session = {
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; createdAt: string; updatedAt: string };
 /** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
-export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
+export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
 export type ActivityBucket = { sessionId: string; at: string; count: number };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";

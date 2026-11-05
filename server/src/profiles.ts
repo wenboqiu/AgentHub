@@ -7,14 +7,14 @@ import { TaskError, object, text, type ChecklistItem, type Task } from './tasks.
 // 而是把一组执行环境 + 验收标准命名复用：建任务时选个名字，派活和验收标准就都就位了。
 
 type DB = Pick<pg.Pool, 'query'>
-export type Agent = 'claude' | 'codex' | 'doubao' | 'workbuddy'
+export type Agent = 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode'
 export type Priority = 'high' | 'medium' | 'low'
 export type Profile = {
   id: number; name: string; agent: Agent | null; machine: string | null; cwd: string | null
   priority: Priority; checklist: string[]; tasks: number; createdAt: string; updatedAt: string
 }
 
-const AGENTS: Agent[] = ['claude', 'codex', 'doubao', 'workbuddy']
+const AGENTS: Agent[] = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode']
 const PRIORITIES: Priority[] = ['high', 'medium', 'low']
 const MAX_ITEMS = 30
 
@@ -23,7 +23,7 @@ export async function migrateProfiles(db: DB) {
     id bigserial PRIMARY KEY,
     user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name text NOT NULL,
-    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy')),
+    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode')),
     machine text,
     cwd text,
     priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
@@ -32,6 +32,20 @@ export async function migrateProfiles(db: DB) {
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(user_id, name),
     UNIQUE(user_id, id))`)
+  // 执行工具扩到 zcode：老库里的列级 CHECK 要换掉
+  await db.query(`DO $$
+  DECLARE def text;
+  BEGIN
+    SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
+      WHERE c.conrelid = 'profiles'::regclass AND c.contype = 'c' AND c.conname = 'profiles_agent_check';
+    IF def IS NOT NULL AND def NOT LIKE '%zcode%' THEN
+      ALTER TABLE profiles DROP CONSTRAINT profiles_agent_check;
+      def := NULL;
+    END IF;
+    IF def IS NULL THEN
+      ALTER TABLE profiles ADD CONSTRAINT profiles_agent_check CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode'));
+    END IF;
+  END $$`)
   // 任务只记「属于哪个配置」；配置删掉后任务回到未指定，已有字段不动
   await db.query('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS profile_id bigint')
   await db.query(`DO $$ BEGIN
