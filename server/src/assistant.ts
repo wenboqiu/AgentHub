@@ -206,7 +206,8 @@ export async function startThread(db: DB, user: number, input: { agent: unknown;
   const agent = input.agent
   if (!ASSISTANTS.includes(agent as Agent)) throw new TaskError('请选择 Claude、Codex 或 ZCode')
   const machine = text(input.machine, '电脑名', 200)
-  const cwd = text(input.cwd, '目录', 4000)
+  // 空目录是有意义的输入：表示用电脑端自己的默认工作目录（<文档>/AgentHub，重装也还在）
+  const cwd = typeof input.cwd === 'string' ? input.cwd.replaceAll('\0', '').trim().slice(0, 4000) : ''
   await db.query('DELETE FROM assistant_threads WHERE user_id = $1', [user])
   const r = await db.query(
     'INSERT INTO assistant_threads(user_id, agent, machine, cwd) VALUES($1,$2,$3,$4) RETURNING *',

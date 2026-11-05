@@ -1,18 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Api, Memory, Profile, Project, Role, RoleInput } from "./lib/api";
-import { AGENT_LABEL } from "./lib/agents";
+import { AGENT_LABEL, DISPATCHABLE_AGENTS } from "./lib/agents";
 import Assistant from "./Assistant";
+import ModelPicker from "./ModelPicker";
 
-/** 只有这两个能真正派活；豆包 / WorkBuddy 只做状态监听 */
-const DISPATCHABLE = ["claude", "codex", "zcode"];
-
-/** 模型留空 = 用执行端自己的默认；给出常见别名，也允许手填完整 id */
-const MODEL_HINTS: Record<string, string[]> = {
-  // Claude Code 别名：opus/sonnet/haiku/fable 已解析到 5.5 家族与 Fable 5.1（2026-11 核对）
-  claude: ["opus", "sonnet", "haiku", "fable"],
-  // Codex 目录现行：gpt-6.1-sol 为默认，gpt-5.6 三档仍在售；旧 gpt-5.x codex 系已弃用
-  codex: ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
-};
+/** 只有能真正派活的 agent 才可选；豆包 / WorkBuddy 只做状态监听 */
+const DISPATCHABLE = DISPATCHABLE_AGENTS;
 
 // 角色管理：像员工一样——有职责、执行工具、模型、准则、可用工具声明，
 // 还有一份按项目分区的记忆（手写的须知 + 验收打回自动沉淀的经验）。
@@ -37,23 +30,20 @@ const toInput = (f: Form): RoleInput => ({
 });
 
 function Fields({ form, busy, profiles, onChange }: { form: Form; busy: boolean; profiles: Profile[]; onChange(patch: Partial<Form>): void }) {
-  const hints = MODEL_HINTS[form.agent] ?? [];
   return (
     <>
       <div className="form-grid">
         <label>角色名<input value={form.name} maxLength={60} disabled={busy} placeholder="例如 前端实现 / 代码评审" onChange={e => onChange({ name: e.target.value })} /></label>
         <label>职责<input value={form.title} maxLength={120} disabled={busy} placeholder="例如 负责服务端接口与迁移" onChange={e => onChange({ title: e.target.value })} /></label>
         <label>执行工具<select value={form.agent} disabled={busy} onChange={e => onChange({ agent: e.target.value, model: "" })}><option value="">未指定</option>{DISPATCHABLE.map(key => <option key={key} value={key}>{AGENT_LABEL[key]}</option>)}</select></label>
-        <label>模型<input value={form.model} maxLength={120} disabled={busy} list={`models-${form.agent}`} placeholder={form.agent === "codex" ? "留空 = Codex 默认" : "留空 = Claude 默认"} onChange={e => onChange({ model: e.target.value })} />
-          <datalist id={`models-${form.agent}`}>{hints.map(m => <option key={m} value={m} />)}</datalist>
-        </label>
+        <label>模型<ModelPicker key={form.agent} agent={form.agent} value={form.model} disabled={busy} onChange={model => onChange({ model })} /></label>
         <label>默认配置<select value={form.profileId} disabled={busy} onChange={e => onChange({ profileId: e.target.value })}><option value="">不挂配置</option>{profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
         <label>可用工具<input value={form.tools} maxLength={600} disabled={busy} placeholder="例如 Read、Edit、Bash" onChange={e => onChange({ tools: e.target.value })} /></label>
       </div>
       <label>上下文（角色准则，最多 4000 字）
         <textarea value={form.context} rows={4} maxLength={4000} disabled={busy} placeholder={"例如：只改前端，动手前先读现有写法；改完跑 tsc；不确定的地方先问，不要猜。"} onChange={e => onChange({ context: e.target.value })} />
       </label>
-      <p className="hint">Claude 走系统提示（--append-system-prompt），Codex 没有等价钩子，执行器会把上下文放在首条消息前面；模型留空就用执行端默认。可用工具只是声明，方便你和别人看清职责边界，不会真的改变执行端权限。</p>
+      <p className="hint">Claude 走系统提示（--append-system-prompt），Codex 没有等价钩子，执行器会把上下文放在首条消息前面；模型从下拉里挑，留空就用执行端默认（推荐，换版本不用回来改）。可用工具只是声明，方便你和别人看清职责边界，不会真的改变执行端权限。</p>
     </>
   );
 }

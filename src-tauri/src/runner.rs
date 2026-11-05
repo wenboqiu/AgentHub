@@ -1871,6 +1871,16 @@ impl Runner {
     fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String, model: String, instructions: String) {
         let (tx, rx) = mpsc::channel();
         let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone() };
+        // 空 cwd = 用 AgentHub 自己的默认工作目录（<文档>/AgentHub，重装也还在）。
+        // 先建目录再占会话槽：建不出来就直接失败，别留下一个永远卡住的运行。
+        let cwd = if cwd.trim().is_empty() {
+            match crate::workdir::ensure_default() {
+                Ok(dir) => dir,
+                Err(e) => return run.fail(&e),
+            }
+        } else {
+            cwd
+        };
         {
             // 同一会话同时只允许一个运行（服务端已经挡了，这里再挡一次）
             let mut g = self.runs.lock().unwrap();

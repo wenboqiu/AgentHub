@@ -526,14 +526,28 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 服务端只额外记住「这个会话属于助手」，好把 agent 回的 JSON 认成草稿。
   app.get('/assistant', async req => serial(async () => {
     const thread = await getThread(pool, req.userId)
-    const [messages, drafts, run, roles, profiles] = await Promise.all([
+    const [messages, drafts, run, roles, profiles, dirRows] = await Promise.all([
       thread?.sessionId ? listMessages(pool, req.userId, thread.sessionId, 100) : Promise.resolve([]),
       thread ? listDrafts(pool, req.userId, thread.id) : Promise.resolve([]),
       thread?.lastRunId ? getRun(pool, req.userId, thread.lastRunId) : Promise.resolve(null),
       listRoles(pool, req.userId),
       listProfiles(pool, req.userId),
+      // 目录候选：这台账号用过的目录，界面下拉直接选，省得每次都手打路径
+      pool.query(`SELECT machine, cwd, max(updated_at) at FROM sessions
+                  WHERE user_id = $1 AND cwd <> '' GROUP BY machine, cwd ORDER BY at DESC LIMIT 40`, [req.userId]),
     ])
     const online = agentList(req.userId)
+    const seen = new Set<string>()
+    const dirs = [
+      // 配置里登记的排在前面：那是用户刻意维护的目录
+      ...profiles.filter(p => p.cwd).map(p => ({ machine: p.machine ?? '', cwd: p.cwd as string })),
+      ...dirRows.rows.map(r => ({ machine: String(r.machine ?? ''), cwd: String(r.cwd) })),
+    ].filter(d => {
+      const key = `${d.machine}\0${d.cwd}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    }).slice(0, 40)
     return {
       thread,
       messages,
@@ -545,8 +559,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       suggestion: {
         agent: thread?.agent ?? 'claude',
         machine: thread?.machine ?? (online.length === 1 ? online[0] : ''),
-        cwd: thread?.cwd ?? profiles[0]?.cwd ?? '',
+        // 默认就是空：交给电脑端用 <文档>/AgentHub，用户不用为了建角色先挑项目目录
+        cwd: thread?.cwd ?? '',
       },
+      dirs,
       roles: roles.length,
     }
   }))
@@ -557,7 +573,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const machine = taskText(b.machine, '电脑名', 200)
     // 先确认电脑在线再动旧 thread：开新对话会连草稿一起清掉，别因为一台离线电脑白丢历史
     if (!executors.has(execKey(req.userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
-    const thread = await startThread(pool, req.userId, { agent: b.agent, machine, cwd: b.cwd })
+    // 目录留空 = 用电脑端自己的默认工作目录（<文档>/AgentHub，卸载重装也还在）
+    const cwd = typeof b.cwd === 'string' ? b.cwd : ''
+    const thread = await startThread(pool, req.userId, { agent: b.agent, machine, cwd })
     const [roles, profiles] = await Promise.all([listRoles(pool, req.userId), listProfiles(pool, req.userId)])
     const prompt = openingMessage({
       request,

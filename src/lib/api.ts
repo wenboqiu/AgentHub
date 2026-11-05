@@ -64,6 +64,8 @@ export type AssistantState = {
   runError: string;
   online: string[];
   suggestion: { agent: AssistantAgent; machine: string; cwd: string };
+  /** 这台账号在电脑上用过 / 配置里登记的目录，供下拉直接选；machine 为空表示不分机器 */
+  dirs: { machine: string; cwd: string }[];
   roles: number;
 };
 

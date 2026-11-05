@@ -38,6 +38,8 @@ mod message_history;
 mod terminal;
 #[cfg(desktop)]
 mod tray;
+#[cfg(desktop)]
+mod workdir;
 
 #[cfg(desktop)]
 mod desktop {

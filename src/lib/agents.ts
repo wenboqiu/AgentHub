@@ -13,3 +13,8 @@ const LISTEN_ONLY = new Set(["doubao", "workbuddy"]);
 export const isListenOnly = (agent: string | null | undefined): boolean => !!agent && LISTEN_ONLY.has(agent);
 
 export const agentName = (agent: string): string => AGENT_LABEL[agent] ?? agent;
+
+/** 能真正被派去执行的 agent；只做监听的不要出现在任务 / 角色 / 配置的执行工具下拉里 */
+export const DISPATCHABLE_AGENTS: string[] = Object.keys(AGENT_LABEL).filter((key) => !LISTEN_ONLY.has(key));
+
+export const isDispatchable = (agent: string | null | undefined): boolean => !!agent && !LISTEN_ONLY.has(agent);

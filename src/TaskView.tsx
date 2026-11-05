@@ -6,15 +6,15 @@ import { localDateTime } from "./ScheduleFields";
 import { PrioritySelect } from "./GoalPriority";
 import Checklist from "./Checklist";
 import InlineField from "./InlineField";
-import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
+import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
 const STATE_LABEL: Record<string, string> = { idle: "空闲", running: "运行中", waiting: "等待授权", done: "已完成", aborted: "已中断", ended: "已结束", unknown: "状态未知" };
 const ROLE_LABEL: Record<string, string> = { user: "用户", assistant: "助手", tool: "工具", approval: "授权", system: "系统" };
 const RUN_LABEL: Record<string, string> = { queued: "排队中", running: "运行中", done: "完成", failed: "失败", stopped: "已停止" };
 const STATUSES = Object.keys(TASK_LABEL) as Task["status"][];
-/** 执行工具下拉：Claude / Codex 能远程开跑，豆包 / WorkBuddy 只做状态监听 */
-const AGENT_OPTIONS = Object.entries(AGENT_LABEL).map(([value, label]) => ({ value, label }));
+/** 执行工具下拉：只列能远程派活的 agent；豆包 / WorkBuddy 只做状态监听，不放进下拉 */
+const AGENT_OPTIONS = DISPATCHABLE_AGENTS.map(value => ({ value, label: AGENT_LABEL[value] }));
 const toIso = (v: string) => v ? new Date(v).toISOString() : null;
 
 /**
@@ -261,7 +261,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
           <label>角色<select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select></label>
           <label>项目<select value={task.projectId ?? ""} disabled={busy} onChange={e => patch({ projectId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
           <label>项目配置<select value={task.profileId ?? ""} disabled={busy} onChange={e => patch({ profileId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-          <label>执行工具<select value={task.agent ?? ""} disabled={busy} onChange={e => patch({ agent: (e.target.value || null) as Task["agent"] })}><option value="">无（普通待办）</option>{AGENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></label>
+          <label>执行工具<select value={task.agent ?? ""} disabled={busy} onChange={e => patch({ agent: (e.target.value || null) as Task["agent"] })}><option value="">无（普通待办）</option>{task.agent && !isDispatchable(task.agent) && <option value={task.agent}>{AGENT_LABEL[task.agent] ?? task.agent}（只做监听，不能派活）</option>}{AGENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></label>
           <label>电脑<select value={task.machine ?? ""} disabled={busy} onChange={e => patch({ machine: e.target.value || null })}><option value="">开始时自动选择</option>{machines.map(m => <option key={m} value={m}>{m}{agents.includes(m) ? "" : "（离线）"}</option>)}</select></label>
         </div>
         <label className="cwd-field">项目目录<InlineField value={task.cwd ?? ""} ariaLabel="项目目录" placeholder={"例如 D:\\Work2\\项目"} maxLength={4000} required={false} disabled={busy} onSave={cwd => patch({ cwd: cwd || null })} /></label>

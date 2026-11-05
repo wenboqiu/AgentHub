@@ -623,6 +623,10 @@ header h1 { white-space: nowrap; }
 .memory-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .memory-text { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
 .memory-add { display: flex; gap: 8px; margin-top: 8px; }
+/* 下拉 + 一个「手动填 / 选回列表」的切换按钮并排，用于模型和目录 */
+.model-custom { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.model-custom input { flex: 1; min-width: 0; }
+.model-custom button { flex-shrink: 0; }
 .memory-add input { flex: 1; min-width: 0; }
 .memory-add select { width: auto; max-width: 180px; }
 @media (max-width: 560px) {
