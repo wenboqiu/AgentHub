@@ -1328,6 +1328,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const session = await getSession(pool, userId, id)
     if (!session) return reply.code(404).send({ error: '会话不存在' })
     if (session.agent === 'doubao') return reply.code(409).send({ error: '豆包暂不支持读取完整对话记录' })
+    // WorkBuddy 只听状态：它没有本地会话可读，别让请求掉到「电脑端不在线」这种误导性的错上
+    if (session.agent === 'workbuddy') return reply.code(409).send({ error: 'WorkBuddy 仅支持状态监听，暂不支持读取完整对话记录' })
     // 角色助手的会话不同步原生历史：快照会整段替换消息、重排 id，而草稿按消息 id 挂着，
     // 一同步草稿卡就全变成孤儿；这条会话本来也只在助手面板里看，我们的记录就是全文。
     if (await isAssistantSession(pool, userId, id)) return { messages: await listMessages(pool, userId, id, 100) }

@@ -129,7 +129,8 @@ describe('派活排队：离线入队，上线投递', () => {
     await h.executor('pc-online')
     const task = await h.newTask('pc-online')
     const r = await h.call('POST', `/tasks/${task.id}/start`, { text: '直接开始' })
-    assert.equal(r.body.queued, undefined)
+    // 直接派发也会明确回 queued:false（派发编排统一了返回形状），不是缺字段
+    assert.equal(r.body.queued, false)
     assert.ok(r.body.sessionId)
     assert.equal(r.body.task.status, 'doing')
     assert.equal(r.body.task.queuedAt, null)
