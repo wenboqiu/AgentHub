@@ -27,6 +27,8 @@ mod focus;
 #[cfg(desktop)]
 mod forwarder;
 #[cfg(desktop)]
+mod hub;
+#[cfg(desktop)]
 mod remote;
 #[cfg(desktop)]
 mod reconcile;
@@ -223,6 +225,8 @@ mod desktop {
                 crate::zcode::spawn(forwarder.clone());
                 crate::reconcile::spawn(shared.clone());
                 let remote_status = remote::spawn(shared.clone());
+                let hub_dir = app.path().app_config_dir().ok();
+                crate::hub::spawn(shared.clone(), hub_dir.map(|d| d.join("hub.json")));
                 app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
                 build_tray(app.handle())?;
                 if silent {

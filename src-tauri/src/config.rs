@@ -21,6 +21,10 @@ pub struct Config {
     pub remote_enabled: bool,
     /// 待处理会话用图模式展示（项目气泡 + 会话气泡）
     pub graph_mode: bool,
+    /// Hub 任务队列：是否开放 127.0.0.1:47822 的拉单接口
+    pub hub_enabled: bool,
+    /// Hub 鉴权 token；为空时本机回环不鉴权
+    pub hub_token: String,
 }
 
 impl Default for Config {
@@ -34,6 +38,8 @@ impl Default for Config {
             denied_roots: Vec::new(),
             remote_enabled: false,
             graph_mode: false,
+            hub_enabled: true,
+            hub_token: String::new(),
         }
     }
 }
@@ -115,6 +121,8 @@ mod tests {
             denied_roots: vec!["D:/Tmp".into()],
             remote_enabled: true,
             graph_mode: true,
+            hub_enabled: false,
+            hub_token: "t-hub".into(),
         };
         save(&p, &c).unwrap();
         assert_eq!(load(&p), c);
