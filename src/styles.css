@@ -878,6 +878,7 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 .pg-dot.tone-wait { background: var(--alert); }
 .pg-dot.tone-done { background: var(--ok); }
 .pg-dot.tone-abort { background: var(--priority-high); }
+.pg-dot.tone-amber { background: var(--priority-medium); }
 .pg-dot.tone-blue { background: var(--accent); }
 .pg-dot.pg-dot-ring { background: transparent; border: 1px dashed var(--accent); }
 

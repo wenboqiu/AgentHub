@@ -4,6 +4,12 @@ import { AGENT_LABEL } from "./lib/agents";
 
 const STATE_LABEL: Record<string, string> = { waiting: "等待授权", done: "已完成", aborted: "已中断", running: "运行中" };
 
+/** 待处理气泡的文案：说明「要你做什么」，而不是复述 agent 的状态，避免和所在分区打架 */
+const PENDING_LABEL: Record<string, string> = { waiting: "等待授权", done: "完成待确认", aborted: "中断待确认" };
+
+/** 待处理气泡的配色：全用暖色表示「等你」，靠深浅区分谁更急 */
+const PENDING_TONE: Record<string, string> = { waiting: "tone-wait", done: "tone-amber", aborted: "tone-abort" };
+
 /** 项目气泡按项目名稳定取色；有待授权的用警示色 */
 const TONES = ["tone-blue", "tone-teal", "tone-plum", "tone-amber"] as const;
 
@@ -235,8 +241,8 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
           {entries.map((e, i) => {
             const spot = spots[i];
             const urgent = isUrgent(e.s, approvals);
-            const tone = e.run ? "tone-blue" : urgent ? "tone-wait" : e.s.state === "done" ? "tone-done" : "tone-abort";
-            const label = e.run ? "运行中" : STATE_LABEL[e.s.state] ?? e.s.state;
+            const tone = e.run ? "tone-blue" : urgent ? "tone-wait" : PENDING_TONE[e.s.state] ?? "tone-abort";
+            const label = e.run ? "运行中" : PENDING_LABEL[e.s.state] ?? STATE_LABEL[e.s.state] ?? e.s.state;
             const tip = `${AGENT_LABEL[e.s.agent]} · ${label}\n${e.s.title || e.s.summary || e.s.id}`;
             const dur = (7 + hash01(e.s.id, 3) * 4).toFixed(2); // 每颗漂移节奏不同
             const delay = (-hash01(e.s.id, 4) * 10).toFixed(2);
@@ -272,8 +278,8 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
         <p className="pg-legend">
           <span><i className="pg-dot tone-blue" />运行中</span>
           <span><i className="pg-dot tone-wait" />等待授权</span>
-          <span><i className="pg-dot tone-done" />已完成待确认</span>
-          <span><i className="pg-dot tone-abort" />已中断待确认</span>
+          <span><i className="pg-dot tone-amber" />完成待确认</span>
+          <span><i className="pg-dot tone-abort" />中断待确认</span>
           <span>点击气泡打开会话</span>
         </p>
       </div>
