@@ -775,6 +775,15 @@ header h1 { white-space: nowrap; }
 .pg-toolbar { display: flex; padding: 0 4px; }
 .pg-overview { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 26px; padding: 30px 8px 18px; }
 .pg-stage { position: relative; height: 440px; margin: 6px 0 2px; }
+.pg-scatter-slot { position: absolute; }
+
+@keyframes pg-drift {
+  0%, 100% { transform: translate(0, 0); }
+  20% { transform: translate(9px, -12px); }
+  45% { transform: translate(-7px, -5px); }
+  70% { transform: translate(-9px, 9px); }
+  88% { transform: translate(6px, 7px); }
+}
 
 .pg-slot { position: relative; display: block; padding: 0; min-width: 0; min-height: 0; border: 0; background: none; border-radius: 50%; }
 button.pg-slot { cursor: pointer; }
@@ -821,3 +830,17 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
   .pg-stage { height: 400px; }
   .pg-stage .pg-orbit { scale: .88; }
 }
+
+/* ---------- 派单（Hub） ---------- */
+.hub-workers { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 8px 0 0; list-style: none; }
+.hub-worker { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: .5px solid var(--line); border-radius: 10px; }
+.hub-worker strong { font-size: 13px; }
+.hub-worker span { font-size: 12px; color: var(--dim); }
+.hub-task .row-head { flex-wrap: wrap; gap: 4px; }
+.hub-task .badge { margin-left: 0; color: var(--dim); font-weight: 500; }
+.hub-task.st-done .badge, .hub-task.st-cancelled .badge { color: var(--ok, var(--dim)); }
+.hub-task.st-failed .badge { color: var(--alert); }
+.hub-detail { padding: 8px 12px; font-size: 13px; display: grid; gap: 6px; }
+.hub-detail .kv { margin: 0; }
+.hub-detail .kv code { display: inline; margin-right: 8px; }
+.hub-body { margin: 0; padding: 10px; border: .5px solid var(--line); border-radius: 8px; background: var(--field); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }

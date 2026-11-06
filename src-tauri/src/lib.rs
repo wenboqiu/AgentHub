@@ -49,6 +49,7 @@ mod desktop {
     use crate::collector::{self, CollectorStatus};
     use crate::config::{self, Config, SharedConfig};
     use crate::forwarder::{ForwardStatus, Forwarder};
+    use crate::hub::{self, SharedHub};
     use crate::remote::{self, RemoteStatus, Status as RemoteInfo};
     use crate::{codex, focus, terminal, tray};
     use serde::Serialize;
@@ -65,6 +66,7 @@ mod desktop {
         forwarder: Forwarder,
         collector: CollectorStatus,
         remote: RemoteStatus,
+        hub: SharedHub,
     }
 
     #[derive(Serialize)]
@@ -99,6 +101,29 @@ mod desktop {
     #[tauri::command]
     fn remote_status(state: State<AppState>) -> RemoteInfo {
         state.remote.lock().unwrap().clone()
+    }
+
+    #[tauri::command]
+    fn hub_tasks(state: State<AppState>) -> Vec<hub::Task> {
+        state.hub.lock().unwrap().list(None, hub::now_ms())
+    }
+
+    #[tauri::command]
+    fn hub_workers(state: State<AppState>) -> Vec<hub::WorkerView> {
+        state.hub.lock().unwrap().workers_view(hub::now_ms())
+    }
+
+    #[tauri::command]
+    fn hub_create_task(state: State<AppState>, title: String, body: String, worker: String, workspace: String) -> Result<hub::Task, String> {
+        if title.trim().is_empty() || worker.trim().is_empty() {
+            return Err("title 和 worker 不能为空".into());
+        }
+        Ok(state.hub.lock().unwrap().create(title.trim().to_string(), body, worker.trim().to_string(), workspace.trim().to_string(), hub::now_ms()))
+    }
+
+    #[tauri::command]
+    fn hub_cancel_task(state: State<AppState>, id: String) -> Result<(), String> {
+        state.hub.lock().unwrap().cancel(&id, hub::now_ms())
     }
 
     #[tauri::command]
@@ -201,6 +226,10 @@ mod desktop {
                 set_config,
                 get_status,
                 remote_status,
+                hub_tasks,
+                hub_workers,
+                hub_create_task,
+                hub_cancel_task,
                 claude_hooks_status,
                 install_claude_hooks,
                 uninstall_claude_hooks,
@@ -225,9 +254,10 @@ mod desktop {
                 crate::zcode::spawn(forwarder.clone());
                 crate::reconcile::spawn(shared.clone());
                 let remote_status = remote::spawn(shared.clone());
-                let hub_dir = app.path().app_config_dir().ok();
-                crate::hub::spawn(shared.clone(), hub_dir.map(|d| d.join("hub.json")));
-                app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
+                let hub_path = app.path().app_config_dir().ok().map(|d| d.join("hub.json"));
+                let shared_hub: SharedHub = std::sync::Arc::new(std::sync::Mutex::new(hub::Hub::load(hub_path)));
+                hub::start(shared.clone(), shared_hub.clone());
+                app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status, hub: shared_hub });
                 build_tray(app.handle())?;
                 if silent {
                     if let Some(w) = app.get_webview_window("main") {

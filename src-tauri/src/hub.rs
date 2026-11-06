@@ -35,7 +35,9 @@ pub const HEARTBEAT_TIMEOUT_MS: i64 = 10 * 60_000;
 /// 单个任务最多派发次数（claim 计数），超过判 Failed
 pub const MAX_DISPATCHES: u32 = 3;
 
-fn now_ms() -> i64 {
+pub type SharedHub = Arc<Mutex<Hub>>;
+
+pub fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
@@ -351,6 +353,24 @@ impl Hub {
             })
             .collect()
     }
+
+    /// worker 一览的序列化视图（tauri command 用）
+    pub fn workers_view(&mut self, now: i64) -> Vec<WorkerView> {
+        self.workers(now)
+            .into_iter()
+            .map(|(name, last_seen, queued, running)| WorkerView { name, last_seen, queued, running })
+            .collect()
+    }
+}
+
+/// 供前端展示的 worker 汇总
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerView {
+    pub name: String,
+    pub last_seen: i64,
+    pub queued: usize,
+    pub running: usize,
 }
 
 // ---------- HTTP 层 ----------
@@ -530,9 +550,8 @@ fn serve_loop(server: tiny_http::Server, hub: Arc<Mutex<Hub>>, cfg: SharedConfig
     }
 }
 
-pub fn spawn(cfg: SharedConfig, path: Option<PathBuf>) {
+pub fn start(cfg: SharedConfig, hub: SharedHub) {
     std::thread::spawn(move || {
-        let hub = Arc::new(Mutex::new(Hub::load(path)));
         let server = match tiny_http::Server::http(("127.0.0.1", PORT)) {
             Ok(s) => s,
             Err(e) => {

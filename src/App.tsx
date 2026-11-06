@@ -14,11 +14,12 @@ import GoalView from "./GoalView";
 import CalendarView from "./CalendarView";
 import PendingGraph from "./PendingGraph";
 import BoardPanel from "./BoardPanel";
+import HubPanel from "./HubPanel";
 import Icon from "./Icon";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
-type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar";
-const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历" } as const;
+type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar"|"hub";
+const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历", hub:"派单" } as const;
 
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
@@ -495,6 +496,8 @@ export default function App() {
   }
 
   const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
+  // 派单 tab 只在桌面端有（队列跑在 Rust 侧）
+  const tabs = isDesktop ? (["sessions","tasks","board","goals","calendar","hub"] as const) : (["sessions","tasks","board","goals","calendar"] as const);
   const renderList = (items: Session[]) => (
     <ul className="list">
       {items.map((s) => (
@@ -521,7 +524,7 @@ export default function App() {
           <i /> {connText}
         </span>
         <span className="spacer" />
-        <nav className="tabs" aria-label="主要功能">{(["sessions","tasks","board","goals","calendar"] as const).map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}{t==="sessions" && pendingProposals > 0 && <span className="count" aria-label={`${pendingProposals} 份任务单待确认`}>{pendingProposals}</span>}{t==="board" && stuckCount > 0 && <span className="count" aria-label={`${stuckCount} 个卡住的任务`}>{stuckCount}</span>}</button>)}</nav>
+        <nav className="tabs" aria-label="主要功能">{tabs.map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}{t==="sessions" && pendingProposals > 0 && <span className="count" aria-label={`${pendingProposals} 份任务单待确认`}>{pendingProposals}</span>}{t==="board" && stuckCount > 0 && <span className="count" aria-label={`${stuckCount} 个卡住的任务`}>{stuckCount}</span>}</button>)}</nav>
         <span className="spacer" />
         <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>
@@ -532,6 +535,7 @@ export default function App() {
         <div hidden={tab!=="board"}>{board && api && <BoardPanel api={api} board={board} now={now} onRefresh={refreshBoard} onOpen={openTask} onNotice={say}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
+        <div hidden={tab!=="hub"}>{isDesktop && <HubPanel onNotice={say}/>}</div>
         <div hidden={tab!=="sessions"}>
         <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
         <section>
