@@ -128,6 +128,16 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   // 手机宽度放不下才收成抽屉——之前只在桌面端渲染，平板上就完全看不到列表。
   const docked = !narrow;
   const sidebarVisible = docked ? !sidebarCollapsed : drawerOpen;
+  // 顶栏横贯全宽、侧栏从顶栏下沿开始：实测顶栏高度（换行 / 字体缩放会变）写给侧栏 sticky 定位用
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const page = pageRef.current, header = headerRef.current;
+    if (!page || !header) return;
+    const ro = new ResizeObserver(() => page.style.setProperty("--session-topbar-h", `${header.offsetHeight}px`));
+    ro.observe(header);
+    return () => ro.disconnect();
+  }, []);
   const attentionCount = attention.size;
   const selectSession = (next: string) => {
     setDrawerOpen(false);
@@ -415,23 +425,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     });
 
   return (
-    <div className={`session-shell${docked && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-      {sidebarVisible && (
-        <SessionSidebar
-          sessions={sessions}
-          currentId={id || sessionId}
-          attention={attention}
-          now={nowTick}
-          onSelect={selectSession}
-          drawer={!docked}
-          onCollapse={() => (docked ? setSidebarCollapsed(true) : setDrawerOpen(false))}
-        />
-      )}
-      {!docked && drawerOpen && (
-        <button className="sidebar-scrim" aria-label="关闭会话列表" tabIndex={-1} onClick={() => setDrawerOpen(false)} />
-      )}
-      <div className="app session-view">
-      <header>
+    <div ref={pageRef} className={`session-page${docked && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <header ref={headerRef}>
         <button className="back-button" onClick={onBack}><Icon name="back"/>返回</button>
         {!docked && (
           <button
@@ -468,6 +463,22 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           )}
         </span>
       </header>
+      <div className="session-shell">
+      {sidebarVisible && (
+        <SessionSidebar
+          sessions={sessions}
+          currentId={id || sessionId}
+          attention={attention}
+          now={nowTick}
+          onSelect={selectSession}
+          drawer={!docked}
+          onCollapse={() => (docked ? setSidebarCollapsed(true) : setDrawerOpen(false))}
+        />
+      )}
+      {!docked && drawerOpen && (
+        <button className="sidebar-scrim" aria-label="关闭会话列表" tabIndex={-1} onClick={() => setDrawerOpen(false)} />
+      )}
+      <div className="app session-view">
       {session.title && <div className="title wrap">{session.title}</div>}
       {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => { setErr(""); desktop.focus(null, session.agent).catch((e) => setErr(e instanceof Error ? e.message : String(e))); }}>打开 {agentName(session.agent)} 客户端</button></div>}
       {/* 会话级操作合并为一行：任务关联、新建会话、终端打开 */}
@@ -723,6 +734,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           </button>
         </div>
       </footer>}
+      </div>
       </div>
     </div>
   );
