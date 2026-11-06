@@ -114,7 +114,8 @@ export type ReviewItem = { id: number; key: string; title: string; status: "pend
 export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] };
 
 /** 处理意见：会话跑完后攒出来的「接下来做什么」，确认后才变成任务 */
-export type ProposalKind = "continue" | "followup" | "fix";
+/** ticket = 人直接发的粗单：没有会话，项目经理细化后由人确认才派发 */
+export type ProposalKind = "continue" | "followup" | "fix" | "ticket";
 /** 项目经理排好的执行人：角色是人，配置是地方（执行工具 + 电脑 + 目录） */
 /** 开跑方式：fork = 接着原会话的上下文，fresh = 新建会话从这个任务开始 */
 export type Delivery = "fork" | "fresh";
@@ -150,12 +151,17 @@ export type Proposal = {
   priority: Task["priority"];
   roleId: number | null;
   projectId: number | null;
+  /** 发单时人指定的地方（可空）：确认后钉进任务 */
+  machine: string;
+  cwd: string;
   assignee: Assignee;
   evidence: Evidence[];
   note: string;
   origin: "heuristic" | "agent";
   status: "pending" | "accepted" | "discarded";
   createdTaskId: number | null;
+  /** 正在跑细化的那次 run：非空且 origin 还是 heuristic 就是「项目经理正在写」 */
+  refineRunId: string | null;
   eventAt: string;
   createdAt: string;
   updatedAt: string;
@@ -385,6 +391,9 @@ export class Api {
   confirmProposal = (id: number, input: ProposalInput & { dispatch?: boolean; delivery?: Delivery }) =>
     this.call<{ task: Task; proposal: Proposal; dispatched: { queued: boolean; delivery?: { mode: Delivery; reason: string } } | null; dispatchError: string }>("POST", `/proposals/${id}/confirm`, input);
   discardProposal = (id: number) => this.call<{ proposal: Proposal }>("POST", `/proposals/${id}/discard`);
+  /** 发新单：先落成一张待确认的任务单，服务端顺手让项目经理用模型补一遍；不直接建任务 */
+  createTicket = (input: { title: string; notes: string; projectId: number; roleId?: number; machine?: string; cwd?: string }) =>
+    this.call<{ proposal: Proposal; refineError: string }>("POST", "/tickets", input);
   dispatchManager = () => this.call<ManagerState>("GET", "/dispatch/manager");
   saveDispatchManager = (patch: Partial<DispatchManager>) => this.call<ManagerState>("PATCH", "/dispatch/manager", patch);
   review = (id: number) => this.call<Review>("GET", `/tasks/${id}/review`);

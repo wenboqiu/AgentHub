@@ -16,6 +16,7 @@ const KIND_LABEL: Record<Proposal["kind"], string> = {
   continue: "接着做",
   followup: "下一步",
   fix: "先修问题",
+  ticket: "发单",
 };
 
 const PRIORITY_LABEL: Record<Task["priority"], string> = { high: "高", medium: "中", low: "低" };
@@ -60,6 +61,10 @@ export default function ProposalCard({
   const [done, setDone] = useState<null | { kind: "created"; text: string } | { kind: "discarded" }>(null);
   const [refining, setRefining] = useState(false);
   const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
+  // 发单没有原会话：不显示「从哪开始」，也不自称来自某个会话
+  const isTicket = proposal.kind === "ticket";
+  // 项目经理正拿着模型读这张单（细化结果回来时 origin 会变 agent，这行提示自然消失）
+  const writing = isTicket && proposal.origin === "heuristic" && !!proposal.refineRunId;
 
   // 重写结果从 WS 推回来（origin 变 agent）：把「正在看」收掉，表单换成新的
   useEffect(() => {
@@ -117,10 +122,16 @@ export default function ProposalCard({
         <span className={`proposal-kind ${proposal.kind}`}>{KIND_LABEL[proposal.kind]}</span>
         <strong>任务单</strong>
         <span className="dim">
-          来自「{proposal.sessionTitle || "未命名会话"}」（{AGENT_LABEL[proposal.sessionAgent] ?? proposal.sessionAgent}）
+          {isTicket
+            ? "来自你发的单"
+            : `来自「${proposal.sessionTitle || "未命名会话"}」（${AGENT_LABEL[proposal.sessionAgent] ?? proposal.sessionAgent}）`}
         </span>
-        <span className="dim proposal-origin">{proposal.origin === "agent" ? "项目经理整理" : "按会话自动排出"}</span>
+        <span className="dim proposal-origin">
+          {proposal.origin === "agent" ? "项目经理整理" : isTicket ? "待确认" : "按会话自动排出"}
+        </span>
       </div>
+
+      {writing && <p className="hint">项目经理正在读这张单，写好后会自动替换下面的内容…</p>}
 
       <div className="proposal-assignee">
         <div className="form-grid">
@@ -142,21 +153,24 @@ export default function ProposalCard({
         </p>
       </div>
 
-      {/* 从哪开始：接着原会话的上下文，还是新开一个。换了工具 / 电脑 / 目录就续不上，选项直接灰掉 */}
-      <div className="delivery-pick">
-        <span className="delivery-label">从哪开始</span>
-        <div className="delivery-opts" role="radiogroup" aria-label="从哪开始">
-          <button type="button" role="radio" aria-checked={plan.mode === "fork"}
-            className={plan.mode === "fork" ? "delivery-opt on" : "delivery-opt"}
-            disabled={busy || plan.blocked} title={plan.blocked ? plan.reason : "把原会话的上下文接过来"}
-            onClick={() => set({ delivery: "fork" })}>接着原会话</button>
-          <button type="button" role="radio" aria-checked={plan.mode === "fresh"}
-            className={plan.mode === "fresh" ? "delivery-opt on" : "delivery-opt"}
-            disabled={busy} title="新开一个会话，只带任务单里的说明"
-            onClick={() => set({ delivery: "fresh" })}>从零开始</button>
+      {/* 从哪开始：接着原会话的上下文，还是新开一个。换了工具 / 电脑 / 目录就续不上，选项直接灰掉。
+          发单没有原会话可续，这块整段不出现。 */}
+      {!isTicket && (
+        <div className="delivery-pick">
+          <span className="delivery-label">从哪开始</span>
+          <div className="delivery-opts" role="radiogroup" aria-label="从哪开始">
+            <button type="button" role="radio" aria-checked={plan.mode === "fork"}
+              className={plan.mode === "fork" ? "delivery-opt on" : "delivery-opt"}
+              disabled={busy || plan.blocked} title={plan.blocked ? plan.reason : "把原会话的上下文接过来"}
+              onClick={() => set({ delivery: "fork" })}>接着原会话</button>
+            <button type="button" role="radio" aria-checked={plan.mode === "fresh"}
+              className={plan.mode === "fresh" ? "delivery-opt on" : "delivery-opt"}
+              disabled={busy} title="新开一个会话，只带任务单里的说明"
+              onClick={() => set({ delivery: "fresh" })}>从零开始</button>
+          </div>
+          <p className="hint delivery-note">{plan.blocked ? `续不上：${plan.reason}` : plan.reason}</p>
         </div>
-        <p className="hint delivery-note">{plan.blocked ? `续不上：${plan.reason}` : plan.reason}</p>
-      </div>
+      )}
 
       <label>要做什么
         <input value={form.title} maxLength={200} disabled={busy}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, sessionKeyOf, toChecklist } from '../src/proposals.ts'
+import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
 import { DEFAULT_MANAGER, pickCandidates, quota } from '../src/dispatch-manager.ts'
 import type { Task } from '../src/tasks.ts'
 
@@ -224,4 +224,31 @@ test('执行人：没有任何依据时留空，由人来选', () => {
   const a = assigneeOf({ roles: new Map(), projectDirs: new Map() }, null, null)
   assert.equal(a.roleId, null)
   assert.equal(a.machine, '')
+})
+
+test('执行人：发单人指定过的机器/目录以人的为准', () => {
+  const ctx = {
+    roles: new Map([[1, { id: 1, name: '小林', title: '', agent: 'claude' as const }]]),
+    projectDirs: new Map([[2, [{ machine: 'DESKTOP-01', cwd: 'D:/x' }]]]),
+  }
+  const a = assigneeOf(ctx, 1, 2, '', { machine: 'mac-mini', cwd: '/Users/w/AgentHub' })
+  assert.equal(a.machine, 'mac-mini')
+  assert.equal(a.cwd, '/Users/w/AgentHub')
+})
+
+test('ticketMessage：带上工单原话、项目与角色清单，没写正文要明说', () => {
+  const msg = ticketMessage({
+    title: '给 README 补安装说明', notes: '',
+    project: 'AgentHub', projectBrief: 'Tauri + React', recent: ['「修登录」已完成'],
+    role: null, machine: 'DESKTOP-01', cwd: 'D:/Work2/AgentHub',
+    roles: [{ id: 1, name: '小林', title: '前端', agent: 'claude' }],
+    projects: [{ id: 1, name: 'AgentHub' }],
+  })
+  assert.match(msg, /给 README 补安装说明/)
+  assert.match(msg, /没写正文/)
+  assert.match(msg, /AgentHub/)
+  assert.match(msg, /1=小林 \/ 前端 \/ claude/)
+  assert.match(msg, /电脑 DESKTOP-01/)
+  // 契约必须先出现：模型先看到格式要求，再看材料
+  assert.ok(msg.indexOf('JSON') < msg.indexOf('【人发来的工单】'))
 })

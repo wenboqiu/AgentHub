@@ -1,7 +1,8 @@
 import { useState } from "react";
-import type { Api, BoardEntry, Project, Role } from "./lib/api";
+import type { Api, BoardEntry, Project, Proposal, Role } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import DispatchForm from "./DispatchForm";
+import ProposalCard from "./ProposalCard";
 import Icon from "./Icon";
 // 派活看板：把「排队中 / 在跑 / 卡住」的活聚到一张板上。
 // 数据由服务端从任务、队列和执行记录现算，这里只负责分组展示和当场处置：
@@ -63,7 +64,7 @@ function Entry({
 }
 
 export default function BoardPanel({
-  api, board, now, projects, roles, managerReady, onRefresh, onOpen, onNotice,
+  api, board, now, projects, roles, proposals, canRefine, autoDispatch, onRefresh, onOpen, onNotice, onProposal,
 }: {
   api: Api;
   /** 看板数据由 App 层统一获取（Tab 角标也要用），这里只展示 */
@@ -71,16 +72,24 @@ export default function BoardPanel({
   now: number;
   projects: Project[];
   roles: Role[];
-  /** 项目经理开着自动派发：发单后它会自己补配置、补人、派出去 */
-  managerReady: boolean;
+  /** 待确认的任务单（含发单草稿）：卡片就在这儿预览，确认了才建任务 */
+  proposals: Proposal[];
+  /** 配了项目经理角色：发单后它能用模型补写 */
+  canRefine: boolean;
+  /** 项目经理开了自动派发：确认时点「只建任务」它会接手 */
+  autoDispatch: boolean;
   onRefresh(): void;
   onOpen(id: number): void;
   onNotice(msg: string): void;
+  onProposal(p: Proposal): void;
 }) {
   const [busyId, setBusyId] = useState(0);
+  const [busyProposal, setBusyProposal] = useState(0);
   const [showForm, setShowForm] = useState(false);
-  const created = () => {
+  const created = (p: Proposal) => {
     setShowForm(false);
+    // 先本地挂上，WS 推回来的细化结果会覆盖同一条
+    onProposal(p);
     onRefresh();
   };
   const act = async (id: number, kind: "issue" | "todo" | "unqueue") => {
@@ -103,6 +112,8 @@ export default function BoardPanel({
   const stuck = board.entries.filter(e => e.stuck);
   const queued = board.entries.filter(e => e.queued && !e.stuck);
   const running = board.entries.filter(e => !e.stuck && !e.queued);
+  // 只认发单来的：会话攒出来的意见挂在会话详情里，不该混进看板
+  const tickets = proposals.filter(p => p.kind === "ticket" && p.status === "pending");
   const rows = (list: BoardEntry[]) => (
     <ul className="list">
       {list.map(e => <Entry key={e.taskId} e={e} now={now} busy={busyId === e.taskId} onOpen={onOpen} onAct={act} />)}
@@ -114,7 +125,7 @@ export default function BoardPanel({
         <div>
           <p className="eyebrow">谁在干活，一眼看清</p>
           <h2>派活看板</h2>
-          <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}</p>
+          <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}{tickets.length > 0 ? ` · ${tickets.length} 个待确认` : ""}</p>
         </div>
         <button className="primary" aria-expanded={showForm} onClick={() => setShowForm(!showForm)}>
           <Icon name={showForm ? "close" : "plus"} /> {showForm ? "收起" : "发新单"}
@@ -122,10 +133,25 @@ export default function BoardPanel({
       </div>
       {showForm && (
         <DispatchForm
-          api={api} projects={projects} roles={roles} managerReady={managerReady}
+          api={api} projects={projects} roles={roles} canRefine={canRefine} autoDispatch={autoDispatch}
           onCreated={created} onCancel={() => setShowForm(false)} onNotice={onNotice}
         />
       )}
+      <section>
+        <h2>待确认 {tickets.length > 0 && <span className="count">{tickets.length}</span>}</h2>
+        {tickets.length === 0
+          ? <p className="empty">没有等你确认的工单。发新单后，项目经理写好的任务单会摆在这儿</p>
+          : tickets.map(p => (
+            <ProposalCard
+              key={p.id} api={api} proposal={p} roles={roles} projects={projects} autoDispatch={autoDispatch}
+              busy={busyProposal === p.id}
+              onBusy={v => setBusyProposal(v ? p.id : 0)}
+              onError={onNotice}
+              onChanged={onProposal}
+              onTask={() => { onNotice("工单已确认，任务建好了"); onRefresh(); }}
+            />
+          ))}
+      </section>
       <section>
         <h2>卡住 {stuck.length > 0 && <span className="count">{stuck.length}</span>}</h2>
         {stuck.length ? rows(stuck) : <p className="empty">没有异常，派出去的活都有人接着</p>}

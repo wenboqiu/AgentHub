@@ -82,6 +82,7 @@ import {
 import {
   NO_FORK,
   PROPOSAL_TITLE,
+  createTicket,
   forkInfo,
   generateProposal,
   getProposal,
@@ -93,8 +94,10 @@ import {
   recordRefine,
   refineMessage,
   sessionKeyOf,
+  ticketMessage,
   toChecklist,
   type Delivery,
+  type Proposal,
 } from './proposals.ts'
 import { composeTicket, getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
@@ -1015,56 +1018,107 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '50', 10) || 50, 1), 200)
     return { proposals: await listProposals(pool, req.userId, { sessionId, limit }) }
   })
-  // 细化：借电脑上已登录的 agent 重写这份意见。和角色助手同一条通道，服务端仍然没有模型凭据。
-  app.post('/proposals/:id/refine', async req => serial(async () => {
-    const id = entityId((req.params as {id:string}).id)
-    const proposal = await getProposal(pool, req.userId, id)
-    if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
-    const b = object(req.body ?? {})
-    const session = await getSession(pool, req.userId, proposal.sessionId)
-    const online = agentList(req.userId)
-    const machine = taskText(b.machine ?? session?.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 200)
-    if (!executors.has(execKey(req.userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
-    const manager = await getManager(pool, req.userId)
-    const role = await findRole(pool, req.userId, manager.roleId)
+  // 细化：借电脑上已登录的 agent 把草稿重写一遍。和角色助手同一条通道，服务端仍然没有模型凭据。
+  // 两种草稿共用这一条：会话攒出来的意见（有会话尾部可读）、人直接发的单（只有一句话和项目背景）。
+  const startRefine = async (userId: number, proposal: Proposal, b: Record<string, unknown>) => {
+    const isTicket = proposal.kind === 'ticket'
+    const session = isTicket ? null : await getSession(pool, userId, proposal.sessionId).catch(() => null)
+    const online = agentList(userId)
+    // 在哪台机器上想：显式指定 > 人发单时选的 > 原会话那台 > 唯一在线的那台
+    const wanted = typeof b.machine === 'string' && b.machine.trim() ? b.machine.trim() : proposal.machine || session?.machine || ''
+    const machine = taskText(wanted || online[0] || '', '电脑名', 200)
+    if (!executors.has(execKey(userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
+    const manager = await getManager(pool, userId)
+    const role = await findRole(pool, userId, manager.roleId)
     // 谁来判断：优先用项目经理角色配的执行工具；没配就跟着原会话那台用同一个工具
     const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode'
       ? role.agent
       : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode') ? session.agent : 'claude')
-    const [msgs, task, roles, projects] = await Promise.all([
-      listMessages(pool, req.userId, proposal.sessionId, 8),
-      proposal.taskId === null ? Promise.resolve(null) : getTask(pool, req.userId, proposal.taskId).catch(() => null),
-      listRoles(pool, req.userId),
-      listProjects(pool, req.userId),
+    const msgs = isTicket ? [] : await listMessages(pool, userId, proposal.sessionId, 8)
+    const [task, roles, projects] = await Promise.all([
+      proposal.taskId === null ? Promise.resolve(null) : getTask(pool, userId, proposal.taskId).catch(() => null),
+      listRoles(pool, userId),
+      listProjects(pool, userId),
     ])
-    const prompt = refineMessage({
-      sessionTitle: proposal.sessionTitle,
-      agent: proposal.sessionAgent,
-      project: proposal.sessionProject,
-      task: task ? { title: task.title, notes: task.notes, todo: task.checklist.filter(i => !i.done).map(i => i.text) } : null,
-      tail: msgs.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => ({ role: m.role, text: m.text })),
-      evidence: proposal.evidence,
-      draft: {
-        title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
-        constraints: proposal.constraints,
-        delivery: proposal.delivery,
-        // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
-        assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
-      },
-      roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
-      projects: projects.map(p => ({ id: p.id, name: p.name })),
-    })
+    // 发单场景要多给一份项目背景（说明 + 近况）和发单人指定的地方：这些是它唯一能依靠的材料
+    const project = projects.find(p => p.id === proposal.projectId) ?? null
+    const dir = project ? await pickProjectDir(pool, userId, project.id, machine, online) : null
+    const cwd = proposal.cwd || dir?.cwd || session?.cwd || ''
+    const prompt = isTicket
+      ? ticketMessage({
+        title: proposal.title,
+        notes: proposal.notes,
+        project: project?.name ?? proposal.sessionProject,
+        projectBrief: project?.brief ?? '',
+        recent: await recentBrief(pool, userId, proposal.projectId),
+        role: proposal.assignee.roleId === null ? null
+          : { name: proposal.assignee.roleName, title: proposal.assignee.roleTitle, agent: proposal.assignee.agent },
+        machine, cwd,
+        roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
+        projects: projects.map(p => ({ id: p.id, name: p.name })),
+      })
+      : refineMessage({
+        sessionTitle: proposal.sessionTitle,
+        agent: proposal.sessionAgent,
+        project: proposal.sessionProject,
+        task: task ? { title: task.title, notes: task.notes, todo: task.checklist.filter(i => !i.done).map(i => i.text) } : null,
+        tail: msgs.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => ({ role: m.role, text: m.text })),
+        evidence: proposal.evidence,
+        draft: {
+          title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
+          constraints: proposal.constraints,
+          delivery: proposal.delivery,
+          // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
+          assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
+        },
+        roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
+        projects: projects.map(p => ({ id: p.id, name: p.name })),
+      })
     // 项目经理自己的上下文就是它做判断的准则，拼在首条消息前面（与派活时的系统提示同源）
     const brief = role?.context ? `${role.context}\n\n${prompt}` : prompt
     // 第 9 参是「这次 run 用谁的身份」：漏了它，细化就会用执行工具自己的默认模型，
     // 项目经理角色配的模型等于没配。上下文已经在 brief 里，这里不再重复注入 instructions。
     const res = await startSession(
-      req.userId, { agent, machine, cwd: session?.cwd ?? '' },
+      userId, { agent, machine, cwd },
       `${PROPOSAL_TITLE}${proposal.title.slice(0, 40)}`, prompt, 'fresh', '', undefined, undefined,
       { model: roleModel(role), instructions: '' }, brief,
     )
-    await markRefineRun(pool, req.userId, id, res.runId)
+    await markRefineRun(pool, userId, proposal.id, res.runId)
+    return res
+  }
+  app.post('/proposals/:id/refine', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const proposal = await getProposal(pool, req.userId, id)
+    if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
+    const res = await startRefine(req.userId, proposal, object(req.body ?? {}))
     return { runId: res.runId }
+  }))
+  // 发单：人写一句话，先落成一份待确认的任务单，再让项目经理用模型补成能开工的样子。
+  // 不直接建任务——建了再改等于让人对着半成品做验收；这里坚持「预览 → 人确认 → 才派发」。
+  app.post('/tickets', async req => serial(async () => {
+    const b = object(req.body ?? {})
+    const title = taskText(b.title, '工单标题', 200)
+    if (b.projectId === undefined || b.projectId === null || b.projectId === '') throw new TaskError('先选一个项目')
+    const projectId = entityId(b.projectId)
+    const project = await findProject(pool, req.userId, projectId)
+    if (!project) throw new TaskError('项目不存在', 404)
+    const roleId = b.roleId === undefined || b.roleId === null || b.roleId === '' ? null : entityId(b.roleId)
+    if (roleId !== null && !(await findRole(pool, req.userId, roleId))) throw new TaskError('角色不存在', 404)
+    const proposal = await createTicket(pool, req.userId, {
+      title,
+      notes: typeof b.notes === 'string' ? b.notes.slice(0, 4000) : '',
+      projectId,
+      projectName: project.name,
+      roleId,
+      machine: typeof b.machine === 'string' ? b.machine.trim().slice(0, 200) : '',
+      cwd: typeof b.cwd === 'string' ? b.cwd.trim().slice(0, 4000) : '',
+    })
+    broadcast(req.userId, { type: 'proposal', proposal })
+    // 立刻让项目经理写一遍；电脑不在线或没配项目经理角色就把草稿留着，人可以在卡片上点重写
+    let refineError = ''
+    try { await startRefine(req.userId, proposal, {}) }
+    catch (e) { refineError = e instanceof Error ? e.message : String(e) }
+    return { proposal: await getProposal(pool, req.userId, proposal.id), refineError }
   }))
   // 确认：这张任务单已经是「谁做、在哪做、做什么」都齐了的，确认即落库。
   // 默认顺手派发（人点了确认就是要它开始）；dispatch:false 表示只建任务，留着以后自己派或交给项目经理。
@@ -1079,6 +1133,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 去向：界面可以改，没改就按项目经理给的那条。写进任务里而不是只传给这次派发——
     // 「只建任务」之后由项目经理自动派发时，也得按同样的方式开场。
     const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : proposal.delivery
+    // 发单没有原会话可续：无论界面传什么都从零开跑，否则会把 ticket:xxx 当成 forkFrom
+    const isTicket = proposal.kind === 'ticket'
+    const delivery: Delivery = isTicket ? 'fresh' : want
     const body: Record<string, unknown> = {
       title: proposal.title,
       notes: proposal.notes,
@@ -1088,8 +1145,15 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       checklist: toChecklist(proposal.checklist),
       // 项目经理声明的执行边界跟着任务走：代批和派发都要用它
       constraints: proposal.constraints,
-      startMode: want,
-      forkFrom: want === 'fork' ? proposal.sessionId : null,
+      startMode: delivery,
+      forkFrom: delivery === 'fork' ? proposal.sessionId : null,
+    }
+    // 发单时人指定过的电脑/目录钉进任务：他写的就是他想要的，别在派发时又换一台
+    if (isTicket) {
+      if (proposal.machine) body.machine = proposal.machine
+      if (proposal.cwd) body.cwd = proposal.cwd
+      // 人已经确认过了，剩下的派发动作就归项目经理——和卡片上那句提示保持一致
+      body.autoDispatch = true
     }
     // 清单传的是文本数组，转成任务的 {id,text,done}
     for (const [k, v] of Object.entries(patch)) {
@@ -1098,7 +1162,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         : v
     }
     const task = await createTaskWithDefaults(req.userId, body)
-    const linked = await linkSession(pool, req.userId, task.id, proposal.sessionId)
+    // 发单没有会话可挂；会话攒出来的意见才需要把来源会话关联上
+    const linked = isTicket ? task : await linkSession(pool, req.userId, task.id, proposal.sessionId)
     await markProposal(pool, req.userId, id, 'accepted', task.id)
     pushTask(req.userId, linked)
     // 派发失败不影响任务已建好这件事，把原因带回去让界面提示
