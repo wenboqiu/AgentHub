@@ -13,29 +13,8 @@ export type Config = {
   remoteEnabled: boolean;
   /** 待处理会话用图模式展示（项目气泡 + 会话气泡） */
   graphMode: boolean;
-  /** 仅桌面：本地派单队列（127.0.0.1:47822）是否开放 */
-  hubEnabled: boolean;
-  /** 仅桌面：派单队列鉴权 token；留空 = 本机回环不鉴权 */
-  hubToken: string;
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
-
-/** 派单队列里的任务（Rust hub::Task，camelCase 序列化） */
-export type HubTask = {
-  id: string;
-  title: string;
-  body: string;
-  worker: string;
-  workspace: string;
-  state: "queued" | "dispatched" | "running" | "done" | "failed" | "cancelled";
-  dispatches: number;
-  result: string | null;
-  artifacts: string[];
-  ok: boolean | null;
-  createdAt: number;
-  updatedAt: number;
-};
-export type HubWorker = { name: string; lastSeen: number; queued: number; running: number };
 
 export type HooksStatus = { installed: boolean; scriptExists: boolean; settingsExists: boolean };
 export type CollectorInfo = {
@@ -69,7 +48,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: false, hubEnabled: true, hubToken: "" };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: false };
 
 export async function loadConfig(): Promise<Config> {
   if (isDesktop) return invoke<Config>("get_config");
@@ -102,8 +81,4 @@ export const desktop = {
   focus: (pid: number | null, agent: string, sessionKey?: string) => invoke<void>("focus_session", { pid, agent, sessionKey }),
   openInTerminal: (agent: string, sessionKey: string, cwd: string) => invoke<string>("open_in_terminal", { agent, sessionKey, cwd }),
   setBadge: (count: number) => invoke<void>("set_badge", { count }),
-  hubTasks: () => invoke<HubTask[]>("hub_tasks"),
-  hubWorkers: () => invoke<HubWorker[]>("hub_workers"),
-  hubCreate: (t: { title: string; body: string; worker: string; workspace: string }) => invoke<HubTask>("hub_create_task", t),
-  hubCancel: (id: string) => invoke<void>("hub_cancel_task", { id }),
 };

@@ -14,13 +14,12 @@ import GoalView from "./GoalView";
 import CalendarView from "./CalendarView";
 import PendingGraph from "./PendingGraph";
 import BoardPanel from "./BoardPanel";
-import HubPanel from "./HubPanel";
 import Icon from "./Icon";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
 type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
-type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar"|"hub";
-const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历", hub:"派单" } as const;
+type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar";
+const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历" } as const;
 
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
@@ -493,8 +492,8 @@ export default function App() {
   }
 
   const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
-  // 派单 tab 只在桌面端有（队列跑在 Rust 侧）
-  const tabs = isDesktop ? (["sessions","tasks","board","goals","calendar","hub"] as const) : (["sessions","tasks","board","goals","calendar"] as const);
+  // 派单 tab 已下线：本地 hub 队列与看板职责重叠且长期未用，派活统一走看板
+  const tabs = ["sessions","tasks","board","goals","calendar"] as const;
   const renderList = (items: Session[]) => (
     <ul className="list">
       {items.map((s) => (
@@ -532,7 +531,6 @@ export default function App() {
         <div hidden={tab!=="board"}>{board && api && <BoardPanel api={api} board={board} now={now} onRefresh={refreshBoard} onOpen={openTask} onNotice={say}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
-        <div hidden={tab!=="hub"}>{isDesktop && <HubPanel onNotice={say}/>}</div>
         <div hidden={tab!=="sessions"}>
         <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
         {cfg.graphMode ? (

@@ -885,16 +885,4 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
   .pg-bubble.pg-session .pg-agent { font-size: 10px; }
 }
 
-/* ---------- 派单（Hub） ---------- */
-.hub-workers { display: flex; flex-wrap: wrap; gap: 8px; padding: 0; margin: 8px 0 0; list-style: none; }
-.hub-worker { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border: .5px solid var(--line); border-radius: 10px; }
-.hub-worker strong { font-size: 13px; }
-.hub-worker span { font-size: 12px; color: var(--dim); }
-.hub-task .row-head { flex-wrap: wrap; gap: 4px; }
-.hub-task .badge { margin-left: 0; color: var(--dim); font-weight: 500; }
-.hub-task.st-done .badge, .hub-task.st-cancelled .badge { color: var(--ok, var(--dim)); }
-.hub-task.st-failed .badge { color: var(--alert); }
-.hub-detail { padding: 8px 12px; font-size: 13px; display: grid; gap: 6px; }
-.hub-detail .kv { margin: 0; }
-.hub-detail .kv code { display: inline; margin-right: 8px; }
-.hub-body { margin: 0; padding: 10px; border: .5px solid var(--line); border-radius: 8px; background: var(--field); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+/* ---------- 派单（Hub）已下线：本地队列与看板职责重叠，相关样式一并移除 ---------- */

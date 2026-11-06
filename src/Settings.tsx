@@ -620,17 +620,6 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                 {denied.length > 0 ? `已禁止 ${denied.length} 个目录：这些目录下的任务和会话会被执行端直接拒绝。` : "当前目录不限制：没有任何目录被禁止。"}
               </p>
 
-              <h3>派单队列（Hub）</h3>
-              <label className="check">
-                <input type="checkbox" checked={form.hubEnabled} onChange={(e) => set("hubEnabled", e.target.checked)} />
-                开启本地派单队列（127.0.0.1:47822，供 WorkBuddy / 豆包轮询拉单）
-              </label>
-              <label>
-                鉴权 token（留空 = 本机回环不鉴权）
-                <input value={form.hubToken} onChange={(e) => set("hubToken", e.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
-              </label>
-              <p className="hint">开启后可在主界面「派单」标签发单；worker 接入方式见 docs/hub-worker.md。</p>
-
               <div className="btns">
                 <button className="primary" onClick={save} disabled={!dirty}>
                   保存
