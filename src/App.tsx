@@ -441,8 +441,8 @@ export default function App() {
         notice={notice}
         onClose={() => {
           setView("list");
-          // 设置页里改过项目经理：回到主界面时把开关状态刷新一次，任务单上的提示才对
-          void api?.dispatchManager().then(st => setManager(st.manager)).catch(() => {});
+          // 设置页里改过项目经理（现在是角色上的标记）：回到主界面时把经理名单和开关一起刷新
+          void api?.dispatchManager().then(st => { setManager(st.manager); setRoles(st.roles ?? []); }).catch(() => {});
         }}
         onSaved={(c, opts) => {
           setCfg(c);
@@ -528,7 +528,7 @@ export default function App() {
       <main>
         {activeReminders.length > 0 && <section className="reminder-list" aria-label="时间提醒"><h2>时间提醒（{activeReminders.length}）</h2><ul className="list">{activeReminders.map(r=><li key={r.id} className="reminder-row"><button className="entity-row" onClick={()=>r.entityType === "task" ? openTask(r.entityId) : openGoal(r.entityId)}><span className="entity-main"><strong>{r.title}</strong><span>{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span></span></button><button onClick={()=>void dismissReminder(r.id)}>已处理</button></li>)}</ul></section>}
         <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
-        <div hidden={tab!=="board"}>{board && api && <BoardPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={[...proposals.values()]} canRefine={!!manager?.roleId} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onOpen={openTask} onNotice={say} onProposal={saveProposal}/>}</div>
+        <div hidden={tab!=="board"}>{board && api && <BoardPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={[...proposals.values()]} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onOpen={openTask} onNotice={say} onProposal={saveProposal}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
         <div hidden={tab!=="sessions"}>

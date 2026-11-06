@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import { TaskError, object } from './tasks.ts'
 import { DEFAULT_POLICY, type RefereePolicy } from './referee.ts'
+import { listManagers, pickManager } from './roles.ts'
 
 // 项目经理：一个账号一个，负责三件事——把处理意见「细化」成人话、在开关打开时把
 // 人已经确认过的任务派出去、以及在会话卡在等授权时按规则代批（judgeApproval）。
@@ -22,6 +23,7 @@ import { DEFAULT_POLICY, type RefereePolicy } from './referee.ts'
 type DB = Pick<pg.Pool, 'query'>
 
 export type DispatchManager = {
+  /** 已废弃：谁当经理由角色上的 manager 标记决定（可多位、按项目挑）。字段只为兼容旧客户端保留 */
   roleId: number | null
   enabled: boolean
   /** 同时允许在跑的 run 数（含排队） */
@@ -134,8 +136,11 @@ export async function saveManager(db: DB, user: number, raw: unknown): Promise<D
     }
     if ('maxPerHour' in a) approve.maxPerHour = int(a.maxPerHour, '每小时代批上限', 1, 600)
   }
-  // 开着自动派发或代批却没有项目经理：等于「没人负责还自动放行」，直接拒绝
-  if ((enabled || approve.enabled) && roleId === null) throw new TaskError('先选一个项目经理角色，再开启自动派发或代批')
+  // 开着自动派发或代批却没有任何项目经理：等于「没人负责还自动放行」，直接拒绝
+  if (enabled || approve.enabled) {
+    const n = Number((await db.query('SELECT count(*) c FROM roles WHERE user_id=$1 AND manager=true', [user])).rows[0]?.c ?? 0)
+    if (!n) throw new TaskError('先在角色里指定至少一位项目经理，再开启自动派发或代批')
+  }
   const r = await db.query(
     `INSERT INTO dispatch_manager(user_id,role_id,enabled,max_running,max_per_hour,
        approve_enabled,approve_read,approve_write,approve_tests,approve_network,approve_per_hour,updated_at)
@@ -174,16 +179,17 @@ export async function recentAutoCount(db: DB, user: number): Promise<number> {
   return Number(r.rows[0]?.c ?? 0)
 }
 
-export type Candidate = { id: number; title: string; priority: string }
+export type Candidate = { id: number; title: string; priority: string; projectId: number | null }
 
 /**
  * 可自动派发的任务：人已经确认的处理意见生成的，或者人直接「发新单」交给它的；
  * 还没派过、失败次数没超限。按优先级再按生成顺序，先派要紧的、先提出的。
+ * 带上 project_id：每个任务要交给「管这个项目」的那位经理，不再是一个全局经理。
  */
 export async function pickCandidates(db: DB, user: number, limit: number): Promise<Candidate[]> {
   if (limit <= 0) return []
-  const r = await db.query<Candidate>(
-    `SELECT t.id, t.title, t.priority FROM tasks t
+  const r = await db.query<Candidate & { project_id: number | null }>(
+    `SELECT t.id, t.title, t.priority, t.project_id FROM tasks t
      WHERE t.user_id = $1
        AND t.status = 'todo'
        AND (t.auto_dispatch OR EXISTS (
@@ -203,7 +209,10 @@ export async function pickCandidates(db: DB, user: number, limit: number): Promi
      LIMIT $3`,
     [user, FAIL_LIMIT, limit],
   )
-  return r.rows.map(v => ({ id: Number(v.id), title: v.title, priority: v.priority }))
+  return r.rows.map(v => ({
+    id: Number(v.id), title: v.title, priority: v.priority,
+    projectId: v.project_id === null || v.project_id === undefined ? null : Number(v.project_id),
+  }))
 }
 
 /**
@@ -258,9 +267,16 @@ export async function runDispatchTick(deps: TickDeps): Promise<TickResult> {
     try {
       const room = quota(manager, await runningCount(pool, userId), await recentAutoCount(pool, userId))
       if (room <= 0) continue
-      for (const c of await pickCandidates(pool, userId, room)) {
+      const candidates = await pickCandidates(pool, userId, room)
+      if (!candidates.length) continue
+      // 每个任务各自找「管它那个项目」的经理：一个人可以管一个项目，也可以管所有项目
+      const managers = await listManagers(pool, userId)
+      for (const c of candidates) {
+        const owner = pickManager(managers, c.projectId)
+        // 没人管这个项目：不记失败（不是任务的错，是配置没配好），等配了经理自然会派
+        if (!owner) continue
         try {
-          const res = await deps.dispatch(userId, c.id, manager.roleId)
+          const res = await deps.dispatch(userId, c.id, owner.id)
           await logAuto(pool, userId, c.id, res.queued ? 'queued' : 'dispatched', res.runId ?? null)
           dispatched++
         } catch (e: any) {

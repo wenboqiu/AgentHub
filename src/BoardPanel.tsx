@@ -64,7 +64,7 @@ function Entry({
 }
 
 export default function BoardPanel({
-  api, board, now, projects, roles, proposals, canRefine, autoDispatch, onRefresh, onOpen, onNotice, onProposal,
+  api, board, now, projects, roles, proposals, autoDispatch, onRefresh, onOpen, onNotice, onProposal,
 }: {
   api: Api;
   /** 看板数据由 App 层统一获取（Tab 角标也要用），这里只展示 */
@@ -74,8 +74,6 @@ export default function BoardPanel({
   roles: Role[];
   /** 待确认的任务单（含发单草稿）：卡片就在这儿预览，确认了才建任务 */
   proposals: Proposal[];
-  /** 配了项目经理角色：发单后它能用模型补写 */
-  canRefine: boolean;
   /** 项目经理开了自动派发：确认时点「只建任务」它会接手 */
   autoDispatch: boolean;
   onRefresh(): void;
@@ -133,7 +131,7 @@ export default function BoardPanel({
       </div>
       {showForm && (
         <DispatchForm
-          api={api} projects={projects} roles={roles} canRefine={canRefine} autoDispatch={autoDispatch}
+          api={api} projects={projects} roles={roles} autoDispatch={autoDispatch}
           onCreated={created} onCancel={() => setShowForm(false)} onNotice={onNotice}
         />
       )}

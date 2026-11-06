@@ -16,14 +16,24 @@ const Label = ({ text, note }: { text: string; note: string }) => (
   <span className="field-label">{text}<span className="dim">{note}</span></span>
 );
 
+/** 这一单会交给谁管：本项目专属经理 → 管所有项目的经理 → 只剩一位经理时由它兜底（与服务端同规则） */
+function pickOwner(roles: Role[], projectId: number | null): Role | null {
+  const managers = roles.filter((r) => r.manager).sort((a, b) => a.id - b.id);
+  if (projectId !== null) {
+    const own = managers.find((r) => r.managerProjects.includes(projectId));
+    if (own) return own;
+  }
+  const all = managers.find((r) => r.managerProjects.length === 0);
+  if (all) return all;
+  return managers.length === 1 ? managers[0] : null;
+}
+
 export default function DispatchForm({
-  api, projects, roles, canRefine, autoDispatch, onCreated, onCancel, onNotice,
+  api, projects, roles, autoDispatch, onCreated, onCancel, onNotice,
 }: {
   api: Api;
   projects: Project[];
   roles: Role[];
-  /** 配了项目经理角色：它能用模型把这单补成任务单；没配就只能用你的原话 */
-  canRefine: boolean;
   /** 项目经理开了自动派发：确认时点「只建任务」它会接手 */
   autoDispatch: boolean;
   onCreated(proposal: Proposal): void;
@@ -40,10 +50,16 @@ export default function DispatchForm({
   const machines = [...new Set(dirs.map((d) => d.machine).filter((m): m is string => !!m))];
   // 定了电脑就只给这台上的目录，免得把路径选串
   const cwds = (f.machine ? dirs.filter((d) => d.machine === f.machine) : dirs).map((d) => d.cwd);
+  const hasManager = roles.some((r) => r.manager);
+  // 选了项目才知道归谁管；没选项目时先按「有没有经理」判断能不能发
+  const owner = pickOwner(roles, project?.id ?? null);
+  const blocked = !hasManager ? "还没有项目经理：先去「设置 → 角色」把某个角色设为项目经理，否则这单没人补、没人派。" : "";
 
   const submit = async () => {
     if (!f.projectId) return setErr("先选一个项目");
     if (!f.title.trim()) return setErr("工单至少要有一句话标题");
+    if (!hasManager) return setErr("还没有项目经理，先把某个角色设为项目经理");
+    if (!owner) return setErr("这个项目还没有对应的项目经理：去角色里给它指定一位，或设一位管所有项目的");
     setBusy(true);
     setErr("");
     try {
@@ -59,7 +75,7 @@ export default function DispatchForm({
       setF(BLANK);
       onNotice(res.refineError
         ? `工单已建好，但项目经理没能开写：${res.refineError}`
-        : "已发单：项目经理正在补成任务单，写好后在这儿确认");
+        : `已发单：${owner.name}正在补成任务单，写好后在这儿确认`);
       onCreated(res.proposal);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -110,11 +126,13 @@ export default function DispatchForm({
       </label>
 
       <p className="hint">发单后项目经理会先把这单补成能开工的任务单，你过一眼，确认了才真的派出去。</p>
-      {!canRefine && <p className="hint">还没配项目经理角色：没人能补写，卡片里就是你的原话；想让它补，去设置里挑一个角色。</p>}
+      {blocked && <p className="hint">{blocked}</p>}
+      {!blocked && !owner && <p className="hint">选中的项目还没有对应的项目经理：去「设置 → 角色」给它指定一位，或设一位管所有项目的。</p>}
+      {!blocked && owner && <p className="hint">这单会交给 <strong>{owner.name}</strong>（{owner.managerProjects.length === 0 ? "管所有项目" : "管这个项目"}）补写；想换人在角色里改管辖范围。</p>}
       {!autoDispatch && <p className="hint">项目经理没开自动派发：确认时点「只建任务」不会自己出去，要派就在卡片上点「确认并派发」。</p>}
       {err && <p className="form-error" role="alert">{err}</p>}
       <div className="action-bar">
-        <button className="primary" disabled={busy || !projects.length || !f.title.trim()} onClick={() => void submit()}>发单</button>
+        <button className="primary" disabled={busy || !projects.length || !f.title.trim() || !!blocked || !owner} onClick={() => void submit()}>发单</button>
         <button className="ghost" disabled={busy} onClick={onCancel}>取消</button>
       </div>
     </section>

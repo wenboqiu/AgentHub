@@ -60,7 +60,7 @@ import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
-import { applyRole, deleteRole, findRole, getRole, listRoles, roleModel, saveRole } from './roles.ts'
+import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
 import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listProjects, pickProjectDir, recentBrief, saveProject } from './projects.ts'
 import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
@@ -453,8 +453,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // fallbackRoleId 只在任务自己没挂角色时兜底：项目经理派活时用它指定的那个角色。
   const startTaskDispatch = async (userId: number, taskId: number, b: Record<string, unknown>, fallbackRoleId: number | null = null) => {
     const task = await getTask(pool, userId, taskId)
-    // 任务是「谁来做」优先按角色定：角色可以指定执行工具、模型和上下文
-    const role = (await findRole(pool, userId, task.roleId)) ?? (await findRole(pool, userId, fallbackRoleId))
+    // 任务是「谁来做」优先按角色定：任务上指定的 → 派单经理给的建议 → 管这个项目的经理兜底
+    const role = (await findRole(pool, userId, task.roleId))
+      ?? (await findRole(pool, userId, fallbackRoleId))
+      ?? (await pickManagerFor(pool, userId, task.projectId))
     // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
     const project = await findProject(pool, userId, task.projectId)
     const online = agentList(userId)
@@ -1028,9 +1030,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const wanted = typeof b.machine === 'string' && b.machine.trim() ? b.machine.trim() : proposal.machine || session?.machine || ''
     const machine = taskText(wanted || online[0] || '', '电脑名', 200)
     if (!executors.has(execKey(userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
-    const manager = await getManager(pool, userId)
-    const role = await findRole(pool, userId, manager.roleId)
-    // 谁来判断：优先用项目经理角色配的执行工具；没配就跟着原会话那台用同一个工具
+    // 谁来判断：这一单归哪位项目经理管——本项目专属经理优先，其次是管所有项目的那位
+    const role = await pickManagerFor(pool, userId, proposal.projectId)
+    // 用谁的执行工具：优先用项目经理角色配的；没配就跟着原会话那台用同一个工具
     const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode'
       ? role.agent
       : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode') ? session.agent : 'claude')
@@ -1104,6 +1106,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!project) throw new TaskError('项目不存在', 404)
     const roleId = b.roleId === undefined || b.roleId === null || b.roleId === '' ? null : entityId(b.roleId)
     if (roleId !== null && !(await findRole(pool, req.userId, roleId))) throw new TaskError('角色不存在', 404)
+    // 发单的前置条件：这个项目得有人管。没人管的单发出去也没人补、没人派
+    const owner = await pickManagerFor(pool, req.userId, projectId)
+    if (!owner) throw new TaskError('这个项目还没有项目经理：先到「设置 → 角色」把某个角色设为项目经理，再回来发单', 409)
     const proposal = await createTicket(pool, req.userId, {
       title,
       notes: typeof b.notes === 'string' ? b.notes.slice(0, 4000) : '',
@@ -1179,20 +1184,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     proposal: await markProposal(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded'),
   })))
 
-  // ---------- 项目经理：全局一个，负责细化意见 + （可选）自动派发已确认的任务 ----------
+  // ---------- 项目经理：谁当经理由角色上的标记决定，可以有多位、各管一摊 ----------
   app.get('/dispatch/manager', async req => serial(async () => {
     const manager = await getManager(pool, req.userId)
-    const [roles, running, recent] = await Promise.all([
+    const [roles, managers, running, recent] = await Promise.all([
       listRoles(pool, req.userId),
+      listManagers(pool, req.userId),
       runningCount(pool, req.userId),
       recentAutoCount(pool, req.userId),
     ])
-    return { manager, roles, running, recent, quota: quota(manager, running, recent) }
+    return { manager, roles, managers, running, recent, quota: quota(manager, running, recent) }
   }))
   app.patch('/dispatch/manager', async req => serial(async () => {
     const manager = await saveManager(pool, req.userId, req.body)
-    const [running, recent] = await Promise.all([runningCount(pool, req.userId), recentAutoCount(pool, req.userId)])
-    return { manager, running, recent, quota: quota(manager, running, recent) }
+    const [running, recent, roles, managers] = await Promise.all([
+      runningCount(pool, req.userId), recentAutoCount(pool, req.userId),
+      listRoles(pool, req.userId), listManagers(pool, req.userId),
+    ])
+    return { manager, roles, managers, running, recent, quota: quota(manager, running, recent) }
   }))
 
   // 派活看板：排队中 / 在跑 / 卡住（进行中无运行）的任务聚到一张板上

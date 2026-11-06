@@ -39,7 +39,7 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
 export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | "autoDispatch" | keyof Schedule>>;
 /** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */
-export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; createdAt: string; updatedAt: string };
+export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; manager: boolean; managerProjects: number[]; createdAt: string; updatedAt: string };
 export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
 /** 一条目录 = 这个项目在某台电脑上住在哪；machine 为空表示哪台电脑都适用 */
@@ -187,7 +187,7 @@ export type DispatchManager = {
   approve: ApprovePolicy;
   updatedAt: string | null;
 };
-export type ManagerState = { manager: DispatchManager; roles?: Role[]; running: number; recent: number; quota: number };
+export type ManagerState = { manager: DispatchManager; roles?: Role[]; managers?: Role[]; running: number; recent: number; quota: number };
 /** Thread 事件：任务视角的统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要） */
 export type ThreadEvent =
   | { type: "message"; at: string; sessionId: string; role: string; text: string; sourceId?: string }

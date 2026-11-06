@@ -11,11 +11,12 @@ const DISPATCHABLE = DISPATCHABLE_AGENTS;
 // 还有一份按项目分区的记忆（手写的须知 + 验收打回自动沉淀的经验）。
 // 角色只管「人」；「在哪台电脑、哪个目录」是项目的事（项目里的目录列表，按当前电脑自动挑）。
 
-type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string };
-const BLANK: Form = { name: "", title: "", agent: "claude", model: "", context: "", tools: "" };
+type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string; manager: boolean; managerProjects: number[] };
+const BLANK: Form = { name: "", title: "", agent: "claude", model: "", context: "", tools: "", manager: false, managerProjects: [] };
 const toForm = (r: Role): Form => ({
   name: r.name, title: r.title, agent: r.agent ?? "", model: r.model ?? "", context: r.context,
   tools: r.tools.join("、"),
+  manager: r.manager, managerProjects: r.managerProjects,
 });
 const toInput = (f: Form): RoleInput => ({
   name: f.name.trim(),
@@ -25,9 +26,19 @@ const toInput = (f: Form): RoleInput => ({
   context: f.context.trim(),
   // 逗号/顿号/空格都能分隔，方便从文档里直接粘
   tools: f.tools.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean),
+  manager: f.manager,
+  // 不担任经理时管辖范围无意义，一律清空（服务端也会清）
+  managerProjects: f.manager ? f.managerProjects : [],
 });
 
-function Fields({ form, busy, onChange }: { form: Form; busy: boolean; onChange(patch: Partial<Form>): void }) {
+function Fields({ form, projects, busy, onChange }: {
+  form: Form; projects: Project[]; busy: boolean; onChange(patch: Partial<Form>): void;
+}) {
+  const toggleProject = (id: number) => onChange({
+    managerProjects: form.managerProjects.includes(id)
+      ? form.managerProjects.filter(x => x !== id)
+      : [...form.managerProjects, id],
+  });
   return (
     <>
       <div className="form-grid">
@@ -36,7 +47,31 @@ function Fields({ form, busy, onChange }: { form: Form; busy: boolean; onChange(
         <label>执行工具<select value={form.agent} disabled={busy} onChange={e => onChange({ agent: e.target.value, model: "" })}><option value="">未指定</option>{DISPATCHABLE.map(key => <option key={key} value={key}>{AGENT_LABEL[key]}</option>)}</select></label>
         <label>模型<ModelPicker key={form.agent} agent={form.agent} value={form.model} disabled={busy} onChange={model => onChange({ model })} /></label>
         <label>可用工具<input value={form.tools} maxLength={600} disabled={busy} placeholder="例如 Read、Edit、Bash" onChange={e => onChange({ tools: e.target.value })} /></label>
+        <label>项目经理
+          <select value={form.manager ? "yes" : "no"} disabled={busy} onChange={e => onChange({ manager: e.target.value === "yes" })}>
+            <option value="no">不担任</option>
+            <option value="yes">担任（发单先找它补写并派活）</option>
+          </select>
+        </label>
       </div>
+      {form.manager && (
+        <div className="profile-picks">
+          <div className="profile-picks-head">
+            <span>管哪些项目</span>
+            <span className="dim">一个都不勾 = 所有项目都管；同一个项目只留一位专属经理</span>
+          </div>
+          {projects.map(p => {
+            const on = form.managerProjects.includes(p.id);
+            return (
+              <label key={p.id} className={on ? "pick on" : "pick"}>
+                <input type="checkbox" checked={on} disabled={busy} onChange={() => toggleProject(p.id)} />
+                <span>{p.name}</span>
+              </label>
+            );
+          })}
+          {projects.length === 0 && <p className="hint">还没有项目。没有项目时它管所有项目。</p>}
+        </div>
+      )}
       <label>上下文（角色准则，最多 4000 字）
         <textarea value={form.context} rows={4} maxLength={4000} disabled={busy} placeholder={"例如：只改前端，动手前先读现有写法；改完跑 tsc；不确定的地方先问，不要猜。"} onChange={e => onChange({ context: e.target.value })} />
       </label>
@@ -154,8 +189,10 @@ export default function Roles({ api }: { api: Api }) {
                   onClick={() => setOpen((o) => ({ ...o, [r.id]: !o[r.id] }))}>
                   <strong>{r.name}</strong>
                   {r.agent && <span className={`tag ${r.agent}`}>{AGENT_LABEL[r.agent] ?? r.agent}</span>}
+                  {r.manager && <span className="tag manager">项目经理</span>}
                   <span className="dim role-title">{r.title || "职责未写"}</span>
                   <span className="role-meta">
+                    {r.manager && <span>{r.managerProjects.length === 0 ? "管所有项目" : `管 ${r.managerProjects.map(id => projects.find(p => p.id === id)?.name ?? `项目 ${id}`).join("、")}`}</span>}
                     {r.model && <code>{r.model}</code>}
                     <span>{r.tasks} 个任务</span>
                   </span>
@@ -164,7 +201,7 @@ export default function Roles({ api }: { api: Api }) {
                 </button>
                 {expanded && (
                   <>
-                    <Fields form={form} busy={busy} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
+                    <Fields form={form} projects={projects} busy={busy} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
                     <div className="btns">
                       <button className="primary" disabled={busy || !dirty} onClick={() => void run(() => api.updateRole(r.id, toInput(form)), "角色已保存")}>保存</button>
                       <button className="ghost" disabled={busy} onClick={() => void run(() => api.deleteRole(r.id), "角色已删除")}>删除</button>
@@ -181,7 +218,7 @@ export default function Roles({ api }: { api: Api }) {
           {adding ? (
             <div className="profile-card">
               <div className="profile-head"><strong>新建角色</strong></div>
-              <Fields form={draft} busy={busy} onChange={(patch) => setDraft((f) => ({ ...f, ...patch }))} />
+              <Fields form={draft} projects={projects} busy={busy} onChange={(patch) => setDraft((f) => ({ ...f, ...patch }))} />
               <div className="btns">
                 <button className="primary" disabled={busy || !draft.name.trim()} onClick={() => void run(async () => { await api.createRole(toInput(draft) as RoleInput & { name: string }); setDraft(BLANK); setAdding(false); }, "角色已创建")}>创建</button>
                 <button className="ghost" onClick={() => { setAdding(false); setDraft(BLANK); }}>取消</button>
