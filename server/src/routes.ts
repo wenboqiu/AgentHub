@@ -62,7 +62,7 @@ import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
 import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
-import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, saveProject } from './projects.ts'
+import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, renameMachine, saveProject } from './projects.ts'
 import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
 import {
@@ -912,6 +912,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }))
   // 可选电脑：项目配置里的下拉项——在线执行器 + 这个账号用过的机器，离线也列出来
   app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId)) })))
+  // 电脑改名：本机名一变，旧名下的会话 / 运行 / 项目目录一起挪过去，别留一台「不存在的电脑」
+  app.post('/machines/rename', async req => serial(async () => {
+    const b = object(req.body ?? {})
+    return renameMachine(pool, req.userId, b.from, b.to)
+  }))
   // 项目：一个代码库的身份与背景知识，目录列表（每台电脑一条）也挂在它身上
   app.get('/projects', async req => serial(async () => ({ projects: await listProjects(pool, req.userId) })))
   app.post('/projects', async req => serial(async () => ({ project: await saveProject(pool, req.userId, req.body) })))

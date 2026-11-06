@@ -67,12 +67,56 @@ impl TokenBlock {
     }
 }
 
+/// 老版本兜底出来的名字：读不到主机名时写死成 "my-pc"，界面上看着像一台陌生电脑。
+/// 升级后遇到这些名字就换回系统里的真名，并把服务端记在旧名下的记录一起改名（见 machines.rs）。
+pub const LEGACY_NAMES: [&str; 3] = ["my-pc", "my pc", "unknown"];
+
+/// 这个机器名是不是老版本兜底出来的占位名（空字符串也算）
+pub fn is_legacy_name(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    n.is_empty() || LEGACY_NAMES.contains(&n.as_str())
+}
+
+/// 本机名：先看环境变量，再问系统。
+/// macOS 从访达 / LaunchAgent 启动时没有 HOSTNAME，所以必须问系统，
+/// 用 `scutil --get ComputerName`（就是访达「共享」里显示的名字，例如「wenboqiu's Mac mini」）。
 pub fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
+    let env = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "my-pc".to_string())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    env.or_else(system_hostname).unwrap_or_else(|| "这台电脑".to_string())
+}
+
+fn system_hostname() -> Option<String> {
+    // macOS：和朋友在访达里看到的一致，带空格和撇号也没关系（上报时会 URL 编码）
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    // 其余系统：hostname 命令到处都有，省得为一件事加依赖
+    #[cfg(not(windows))]
+    {
+        let out = std::process::Command::new("hostname").output().ok()?;
+        let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // macOS 回的是 "wenboqius-Mac-mini.local"，去掉尾缀才像台自己的电脑
+        if let Some(t) = s.strip_suffix(".local").map(str::to_string) {
+            s = t;
+        }
+        return (!s.is_empty()).then_some(s);
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("hostname").output().ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
 }
 
 pub fn load(path: &Path) -> Config {

@@ -27,6 +27,8 @@ mod focus;
 #[cfg(desktop)]
 mod forwarder;
 #[cfg(desktop)]
+mod machines;
+#[cfg(desktop)]
 mod remote;
 #[cfg(desktop)]
 mod reconcile;
@@ -48,7 +50,7 @@ mod desktop {
     use crate::config::{self, Config, SharedConfig};
     use crate::forwarder::{ForwardStatus, Forwarder};
     use crate::remote::{self, RemoteStatus, Status as RemoteInfo};
-    use crate::{codex, focus, terminal, tray};
+    use crate::{codex, focus, machines, terminal, tray};
     use serde::Serialize;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, RwLock};
@@ -80,7 +82,18 @@ mod desktop {
 
     #[tauri::command]
     fn set_config(state: State<AppState>, config: Config) -> Result<(), String> {
+        let (old_machine, old_url, old_token) = {
+            let c = state.config.read().unwrap();
+            (c.machine.clone(), c.server_url.clone(), c.token.clone())
+        };
         config::save(&state.config_path, &config)?;
+        // 改了「本机名称」：服务端按机器名归档会话 / 运行 / 项目目录，旧名下的记录要一起改过去，
+        // 不然项目配置的下拉里会多出一台名字已经没人用的电脑
+        if old_machine.trim() != config.machine.trim() {
+            let url = if config.server_url.trim().is_empty() { old_url } else { config.server_url.clone() };
+            let token = if config.token.trim().is_empty() { old_token } else { config.token.clone() };
+            machines::spawn_rename(&url, &token, &old_machine, &config.machine);
+        }
         *state.config.write().unwrap() = config;
         Ok(())
     }
@@ -209,7 +222,23 @@ mod desktop {
             ])
             .setup(move |app| {
                 let config_path = config::config_path(app.path().app_config_dir()?);
-                let shared: SharedConfig = Arc::new(RwLock::new(config::load(&config_path)));
+                let mut cfg = config::load(&config_path);
+                // 老版本在 macOS 上读不到主机名，把本机名兜底成了 "my-pc"，界面上就像多了一台陌生电脑。
+                // 换回系统里的真名（访达里显示的那个），并把服务端记在旧名下的记录一起改名。
+                let mut pending_rename = None;
+                if config::is_legacy_name(&cfg.machine) {
+                    let real = config::hostname();
+                    if !real.is_empty() && real != cfg.machine {
+                        pending_rename = Some((cfg.machine.clone(), real.clone()));
+                        cfg.machine = real;
+                        let _ = config::save(&config_path, &cfg);
+                    }
+                }
+                let shared: SharedConfig = Arc::new(RwLock::new(cfg));
+                if let Some((from, to)) = pending_rename {
+                    let c = shared.read().unwrap();
+                    machines::spawn_rename(&c.server_url, &c.token, &from, &to);
+                }
                 let forwarder = Forwarder::new();
                 let collector_status: CollectorStatus = Arc::new(Mutex::new(None));
                 forwarder.spawn(shared.clone());

@@ -208,6 +208,39 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.equal((await h.call('GET', '/machines', undefined, other.token)).body.machines.some((m: any) => m.name === pc), false)
   })
 
+  it('电脑改名：旧名下的会话与项目目录一起挪到新名，旧名不再出现在清单里', async () => {
+    const oldName = `old-pc-${stamp}`
+    const newName = `new-pc-${stamp}`
+    // 服务端存的 id 是「agent:sessionId」，这里的 sessionId 不用自己带前缀
+    const sid = `claude:rename-${stamp}`
+    const rawSid = `rename-${stamp}`
+    const sent = await h.call('POST', '/events', {
+      events: [{ agent: 'claude', sessionId: rawSid, machine: oldName, cwd: 'D:\\Work2\\Rename', state: 'done', at: new Date().toISOString() }],
+    })
+    assert.equal(sent.status, 200, JSON.stringify(sent.body))
+    const p = await h.project({
+      name: uniq('改名项目'),
+      dirs: [{ machine: oldName, cwd: 'D:\\Work2\\Old' }, { machine: null, cwd: 'D:\\通用' }],
+    })
+
+    const renamed = await h.call('POST', '/machines/rename', { from: oldName, to: newName })
+    assert.equal(renamed.status, 200, JSON.stringify(renamed.body))
+    assert.equal(renamed.body.sessions >= 1, true, '会话跟着改名')
+    assert.equal(renamed.body.projects, 1, '项目目录跟着改名')
+
+    const session = (await h.call('GET', '/sessions?all=1')).body.sessions.find((s: any) => s.id === sid)
+    assert.equal(session.machine, newName)
+    const proj = (await h.call('GET', '/projects')).body.projects.find((x: any) => x.id === p.id)
+    assert.deepEqual(proj.dirs.map((d: any) => d.machine), [newName, null])
+
+    const names = (await h.call('GET', '/machines')).body.machines.map((m: any) => m.name)
+    assert.equal(names.includes(oldName), false, '旧名从清单里消失')
+    assert.equal(names.includes(newName), true)
+
+    // 名字没变就不用改
+    assert.equal((await h.call('POST', '/machines/rename', { from: newName, to: newName })).status, 400)
+  })
+
   it('不能引用别人的项目', async () => {
     const mine = await h.project({ name: uniq('我的项目') })
     const other = await makeUser(h.pool)

@@ -589,7 +589,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             <section className="box">
               <h2>本机</h2>
               <label>
-                本机名称（machine；下次登录时作为设备名）
+                本机名称（派活时按它认电脑；改名后服务端旧记录会一起迁到新名下）
                 <input value={form.machine} onChange={(e) => set("machine", e.target.value)} />
               </label>
               <label className="check">

@@ -223,6 +223,42 @@ export async function listMachines(db: DB, user: number, online: string[]): Prom
     || a.name.localeCompare(b.name))
 }
 
+/**
+ * 本机改名：把旧机器名下的会话 / 运行记录 / 项目目录一起挪到新名下。
+ * 服务端是拿机器名当电脑身份的，名字一改旧记录就成了「另一台不存在的电脑」，
+ * 项目配置的下拉里会多出一条谁也对应不上的选项，所以客户端改名时顺手把库里的记录也改掉。
+ * 新名下已经有记录时按合并处理：项目目录留原来那条，会话 / 运行照常挪过去。
+ */
+export async function renameMachine(
+  db: DB, user: number, rawFrom: unknown, rawTo: unknown,
+): Promise<{ from: string; to: string; sessions: number; runs: number; projects: number }> {
+  const from = text(rawFrom, '原电脑名', 100)
+  const to = text(rawTo, '新电脑名', 100)
+  if (from === to) throw new TaskError('两个名字一样，不用改')
+  const sessions = (await db.query(
+    'UPDATE sessions SET machine=$3 WHERE user_id=$1 AND machine=$2 RETURNING id', [user, from, to],
+  )).rowCount ?? 0
+  const runs = (await db.query(
+    'UPDATE runs SET machine=$3 WHERE user_id=$1 AND machine=$2 RETURNING id', [user, from, to],
+  )).rowCount ?? 0
+  let projects = 0
+  const rows = (await db.query(
+    `SELECT id, dirs FROM projects WHERE user_id=$1 AND dirs <> '[]'::jsonb`, [user],
+  )).rows as { id: number; dirs: unknown }[]
+  for (const row of rows) {
+    const dirs = dirsOf(row.dirs)
+    if (!dirs.some(d => d.machine === from)) continue
+    // 按原顺序就地改名；新名下本来就有一条时留原来那条，把改名过来的丢掉（不重排用户的列表）
+    const hasTo = dirs.some(d => d.machine === to)
+    const next = dirs
+      .map(d => (d.machine === from ? { ...d, machine: to } : d))
+      .filter((d, i) => !(hasTo && dirs[i].machine === from))
+    await db.query('UPDATE projects SET dirs=$2::jsonb WHERE user_id=$1 AND id=$3', [user, JSON.stringify(next), Number(row.id)])
+    projects++
+  }
+  return { from, to, sessions, runs, projects }
+}
+
 // ---------- 项目近况（滚动简报） ----------
 
 export type BriefEntry = { id: number; text: string; taskId: number | null; at: string }
