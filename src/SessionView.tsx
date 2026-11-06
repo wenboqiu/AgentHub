@@ -14,6 +14,7 @@ import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pic
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
 import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary } from "./lib/runMeta";
+import Markdown from "./Markdown";
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -511,7 +512,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>
               <div className={`msg ${m.role}`}>
-                {m.text}
+                {/* agent 回复按 markdown 渲染；用户消息按原文显示，避免把用户输入里的下划线等符号误当格式 */}
+                {m.role === "assistant" ? <Markdown text={m.text} /> : m.text}
                 {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
