@@ -303,30 +303,7 @@ body.sidebar-resizing { user-select: none; -webkit-user-select: none; }
 .msg.tool, .msg.system { align-self: flex-start; max-width: 100%; background: transparent; padding: 0 4px; font-size: 12px; color: var(--dim); }
 .msg.tool { font-family: ui-monospace, Consolas, monospace; }
 .msg.approval { align-self: stretch; max-width: 100%; background: var(--alert-bg); color: var(--alert); font-size: 14px; }
-/* 对话流 markdown 渲染：assistant 回复按 GFM 排版，替换掉气泡的 pre-wrap */
-.msg > .md { white-space: normal; }
-.msg > .md > :first-child { margin-top: 0; }
-.msg > .md > :last-child { margin-bottom: 0; }
-.msg > .md p { margin: .5em 0; }
-.msg > .md h1, .msg > .md h2, .msg > .md h3, .msg > .md h4, .msg > .md h5, .msg > .md h6 { margin: 1em 0 .4em; line-height: 1.4; }
-.msg > .md h1 { font-size: 1.3em; }
-.msg > .md h2 { font-size: 1.2em; }
-.msg > .md h3 { font-size: 1.1em; }
-.msg > .md h4, .msg > .md h5, .msg > .md h6 { font-size: 1em; }
-.msg > .md ul, .msg > .md ol { margin: .5em 0; padding-left: 1.7em; }
-.msg > .md li { margin: .25em 0; }
-.msg > .md li > ul, .msg > .md li > ol { margin: .25em 0; }
-.msg > .md code { padding: .15em .4em; border-radius: 6px; background: var(--field); font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
-.msg > .md pre { margin: .6em 0; padding: 12px 14px; border-radius: 12px; background: var(--field); overflow: auto; line-height: 1.55; }
-.msg > .md pre code { padding: 0; background: transparent; font-size: inherit; }
-.msg > .md blockquote { margin: .6em 0; padding: .2em 1em; border-left: 3px solid var(--line); color: var(--dim); }
-.msg > .md table { display: block; max-width: 100%; margin: .6em 0; border-collapse: collapse; overflow-x: auto; font-size: .95em; }
-.msg > .md th, .msg > .md td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
-.msg > .md th { background: var(--field); }
-.msg > .md a { color: var(--accent); }
-.msg > .md img { max-width: 100%; border-radius: 12px; }
-.msg > .md hr { margin: 1em 0; border: 0; border-top: 1px solid var(--line); }
-.msg > .md input[type="checkbox"] { margin-right: .4em; }
+/* 对话流 markdown 渲染的通用样式统一放在文件末尾（.md），这里只留气泡适配 */
 /* 每条消息的发送时间：气泡外侧的小字，用户消息靠右、其余靠左；完整时间看悬停提示 */
 .msg-time { display: block; margin: 6px 10px 0; color: var(--dim); font-size: 11px; line-height: 1.4; letter-spacing: .02em; font-variant-numeric: tabular-nums; user-select: none; }
 .message-entry.user .msg-time { text-align: right; }
@@ -859,7 +836,7 @@ header h1 { white-space: nowrap; }
 }
 
 /* 任务产物：一份可直接读、可编辑、可导出的 Markdown。等宽字体 + 自动换行，长行不横滚 */
-.artifact-md { margin: 0 0 12px; padding: 14px 16px; max-height: 460px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--field); color: var(--fg); font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.artifact-md { margin: 0 0 12px; padding: 14px 16px; max-height: 460px; overflow: auto; border: 1px solid var(--line); border-radius: 12px; background: var(--field); color: var(--fg); font-size: 13.5px; line-height: 1.7; overflow-wrap: anywhere; }
 .artifact-edit textarea { min-height: 320px; font: 12.5px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .artifact-edit .action-bar { margin-top: 10px; }
 
@@ -989,3 +966,38 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 }
 
 /* ---------- 派单（Hub）已下线：本地队列与看板职责重叠，相关样式一并移除 ---------- */
+/* ---------- markdown 渲染通用样式 ----------
+   放在文件末尾，覆盖前面组件级规则（如 .digest-card p 的 pre-wrap）。
+   所有展示 agent / 机器生成文本的地方共用：对话流、任务产物、验收摘要、
+   会话摘要、项目近况、助手气泡等；md-compact 是卡片/列表的紧凑变体。 */
+.md { white-space: normal; overflow-wrap: anywhere; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: .5em 0; white-space: normal; }
+.md h1, .md h2, .md h3, .md h4, .md h5, .md h6 { margin: 1em 0 .4em; line-height: 1.4; }
+.md h1 { font-size: 1.3em; }
+.md h2 { font-size: 1.2em; }
+.md h3 { font-size: 1.1em; }
+.md h4, .md h5, .md h6 { font-size: 1em; }
+.md ul, .md ol { margin: .5em 0; padding-left: 1.7em; }
+.md li { margin: .25em 0; }
+.md li > ul, .md li > ol { margin: .25em 0; }
+.md code { padding: .15em .4em; border-radius: 6px; background: var(--field); font-family: ui-monospace, Consolas, monospace; font-size: .92em; }
+.md pre { margin: .6em 0; padding: 12px 14px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); overflow: auto; line-height: 1.55; }
+.md pre code { padding: 0; background: transparent; font-size: inherit; }
+.md blockquote { margin: .6em 0; padding: .2em 1em; border-left: 3px solid var(--line); color: var(--dim); }
+.md table { display: block; max-width: 100%; margin: .6em 0; border-collapse: collapse; overflow-x: auto; font-size: .95em; }
+.md th, .md td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+.md th { background: var(--field); }
+.md a { color: var(--accent); }
+.md img { max-width: 100%; border-radius: 12px; }
+.md hr { margin: 1em 0; border: 0; border-top: 1px solid var(--line); }
+.md input[type="checkbox"] { margin-right: .4em; }
+/* 卡片 / 列表里的紧凑变体：边距减半，标题不放大 */
+.md-compact p, .md-compact ul, .md-compact ol, .md-compact pre, .md-compact table, .md-compact blockquote { margin: .3em 0; }
+.md-compact h1, .md-compact h2, .md-compact h3, .md-compact h4, .md-compact h5, .md-compact h6 { margin: .4em 0 .2em; font-size: 1em; }
+.md-compact li { margin: .15em 0; }
+/* 会话列表摘要：三行截断保持紧凑 */
+.summary .md p { margin: 0; }
+/* 分支预览：引用块里的 markdown 再缩一点 */
+.branch-preview .md-compact p { margin: .15em 0; }

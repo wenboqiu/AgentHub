@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Api, BriefEntry, Machine, Project, ProjectDir, ProjectInput } from "./lib/api";
+import Markdown from "./Markdown";
 
 // 项目管理：一个代码库的身份与背景知识 + 它在各台电脑上的目录。
 // 列表默认收起成一行（跟角色页一个样子），点「编辑」才展开那一条——项目多了不会满屏表单。
@@ -146,7 +147,7 @@ function Brief({ api, projectId }: { api: Api; projectId: number }) {
                 {entries.map(e => (
                   <li key={e.id}>
                     <span className="dim">{new Date(e.at).toLocaleDateString()}</span>
-                    <span className="brief-text">{e.text}</span>
+                    <div className="brief-text"><Markdown text={e.text} compact /></div>
                     <button className="link" disabled={busy} onClick={() => void run(() => api.deleteBrief(projectId, e.id))}>删除</button>
                   </li>
                 ))}

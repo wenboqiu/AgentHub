@@ -16,6 +16,7 @@ import CalendarView from "./CalendarView";
 import PendingGraph from "./PendingGraph";
 import BoardPanel from "./BoardPanel";
 import Icon from "./Icon";
+import Markdown from "./Markdown";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
 // proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
@@ -116,7 +117,7 @@ function Row({
       {s.title && <div className="title">{s.title}</div>}
       {s.summary && (
         <button className={`summary ${open ? "open" : ""}`} onClick={stop(() => setOpen(!open))} aria-expanded={open} title="点击展开/收起">
-          {s.summary}
+          <Markdown text={s.summary} compact />
         </button>
       )}
       <div className="row-foot">

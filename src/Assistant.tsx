@@ -9,6 +9,7 @@ import type {
 } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import ModelPicker from "./ModelPicker";
+import Markdown from "./Markdown";
 
 // 角色助手：一句话描述「要一个什么样的人」，由电脑端的 agent 出草稿，
 // 用户在草稿卡上改完再点创建。agent 只出 JSON，落库始终走 POST /roles，
@@ -298,7 +299,8 @@ export default function Assistant({
             const draft = draftOf(m.id);
             return (
               <div key={m.id} className={`assistant-msg ${m.role === "user" ? "me" : ""}`}>
-                <div className="assistant-bubble">{m.text}</div>
+                {/* 助手回复按 markdown 排版；自己的消息保持原文 */}
+                <div className="assistant-bubble">{m.role === "user" ? m.text : <Markdown text={m.text} />}</div>
                 <span className="dim assistant-time">{m.role === "user" ? "你" : AGENT_LABEL[thread?.agent ?? ""] ?? "助手"} · {clock(m.createdAt)}</span>
                 {draft && (
                   <DraftCard api={api} draft={draft} busy={busy}

@@ -7,6 +7,7 @@ import { localDateTime } from "./ScheduleFields";
 import { PrioritySelect } from "./GoalPriority";
 import Checklist from "./Checklist";
 import InlineField from "./InlineField";
+import Markdown from "./Markdown";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
@@ -236,7 +237,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
               {digest.review.messages > 0 ? `已同步 ${digest.review.messages} 条消息` : "会话还没有同步消息"}
               {digest.review.runs.length ? ` · 最近执行 ${digest.review.runs.map(r => r.status).join(" / ")}` : ""}
             </p>
-            <p>{digest.review.lastReply || "还没有助手回复内容；打开会话详情加载历史可看全文。"}</p>
+            <p>{digest.review.lastReply ? <Markdown text={digest.review.lastReply} /> : "还没有助手回复内容；打开会话详情加载历史可看全文。"}</p>
             {digest.review.sessionId && <button className="link" onClick={() => onSession(digest.review!.sessionId!)}>打开会话</button>}
           </div>
         )}
@@ -260,7 +261,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         </div>
       ) : (
         <>
-          <pre className="artifact-md">{artifact.md}</pre>
+          <div className="artifact-md"><Markdown text={artifact.md} /></div>
           <div className="action-bar">
             <button disabled={busy} onClick={() => { setArtifactDraft(artifact.md); setEditingArtifact(true); }}><Icon name="edit" />编辑</button>
             <button disabled={busy} onClick={rebuildArtifact}>按最新会话重建</button>

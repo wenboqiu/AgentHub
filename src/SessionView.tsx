@@ -492,7 +492,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       {spawnOpen && !pendingSession && (
         <div className="spawn-panel">
           <h2>{branchMessage ? "从此处分支到新聊天" : "同目录新建会话"}</h2>
-          {branchMessage ? <><p className="hint">保留到所选回复为止的上下文，之后的消息不会带入。新聊天继续使用同一项目目录。</p><blockquote className="branch-preview">{branchMessage.text.slice(0,240)}{branchMessage.text.length>240?"…":""}</blockquote></> : <p className="hint">使用当前项目目录，对话从零开始。</p>}
+          {branchMessage ? <><p className="hint">保留到所选回复为止的上下文，之后的消息不会带入。新聊天继续使用同一项目目录。</p><blockquote className="branch-preview"><Markdown text={branchMessage.text.slice(0,240)} compact />{branchMessage.text.length>240?"…":""}</blockquote></> : <p className="hint">使用当前项目目录，对话从零开始。</p>}
           <textarea aria-label="新会话的第一条消息" value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={pending==="spawn"} />
           <div className="btns">
             <button onClick={() => {setSpawnOpen(false);setBranchMessage(null);}}>
