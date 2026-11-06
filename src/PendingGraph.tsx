@@ -401,10 +401,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
         {(layout?.pos ?? []).map(({ g, size, x, y }, i) => {
           const pendingCount = g.pending.length;
           const runningCount = g.running.length;
-          // 大数字优先显示待处理数；只有运行中的项目改显示运行中数，
-          // 否则球上写 0、点开却有一个会话，看着像算错了
           const hasPending = pendingCount > 0;
-          const shown = hasPending ? pendingCount : runningCount;
           const urgent = g.pending.some((s) => isUrgent(s, approvals));
           const tone = hasPending ? (urgent ? "tone-wait" : hashTone(g.project)) : "tone-blue";
           const dur = (7 + hash01(g.project, 3) * 4).toFixed(2); // 每个球漂移节奏不同
@@ -425,11 +422,22 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
               <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
                 <span className={`pg-bubble ${tone}`} style={{ animationDelay: `${i * 60}ms` }}>
                   {runningCount > 0 && <span className="pg-run-ring" />}
-                  <span className={`pg-count${hasPending ? "" : " pg-run-count"}`}>{shown}</span>
+                  {/* 待处理 / 运行中两个数字同时显示，颜色区分：待处理用气泡暖色调，运行中统一蓝色 */}
+                  <span className="pg-nums">
+                    {hasPending && (
+                      <span className="pg-num pg-num-pending">
+                        <b>{pendingCount}</b>
+                        <i>待处理</i>
+                      </span>
+                    )}
+                    {runningCount > 0 && (
+                      <span className="pg-num pg-num-running">
+                        <b>{runningCount}</b>
+                        <i>运行中</i>
+                      </span>
+                    )}
+                  </span>
                   <span className="pg-name" title={g.project}>{g.project}</span>
-                  {runningCount > 0 && (
-                    <span className="pg-pill">{hasPending ? `${runningCount} 运行中` : "运行中"}</span>
-                  )}
                 </span>
               </span>
             </button>
@@ -441,7 +449,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
         <span><i className="pg-dot tone-wait" />有待授权</span>
         <span><i className="pg-dot tone-blue" />只有运行中</span>
         <span><i className="pg-dot pg-dot-ring" />虚环 = 有运行中</span>
-        <span>数字 = 待处理数，无待处理时显示运行中数</span>
+        <span>待处理为暖色 · 运行中为蓝色，同时显示</span>
       </p>
 
       {handledList.length > 0 && (
