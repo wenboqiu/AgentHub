@@ -514,8 +514,10 @@ export default function App() {
   return (
     <div className="app home">
       <header>
-        <h1>AgentHub</h1>
-        <span className="version" title={`版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>
+        <div className="brand">
+          <h1>AgentHub</h1>
+          <span className="version" title={`版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>
+        </div>
         <span className={`conn ${conn}`}>
           <i /> {connText}
         </span>
