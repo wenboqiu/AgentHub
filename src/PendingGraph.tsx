@@ -158,6 +158,56 @@ function scatterStage(items: ScatterInput[], wrapW: number, maxH: number) {
   return { ...res, stageH };
 }
 
+type GroupSpot = { g: Group; size: number; x: number; y: number };
+
+/**
+ * 总览散布：大球先放正中，其余沿黄金角螺旋找第一个不重叠、不出界的位置。
+ * 哈希抖动让布局看着随机，但每次进来都一样；ok=false 表示有球被挤到兜底位（可能压到邻居）。
+ */
+function scatterGroups(groups: Group[], wrapW: number, stageH: number, fit: number) {
+  const cx = wrapW / 2;
+  const cy = Math.round(stageH / 2);
+  const placed: { x: number; y: number; r: number }[] = [];
+  let ok = true;
+
+  const pos: GroupSpot[] = groups.map((g, i) => {
+    const size = bubbleSize(g.pending.length + g.running.length, fit);
+    // 带运行中胶囊的球下方要多占一截，碰撞间距相应放大，避免胶囊压到邻居
+    const pad = g.running.length > 0 ? 12 : 0;
+    const rad = size / 2 + pad;
+    let x = cx;
+    let y = cy;
+    if (i > 0) {
+      const a0 = i * GOLDEN_ANGLE + hash01(g.project) * 1.3;
+      let found: { x: number; y: number } | null = null;
+      for (let d = rad + 10; d < Math.max(wrapW, stageH) && !found; d += 7) {
+        for (let k = 0; k < 14; k++) {
+          const a = a0 + (k / 14) * Math.PI * 2 + hash01(g.project, k + 1) * 0.2;
+          const px = cx + Math.cos(a) * d;
+          const py = cy + Math.sin(a) * d * 0.8; // 纵向压扁，铺得更开
+          if (px < rad + 6 || px > wrapW - rad - 6 || py < rad + 6 || py > stageH - rad - 6) continue;
+          if (placed.every((p) => Math.hypot(p.x - px, p.y - py) >= p.r + rad + 18)) {
+            found = { x: Math.round(px), y: Math.round(py) };
+            break;
+          }
+        }
+      }
+      if (found) {
+        x = found.x;
+        y = found.y;
+      } else {
+        ok = false;
+        x = Math.round(cx + (hash01(g.project, 5) - 0.5) * Math.max(wrapW - 2 * rad - 12, 0));
+        y = Math.round(cy + (hash01(g.project, 6) - 0.5) * Math.max(stageH - 2 * rad - 12, 0));
+      }
+    }
+    placed.push({ x, y, r: rad });
+    return { g, size, x, y };
+  });
+
+  return { pos, ok };
+}
+
 type Props = {
   /** 待处理 + 运行中的会话（不含已处理） */
   sessions: Session[];
@@ -222,55 +272,22 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     };
   }, [measure, expanded]);
 
-  /** 舞台大了球也放大一点，窗口小了收一点，避免空荡或挤爆 */
+  /** 舞台大了球也放大一点（免得太空）；窗口小时只轻微收一点，别把气泡里的字挤烂 */
   const fit = useMemo(
-    () => (box.w && box.h ? clamp(Math.min(box.w / 900, box.h / 460), 0.86, 1.45) : 1),
+    () => (box.w && box.h ? clamp(Math.min(box.w / 900, box.h / 460), 0.95, 1.45) : 1),
     [box.w, box.h],
   );
 
   const layout = useMemo(() => {
     if (!box.w || groups.length === 0) return null;
-    // 贪心散布：大球先放中间，后面的球沿黄金角螺旋找第一个不重叠、不出界的位置；
-    // 哈希抖动让布局看着随机，但每次进来都一样
-    const needH = 300 + (groups.length - 1) * 46;
-    // 舞台直接吃满窗口给的高度，球多了再由散布算法往外铺，窗口一缩放区域跟着变
-    const stageH = Math.round(clamp(Math.max(needH, box.h), STAGE_MIN_H, box.h));
-    const cx = box.w / 2;
-    const cy = Math.round(stageH / 2);
-    const placed: { x: number; y: number; r: number }[] = [];
-    const pos = groups.map((g, i) => {
-      const size = bubbleSize(g.pending.length + g.running.length, fit);
-      // 带运行中胶囊的球下方要多占一截，碰撞间距相应放大，避免胶囊压到邻居
-      const pad = g.running.length > 0 ? 12 : 0;
-      const rad = size / 2 + pad;
-      let x = cx;
-      let y = cy;
-      if (i > 0) {
-        const a0 = i * GOLDEN_ANGLE + hash01(g.project) * 1.3;
-        let found: { x: number; y: number } | null = null;
-        for (let d = rad + 10; d < Math.max(box.w, stageH) && !found; d += 7) {
-          for (let k = 0; k < 14; k++) {
-            const a = a0 + (k / 14) * Math.PI * 2 + hash01(g.project, k + 1) * 0.2;
-            const px = cx + Math.cos(a) * d;
-            const py = cy + Math.sin(a) * d * 0.8; // 纵向压扁，铺得更开
-            if (px < rad + 6 || px > box.w - rad - 6 || py < rad + 6 || py > stageH - rad - 6) continue;
-            if (placed.every((p) => Math.hypot(p.x - px, p.y - py) >= p.r + rad + 18)) {
-              found = { x: Math.round(px), y: Math.round(py) };
-              break;
-            }
-          }
-        }
-        const spot = found ?? {
-          x: Math.round(cx + (hash01(g.project, 5) - 0.5) * Math.max(box.w - 2 * rad - 12, 0)),
-          y: Math.round(cy + (hash01(g.project, 6) - 0.5) * Math.max(stageH - 2 * rad - 12, 0)),
-        };
-        x = spot.x;
-        y = spot.y;
-      }
-      placed.push({ x, y, r: rad });
-      return { g, size, x, y };
-    });
-    return { pos, stageH };
+    // 舞台先按窗口给的高度铺满；真挤不下才往下长（最多到上限），别为了几个球硬撑一屏
+    let stageH = Math.round(clamp(box.h, STAGE_MIN_H, STAGE_MAX_H));
+    let res = scatterGroups(groups, box.w, stageH, fit);
+    for (let k = 0; k < 4 && !res.ok && stageH < STAGE_MAX_H; k++) {
+      stageH = Math.min(STAGE_MAX_H, Math.round(stageH * 1.15));
+      res = scatterGroups(groups, box.w, stageH, fit);
+    }
+    return { pos: res.pos, stageH };
   }, [groups, box.w, box.h, fit]);
 
   const current = expanded ? groups.find((g) => g.project === expanded) : undefined;
