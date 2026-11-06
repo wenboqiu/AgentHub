@@ -42,6 +42,16 @@ function bubbleSize(count: number, fit = 1): number {
   return Math.round(Math.min(136, 74 + Math.sqrt(Math.max(count, 1)) * 22) * fit);
 }
 
+/**
+ * 会话气泡：文字越多球越大。标题短（≤10 字）不涨，之后随字数线性长到 base 的 1.75 倍，
+ * 免得长标题被压成两行截断、只剩前半句。
+ */
+function sessionSize(text: string, base: number, fit = 1): number {
+  const len = text.trim().length;
+  const grow = clamp((len - 10) / 30, 0, 0.75);
+  return Math.round(base * (1 + grow) * fit);
+}
+
 const GOLDEN_ANGLE = 2.39996; // 黄金角：散布均匀又不显网格感
 
 type Group = { project: string; pending: Session[]; running: Session[] };
@@ -107,12 +117,14 @@ function placeAll(items: ScatterInput[], wrapW: number, stageH: number) {
 
   items.forEach((it, i) => {
     const rad = it.size / 2 + 6; // +6 给呼吸光环、运行弧留余量
+    // 球越大留的呼吸间距越大，大球挨在一起才不至于看着糊成一团
+    const gap = clamp(Math.round(rad * 0.24), 12, 34);
     let x = cx;
     let y = cy;
     if (i > 0) {
       const a0 = i * GOLDEN_ANGLE + hash01(it.key) * Math.PI * 2;
       let found: { x: number; y: number } | null = null;
-      for (let d = rad + 12; d < maxD + rad * 2 && !found; d += 8) {
+      for (let d = rad + gap; d < maxD + rad * 2 && !found; d += 8) {
         // 沿圆周按约 42px 间距采样，保证不会有漏掉的空档
         const steps = Math.min(90, Math.max(14, Math.round((Math.PI * 2 * d) / 42)));
         for (let k = 0; k < steps; k++) {
@@ -120,7 +132,7 @@ function placeAll(items: ScatterInput[], wrapW: number, stageH: number) {
           const px = cx + Math.cos(a) * d;
           const py = cy + Math.sin(a) * d;
           if (px < rad + 6 || px > wrapW - rad - 6 || py < rad + 6 || py > stageH - rad - 6) continue;
-          if (placed.every((p) => Math.hypot(p.x - px, p.y - py) >= p.r + rad + 14)) {
+          if (placed.every((p) => Math.hypot(p.x - px, p.y - py) >= p.r + rad + gap)) {
             found = { x: px, y: py };
             break;
           }
@@ -145,14 +157,16 @@ function placeAll(items: ScatterInput[], wrapW: number, stageH: number) {
 /** 按面积估一个够用的舞台高度，装不下就逐步加高重排，直到没有一颗被挤到兜底位 */
 function scatterStage(items: ScatterInput[], wrapW: number, maxH: number) {
   const w = Math.max(wrapW, 260);
-  const need = items.reduce((sum, it) => sum + Math.PI * (it.size / 2 + 14) ** 2, 0);
-  // 先按内容估高，再至少铺到窗口能给的高度的 3/4；窗口越大铺得越开，
-  // 但内容确实装不下时允许超出可视高度（页面滚动），别把球硬塞成一团
+  const need = items.reduce((sum, it) => sum + Math.PI * (it.size / 2 + 16) ** 2, 0);
+  // 展开态要铺得比总览更开：会话多时至少比总览高 15%，内容更多就继续往下长
+  // （页面滚动），最高放到可用高度的 1.35 倍、且不超过 1600
+  const cap = Math.round(clamp(maxH * 1.35, 360, 1600));
+  const fill = clamp(1 + (items.length - 4) * 0.05, 1, 1.15);
   const est = (need * 2.1) / Math.max(w - 44, 240) + 40;
-  let stageH = Math.round(clamp(Math.max(est, maxH * 0.75), 300, Math.max(maxH, 300)));
+  let stageH = Math.round(clamp(Math.max(est, maxH * fill), 360, cap));
   let res = placeAll(items, w, stageH);
-  for (let k = 0; k < 6 && !res.ok && stageH < 1400; k++) {
-    stageH = Math.min(1400, Math.round(stageH * 1.15));
+  for (let k = 0; k < 8 && !res.ok && stageH < 1600; k++) {
+    stageH = Math.min(1600, Math.round(stageH * 1.12));
     res = placeAll(items, w, stageH);
   }
   return { ...res, stageH };
@@ -297,14 +311,19 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     const runIds = new Set(running.map((s) => s.id));
     const total = pending.length + running.length;
     // 会话多了就缩一点，保证同屏能铺开；再乘上舞台整体的缩放系数
-    const size = Math.round((total > 26 ? 70 : total > 14 ? 78 : 88) * fit);
+    const base = Math.round((total > 26 ? 70 : total > 14 ? 78 : 88) * fit);
 
     // 要你动手的排最中间（越靠中心越先被放到舞台中央），运行中的甩到外圈
     const rank = (s: Session) =>
       isUrgent(s, approvals) ? 0 : s.state === "aborted" ? 1 : runIds.has(s.id) ? 3 : 2;
     const entries = [...pending, ...running]
       .sort((a, b) => rank(a) - rank(b))
-      .map((s) => ({ s, run: runIds.has(s.id), size: runIds.has(s.id) ? size - 8 : size }));
+      .map((s) => {
+        const run = runIds.has(s.id);
+        // 文字多的球画大一些，长标题才装得下（运行中的球仍比同文案的小一圈）
+        const size = sessionSize(s.title || s.summary || "", base) - (run ? 8 : 0);
+        return { s, run, size };
+      });
 
     const { spots, stageH } = scatterStage(
       entries.map((e) => ({ key: e.s.id, size: e.size })),
@@ -331,6 +350,9 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
             const tip = `${AGENT_LABEL[e.s.agent]} · ${label}\n${e.s.title || e.s.summary || e.s.id}`;
             const dur = (7 + hash01(e.s.id, 3) * 4).toFixed(2); // 每颗漂移节奏不同
             const delay = (-hash01(e.s.id, 4) * 10).toFixed(2);
+            // 球画大了字也跟着放大一点，不然大球里一行小字反而更空；长标题多给几行
+            const fs = clamp(e.size / 88, 1, 1.25);
+            const titleLines = e.size >= 165 ? 4 : e.size >= 130 ? 3 : 2;
             return (
               <button
                 key={e.s.id}
@@ -351,9 +373,11 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
                 <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
                   <span className={`pg-bubble pg-session ${tone}${e.run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 50}ms` }}>
                     {e.run && <span className="pg-run-arc" />}
-                    <span className="pg-state">{label}</span>
-                    <span className="pg-title">{e.s.title || e.s.summary || "未命名会话"}</span>
-                    <span className="pg-agent">{AGENT_LABEL[e.s.agent]}</span>
+                    <span className="pg-state" style={{ fontSize: 10.5 * fs }}>{label}</span>
+                    <span className="pg-title" style={{ fontSize: 11 * fs, WebkitLineClamp: titleLines }}>
+                      {e.s.title || e.s.summary || "未命名会话"}
+                    </span>
+                    <span className="pg-agent" style={{ fontSize: 9.5 * fs }}>{AGENT_LABEL[e.s.agent]}</span>
                   </span>
                 </span>
               </button>
