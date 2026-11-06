@@ -535,18 +535,34 @@ export default function App() {
         <div hidden={tab!=="hub"}>{isDesktop && <HubPanel onNotice={say}/>}</div>
         <div hidden={tab!=="sessions"}>
         <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
-        <section>
-          <h2>待处理 {pending.length > 0 && <span className="count">{pending.length}</span>}</h2>
-          {pending.length ? (cfg.graphMode ? <PendingGraph sessions={pending} approvals={approvalSessions} onOpen={openSession} /> : renderList(pending)) : <p className="empty">没有待处理的会话</p>}
-        </section>
-        <section>
-          <h2>运行中 {running.length > 0 && <span className="count dim">{running.length}</span>}</h2>
-          {running.length ? renderList(running) : <p className="empty">没有运行中的会话</p>}
-        </section>
-        <details>
-          <summary>其它（{others.length}）</summary>
-          {others.length ? renderList(others) : <p className="empty">空</p>}
-        </details>
+        {cfg.graphMode ? (
+          <section>
+            <h2>
+              待处理 {pending.length > 0 && <span className="count">{pending.length}</span>}
+              {running.length > 0 && <span className="count dim">{running.length} 运行中</span>}
+            </h2>
+            {pending.length + running.length > 0 ? (
+              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} onOpen={openSession} />
+            ) : (
+              <p className="empty">没有待处理或运行中的会话</p>
+            )}
+          </section>
+        ) : (
+          <>
+            <section>
+              <h2>待处理 {pending.length > 0 && <span className="count">{pending.length}</span>}</h2>
+              {pending.length ? renderList(pending) : <p className="empty">没有待处理的会话</p>}
+            </section>
+            <section>
+              <h2>运行中 {running.length > 0 && <span className="count dim">{running.length}</span>}</h2>
+              {running.length ? renderList(running) : <p className="empty">没有运行中的会话</p>}
+            </section>
+            <details>
+              <summary>其它（{others.length}）</summary>
+              {others.length ? renderList(others) : <p className="empty">空</p>}
+            </details>
+          </>
+        )}
         </div>
       </main>
     </div>

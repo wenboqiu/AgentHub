@@ -849,6 +849,31 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 .pg-dot.tone-done { background: var(--ok); }
 .pg-dot.tone-abort { background: var(--priority-high); }
 .pg-dot.tone-blue { background: var(--accent); }
+.pg-dot.pg-dot-ring { background: transparent; border: 1px dashed var(--accent); }
+
+/* 运行中：项目球外的旋转虚环 + 计数胶囊 */
+.pg-run-ring { position: absolute; inset: -9px; border-radius: 50%; border: 1px dashed color-mix(in srgb, var(--accent) 65%, transparent); animation: pg-spin 26s linear infinite; pointer-events: none; }
+.pg-pill { position: absolute; left: 50%; top: 100%; transform: translate(-50%, 6px); padding: 2px 9px; border-radius: 999px; font-size: 11px; line-height: 1.5; white-space: nowrap; background: var(--accent-soft); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
+.pg-count.pg-zero { color: var(--dim); }
+
+/* 运行中会话气泡：旋转弧表示在跑 */
+.pg-bubble.pg-run .pg-run-arc { position: absolute; inset: -4px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 45%, transparent); animation: pg-spin 2.6s linear infinite; pointer-events: none; }
+
+/* 已处理：底部淡色小球带，点开才看历史 */
+.pg-handled { margin: 20px 0 6px; padding-top: 16px; border-top: 1px solid var(--line); }
+.pg-handled-row { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; }
+.pg-handled-label { font-size: 12px; color: var(--dim); line-height: 44px; }
+.pg-mini { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 62px; padding: 0; min-height: 0; border: 0; background: none; }
+.pg-mini-b { display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; border: 1px dashed var(--line); background: var(--field); color: var(--dim); font-size: 14px; font-weight: 600; transition: border-color .16s, background .16s, color .16s; }
+.pg-mini.on .pg-mini-b, .pg-mini:hover .pg-mini-b { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.pg-mini-name { max-width: 62px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dim); }
+.pg-handled-list { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 2px; }
+.pg-handled-list button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 6px 10px; text-align: left; border: 0; border-radius: 10px; background: transparent; color: var(--dim); }
+.pg-handled-list button:hover { background: var(--field); }
+.pg-hl-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--fg); }
+.pg-hl-state { flex-shrink: 0; font-size: 12px; }
+
+@keyframes pg-spin { to { transform: rotate(360deg); } }
 
 @keyframes pg-pop { from { transform: scale(.3); opacity: 0; } }
 @keyframes pg-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
