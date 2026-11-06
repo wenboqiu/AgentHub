@@ -249,8 +249,21 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .sidebar-sec-count.alert { background: var(--alert-bg); color: var(--alert); }
 .sidebar-sec-hint { margin-left: auto; font-size: 10.5px; font-weight: 500; opacity: .7; }
 .sidebar-sec .sidebar-list { padding-left: 4px; }
-/* 窄窗口（或手机）放不下侧栏：直接隐藏，保持原来的全屏详情 */
-@media (max-width: 760px) { .sidebar { display: none; } }
+/* 窄屏（手机 / Android / 窄窗口）：侧栏改为从左侧滑出的抽屉，点对话页头部的「会话列表」打开 */
+.sidebar-drawer {
+  position: fixed; top: 0; left: 0; z-index: 12;
+  width: min(84vw, 320px); height: 100vh; height: 100dvh;
+  padding-top: calc(env(safe-area-inset-top) + 12px);
+  box-shadow: 0 0 44px rgba(9, 9, 14, .34);
+  animation: sidebar-in .2s cubic-bezier(.32,.72,0,1);
+}
+@keyframes sidebar-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+.sidebar-scrim { position: fixed; inset: 0; z-index: 11; min-height: 0; padding: 0; border: 0; border-radius: 0; background: rgba(9, 9, 14, .42); animation: fade-in .2s ease; cursor: default; }
+.sidebar-scrim:not(:disabled):hover { background: rgba(9, 9, 14, .42); border-color: transparent; }
+/* 抽屉里条目更高一点，指头点得到 */
+.sidebar-drawer .sidebar-item { padding: 12px; }
+.sidebar-open { position: relative; flex-shrink: 0; }
+.sidebar-open-dot { position: absolute; top: 7px; right: 7px; width: 7px; height: 7px; border-radius: 50%; background: var(--alert); box-shadow: 0 0 0 2px var(--glass); }
 .msgs { list-style: none; margin: 24px 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
 .message-entry { min-width:0; max-width:min(85%,960px); }
 .message-entry.user { align-self:flex-end; }

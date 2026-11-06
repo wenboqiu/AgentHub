@@ -8,6 +8,7 @@ import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import SessionSidebar from "./SessionSidebar";
+import { useMediaQuery } from "./lib/useMediaQuery";
 import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
 import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
@@ -110,13 +111,27 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [preview, setPreview] = useState<string | null>(null);
   /** 待发送的附图（data URL），最多 MAX_IMAGES 张 */
   const [images, setImages] = useState<string[]>([]);
-  /** 左侧会话列表是否收起（只影响桌面端，记住上次的展开状态） */
+  /** 左侧会话列表是否收起（记住上次的展开状态，宽屏常驻时生效） */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("agenthub.sidebar") === "0"; } catch { return false; }
   });
   useEffect(() => {
     try { localStorage.setItem("agenthub.sidebar", sidebarCollapsed ? "0" : "1"); } catch {}
   }, [sidebarCollapsed]);
+  /** 窄屏（手机）：侧栏改成从左侧滑出的抽屉，默认收起 */
+  const narrow = useMediaQuery("(max-width: 760px)");
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  // 切到别的会话后抽屉自动收起，把正文让出来
+  useEffect(() => { setDrawerOpen(false); }, [sessionId]);
+  // 按宽度决定形态，不看平台：电脑和安卓平板（宽屏 / 横屏）都常驻左侧列表，
+  // 手机宽度放不下才收成抽屉——之前只在桌面端渲染，平板上就完全看不到列表。
+  const docked = !narrow;
+  const sidebarVisible = docked ? !sidebarCollapsed : drawerOpen;
+  const attentionCount = attention.size;
+  const selectSession = (next: string) => {
+    setDrawerOpen(false);
+    onSwitch(next);
+  };
   const fileRef = useRef<HTMLInputElement | null>(null);
   /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
   const stick = useRef(true);
@@ -399,21 +414,37 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     });
 
   return (
-    <div className={`session-shell${isDesktop && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-      {isDesktop && (
+    <div className={`session-shell${docked && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      {sidebarVisible && (
         <SessionSidebar
           sessions={sessions}
           currentId={id || sessionId}
           attention={attention}
           now={nowTick}
-          onSelect={onSwitch}
-          onCollapse={() => setSidebarCollapsed(true)}
+          onSelect={selectSession}
+          drawer={!docked}
+          onCollapse={() => (docked ? setSidebarCollapsed(true) : setDrawerOpen(false))}
         />
+      )}
+      {!docked && drawerOpen && (
+        <button className="sidebar-scrim" aria-label="关闭会话列表" tabIndex={-1} onClick={() => setDrawerOpen(false)} />
       )}
       <div className="app session-view">
       <header>
         <button className="back-button" onClick={onBack}><Icon name="back"/>返回</button>
-        {isDesktop && sidebarCollapsed && (
+        {!docked && (
+          <button
+            className="icon-button sidebar-open"
+            aria-label="会话列表"
+            title="会话列表"
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen((o) => !o)}
+          >
+            <Icon name="sessions" />
+            {attentionCount > 0 && <span className="sidebar-open-dot" aria-hidden="true" />}
+          </button>
+        )}
+        {docked && sidebarCollapsed && (
           <button className="icon-button sidebar-toggle" aria-label="展开会话列表" title="展开会话列表" onClick={() => setSidebarCollapsed(false)}>
             <Icon name="chevron" />
           </button>

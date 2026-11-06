@@ -15,6 +15,8 @@ type Props = {
   now: number;
   onSelect(id: string): void;
   onCollapse(): void;
+  /** 窄屏抽屉形态：盖在正文上、带遮罩，收起按钮变成「关闭」 */
+  drawer?: boolean;
 };
 
 const STATE_DOT: Record<string, string> = {
@@ -31,9 +33,9 @@ const FOLD_KEY = "agenthub.sidebarSections";
 /**
  * 会话详情页左侧的会话列表（参考 WorkBuddy）：不用回列表页就能快速切到别的会话。
  * 分成「待处理 / 进行中 / 已处理」三段，各自可折叠，待处理与进行中默认展开、已处理默认收起。
- * 只在桌面端渲染；手机上空间有限，维持原来的全屏详情。
+ * 宽屏（桌面）常驻左侧；窄屏（手机 / Android）由对话页头部的「会话列表」按钮打开成抽屉。
  */
-export default function SessionSidebar({ sessions, currentId, attention, now, onSelect, onCollapse }: Props) {
+export default function SessionSidebar({ sessions, currentId, attention, now, onSelect, onCollapse, drawer = false }: Props) {
   const sections = useMemo<Section[]>(() => {
     const pending: Session[] = [];
     const running: Session[] = [];
@@ -76,10 +78,10 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
   }, [currentId, sections]);
 
   return (
-    <nav className="sidebar" aria-label="会话列表">
+    <nav className={`sidebar${drawer ? " sidebar-drawer" : ""}`} aria-label="会话列表" aria-modal={drawer || undefined} role={drawer ? "dialog" : undefined}>
       <div className="sidebar-head">
         <span>会话 <span className="count dim">{sessions.length}</span></span>
-        <button className="icon-button sidebar-toggle" aria-label="收起会话列表" title="收起会话列表" onClick={onCollapse}>
+        <button className="icon-button sidebar-toggle" aria-label={drawer ? "关闭会话列表" : "收起会话列表"} title={drawer ? "关闭会话列表" : "收起会话列表"} onClick={onCollapse}>
           <Icon name="chevron" />
         </button>
       </div>
