@@ -374,6 +374,15 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     chain = p.catch(() => {})
     return p
   }
+  // 收尾活儿（同步正文、攒任务单）不挡事件上报的响应，但也不能各跑各的：
+  // 一次事件上报可能连着好几轮完成，几十个查询同时压上去会把连接池抽干，
+  // 后面的接口全在排队。单独一条队列，一次只跑一件。
+  let tailChain: Promise<unknown> = Promise.resolve()
+  const inBackground = <T>(fn: () => Promise<T>): Promise<T> => {
+    const p = tailChain.then(fn, fn)
+    tailChain = p.catch(() => {})
+    return p
+  }
 
   const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
   // 选了角色：补齐空着的执行工具。执行目录不在这里补——那是派发时按项目目录按机器挑的事
@@ -599,6 +608,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
 
   /** 向电脑端要一份原生日志（history.request 往返）。null = 电脑端没及时回 */
   async function requestNativeHistory(userId: number, session: Session): Promise<HistoryResult | null> {
+    if (!executors.has(execKey(userId, session.machine))) return { messages: [], error: '电脑端不在线' }
     const requestId = randomUUID()
     const waiting = new Promise<HistoryResult | null>(resolve => {
       const timer = setTimeout(() => {
@@ -697,20 +707,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
           await syncTask(req.userId,r.session.id,r.session.state)
           // 会话跑完：攒一条处理意见等人确认。补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，
           // 否则「问角色」也会产出一条待办，细化还会无限套娃。
-          // 只读监听类（WorkBuddy）的正文只在电脑上：必须先把这一轮的回复同步进库，再按最新回复攒任务单，
-          // 否则界面上就是「任务单先冒出来、最新回复还停在上一轮」。同步要等电脑端回话（最多 10s），
-          // 放到后台跑，别把这次事件上报的响应拖住。
+          // WorkBuddy 的正文只在电脑上：先把这一轮的回复同步进库，再按最新回复攒任务单。
+          // 顺序反了就是「任务单先冒出来、最新回复还停在上一轮」，标题也会从旧回复里摘。
           if (r.session.state === 'done' && !ev.quiet &&
               !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
             const done = r.session
-            void (async () => {
-              if (done.agent === 'workbuddy' && executors.has(execKey(req.userId, done.machine))) {
+            if (done.agent === 'workbuddy') {
+              // 同步要等电脑端回话（最多 10s），放后台跑，别把这次事件上报的响应拖住
+              void inBackground(async () => {
                 await syncNativeHistory(req.userId, done).catch(e => app.log.error(e, '同步会话正文失败'))
-              }
+                const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
+                  .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
+                if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+              })
+            } else {
               const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
                 .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
               if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
-            })()
+            }
           }
           // Watchdog：反复失败达到阈值时提醒一次（running 清零计数）
           if ((ev.state === 'aborted' || ev.state === 'running') && !ev.quiet &&
