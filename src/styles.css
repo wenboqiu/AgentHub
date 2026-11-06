@@ -765,3 +765,55 @@ header h1 { white-space: nowrap; }
 .delivery-opt.on { border-color: var(--accent); color: var(--accent); background: var(--card); font-weight: 600; }
 .delivery-opt:disabled { opacity: .45; cursor: not-allowed; }
 .delivery-note { margin: 0; font-size: 12px; }
+
+/* ===== 待处理会话 · 图模式（气泡视图） ===== */
+.pg-wrap { margin: 0 4px; }
+.pg-toolbar { display: flex; padding: 0 4px; }
+.pg-overview { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 26px; padding: 30px 8px 18px; }
+.pg-stage { position: relative; height: 440px; margin: 6px 0 2px; }
+
+.pg-slot { position: relative; display: block; padding: 0; min-width: 0; min-height: 0; border: 0; background: none; border-radius: 50%; }
+button.pg-slot { cursor: pointer; }
+.pg-slot.pg-orbit { position: absolute; left: 50%; top: 50%; }
+.pg-slot.pg-center-slot { position: absolute; left: 50%; top: 50%; pointer-events: none; }
+.pg-floater { display: block; width: 100%; height: 100%; border-radius: 50%; animation: pg-float 5.2s ease-in-out infinite; }
+
+.pg-bubble { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 100%; height: 100%; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--tone) 45%, transparent); background: radial-gradient(circle at 32% 26%, color-mix(in srgb, var(--tone) 30%, var(--card)), color-mix(in srgb, var(--tone) 11%, var(--card)) 72%); color: var(--fg); box-shadow: var(--shadow); animation: pg-pop .5s cubic-bezier(.34,1.56,.64,1) backwards; transition: transform .18s ease, box-shadow .18s ease; }
+button.pg-slot:hover .pg-bubble { transform: scale(1.06); box-shadow: 0 12px 34px rgba(25,35,55,.14), 0 2px 6px rgba(25,35,55,.08); }
+button.pg-slot:active .pg-bubble { transform: scale(.97); }
+
+/* 色调：取自主题变量，深浅色自动适配 */
+.pg-bubble.tone-blue { --tone: var(--accent); }
+.pg-bubble.tone-teal { --tone: var(--codex); }
+.pg-bubble.tone-plum { --tone: var(--goal); }
+.pg-bubble.tone-amber { --tone: var(--priority-medium); }
+.pg-bubble.tone-wait { --tone: var(--alert); }
+.pg-bubble.tone-done { --tone: var(--ok); }
+.pg-bubble.tone-abort { --tone: var(--priority-high); }
+
+/* 有待授权的气泡带呼吸光环 */
+.pg-bubble.tone-wait::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--alert) 55%, transparent); animation: pg-halo 1.9s ease-out infinite; }
+
+.pg-count { font-size: 26px; font-weight: 650; line-height: 1; color: color-mix(in srgb, var(--tone) 72%, var(--fg)); }
+.pg-bubble.pg-center .pg-count { font-size: 32px; }
+.pg-name { max-width: 86%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--dim); }
+.pg-bubble.pg-center .pg-name { font-size: 13px; font-weight: 550; color: var(--fg); }
+.pg-session .pg-state { font-size: 12.5px; font-weight: 600; color: color-mix(in srgb, var(--tone) 78%, var(--fg)); }
+.pg-session .pg-agent { font-size: 11px; color: var(--dim); }
+
+.pg-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 18px; margin: 10px 0 0; font-size: 12px; color: var(--dim); }
+.pg-legend .pg-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+.pg-dot.tone-wait { background: var(--alert); }
+.pg-dot.tone-done { background: var(--ok); }
+.pg-dot.tone-abort { background: var(--priority-high); }
+.pg-dot.tone-blue { background: var(--accent); }
+
+@keyframes pg-pop { from { transform: scale(.3); opacity: 0; } }
+@keyframes pg-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+@keyframes pg-halo { 0% { transform: scale(.92); opacity: .9; } 70%, 100% { transform: scale(1.24); opacity: 0; } }
+
+/* 窄屏收拢环绕半径，避免会话气泡横向溢出 */
+@media (max-width: 560px) {
+  .pg-stage { height: 400px; }
+  .pg-stage .pg-orbit { scale: .88; }
+}

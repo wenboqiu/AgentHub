@@ -118,6 +118,20 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
   const set = <K extends keyof Config>(k: K, v: Config[K]) => setForm((f) => ({ ...f, [k]: v }));
 
+  // 外观类偏好即时保存，不走下方表单的「保存」按钮
+  const toggleGraphMode = async (on: boolean) => {
+    setForm((f) => ({ ...f, graphMode: on }));
+    const c: Config = { ...cfg, graphMode: on };
+    try {
+      await saveConfig(c);
+      onSaved(c, { keepOpen: true });
+      setMsg(on ? "图模式已开启" : "已恢复卡片列表");
+      window.setTimeout(() => setMsg(""), 2000);
+    } catch (e) {
+      setMsg(`保存失败：${String(e)}`);
+    }
+  };
+
   useEffect(() => {
     if (isDesktop) {
       desktop.hooksStatus().then(setHooks).catch((e) => setMsg(String(e)));
@@ -417,6 +431,16 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                 </ul>
               </>
             )}
+
+            <h2>外观</h2>
+            <section className="box">
+              <label className="check">
+                <input type="checkbox" checked={cfg.graphMode} onChange={(e) => toggleGraphMode(e.target.checked)} />
+                待处理会话用图模式展示（每个项目一个气泡，点击展开会话）
+              </label>
+              <p className="hint">开启后「待处理」区域按项目聚合为气泡图；关闭时使用卡片列表。改动立即生效。</p>
+              {msg && <p className="msg">{msg}</p>}
+            </section>
           </>
         )}
 

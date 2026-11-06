@@ -11,6 +11,8 @@ export type Config = {
   deniedRoots: string[];
   /** 仅桌面：允许手机远程执行 */
   remoteEnabled: boolean;
+  /** 待处理会话用图模式展示（项目气泡 + 会话气泡） */
+  graphMode: boolean;
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
 
@@ -46,7 +48,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: false };
 
 export async function loadConfig(): Promise<Config> {
   if (isDesktop) return invoke<Config>("get_config");

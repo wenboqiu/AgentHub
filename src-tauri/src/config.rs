@@ -19,6 +19,8 @@ pub struct Config {
     pub denied_roots: Vec<String>,
     /// 总开关：关闭时不连服务端的执行器通道
     pub remote_enabled: bool,
+    /// 待处理会话用图模式展示（项目气泡 + 会话气泡）
+    pub graph_mode: bool,
 }
 
 impl Default for Config {
@@ -31,6 +33,7 @@ impl Default for Config {
             email: String::new(),
             denied_roots: Vec::new(),
             remote_enabled: false,
+            graph_mode: false,
         }
     }
 }
@@ -111,6 +114,7 @@ mod tests {
             email: "a@b.c".into(),
             denied_roots: vec!["D:/Tmp".into()],
             remote_enabled: true,
+            graph_mode: true,
         };
         save(&p, &c).unwrap();
         assert_eq!(load(&p), c);
@@ -120,6 +124,7 @@ mod tests {
         assert_eq!(d.server_url, "http://y");
         assert!(d.notify_desktop);
         assert!(!d.remote_enabled);
+        assert!(!d.graph_mode);
         assert!(d.denied_roots.is_empty() && d.email.is_empty());
         // 旧配置的 allowedRoots（白名单）不会被当成黑名单读进来，避免升级后把工作目录封死
         std::fs::write(&p, r#"{"serverUrl":"http://w","allowedRoots":["D:/Work2"]}"#).unwrap();
