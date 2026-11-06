@@ -187,6 +187,27 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.equal(ok.body.project.dirs.length, 2)
   })
 
+  it('可选电脑清单：在线的排前面，用过的离线机器也列出来', async () => {
+    const pc = `mach-on-${stamp}`
+    await h.executor(pc)
+    // 离线机器：只在项目配置里手填过，从没连上来过
+    const offName = `mach-off-${stamp}`
+    await h.project({ name: uniq('清单项目'), dirs: [{ machine: offName, cwd: 'D:\\Off' }] })
+
+    const ms = (await h.call('GET', '/machines')).body.machines as { name: string; online: boolean; at: string | null }[]
+    const on = ms.find(m => m.name === pc)
+    assert.ok(on, '在线机器在清单里')
+    assert.equal(on.online, true)
+    const off = ms.find(m => m.name === offName)
+    assert.ok(off, '配置里手填的离线机器也在')
+    assert.equal(off.online, false)
+    assert.ok(ms.findIndex(m => m.name === pc) < ms.findIndex(m => m.name === offName), '在线的排前面')
+
+    // 别人看不见我的机器
+    const other = await makeUser(h.pool)
+    assert.equal((await h.call('GET', '/machines', undefined, other.token)).body.machines.some((m: any) => m.name === pc), false)
+  })
+
   it('不能引用别人的项目', async () => {
     const mine = await h.project({ name: uniq('我的项目') })
     const other = await makeUser(h.pool)

@@ -177,6 +177,52 @@ export async function pickProjectDir(
     ?? list[0]
 }
 
+// ---------- 可选电脑（项目配置里的下拉项） ----------
+
+/** 一台候选电脑：online = 此刻有执行器连着；at = 最近一次在这台上干活的时间 */
+export type Machine = { name: string; online: boolean; at: string | null }
+
+/**
+ * 一个账号下见过的电脑，给项目配置的下拉框用：
+ * ① 正在连着的执行器（一定要有，那是现在真能用上的）；
+ * ② 会话 / 运行记录里出现过的机器名（离线也留着——给另一台电脑配目录是常事）；
+ * ③ 项目配置里手填过的机器名（可能是还没装过 AgentHub 的新机器）。
+ * 排序按「在线优先，其次最近用过」，人一眼能挑到常用的那台。
+ */
+export async function listMachines(db: DB, user: number, online: string[]): Promise<Machine[]> {
+  const [sessions, runs, projectDirs] = await Promise.all([
+    db.query(`SELECT machine, max(updated_at) AS at FROM sessions
+               WHERE user_id=$1 AND machine <> '' GROUP BY machine`, [user]),
+    db.query(`SELECT machine, max(updated_at) AS at FROM runs
+               WHERE user_id=$1 AND machine <> '' GROUP BY machine`, [user]),
+    db.query(`SELECT dirs FROM projects WHERE user_id=$1 AND dirs <> '[]'::jsonb`, [user]),
+  ])
+  const seen = new Map<string, Machine>()
+  const touch = (name: string, at: Date | null) => {
+    if (!name) return
+    const iso = at ? at.toISOString() : null
+    const cur = seen.get(name)
+    // 同一台可能在会话和运行里都有记录：留更近的那个时间
+    if (!cur || (iso && (!cur.at || iso > cur.at))) seen.set(name, { name, online: cur?.online ?? false, at: iso })
+  }
+  for (const r of sessions.rows as { machine: string; at: Date | null }[]) touch(r.machine, r.at)
+  for (const r of runs.rows as { machine: string; at: Date | null }[]) touch(r.machine, r.at)
+  for (const r of projectDirs.rows as { dirs: unknown }[]) {
+    if (!Array.isArray(r.dirs)) continue
+    for (const d of r.dirs) {
+      if (!d || typeof d !== 'object') continue
+      const m = (d as Record<string, unknown>).machine
+      if (typeof m === 'string' && m) touch(m, null)
+    }
+  }
+  for (const name of online) touch(name, null)
+  for (const m of seen.values()) m.online = online.includes(m.name)
+  return [...seen.values()].sort((a, b) =>
+    Number(b.online) - Number(a.online)
+    || (b.at ?? '').localeCompare(a.at ?? '')
+    || a.name.localeCompare(b.name))
+}
+
 // ---------- 项目近况（滚动简报） ----------
 
 export type BriefEntry = { id: number; text: string; taskId: number | null; at: string }

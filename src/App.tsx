@@ -317,6 +317,9 @@ export default function App() {
       onArtifact: (taskId,artifact)=>setArtifacts(m=>new Map(m).set(taskId,artifact)),
       onTaskRemoved: id=>setTasks(m=>{const n=new Map(m);n.delete(id);return n;}),
       onProposal: p=>setProposals(m=>new Map(m).set(p.id,p)),
+      // 服务端刚把正文重新同步进库（WorkBuddy 跑完一轮先同步正文再攒任务单）：打开着的会话立刻重读一次，
+      // 否则页面上会先看到任务单，正文还停在上一轮
+      onSessionHistory: (sessionId) => { if (openIdRef.current === sessionId) bus.emit({ kind: "resync" }); },
     });
   }, [api, bus, expire]);
 

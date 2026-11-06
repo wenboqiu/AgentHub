@@ -44,6 +44,8 @@ export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updat
 
 /** 一条目录 = 这个项目在某台电脑上住在哪；machine 为空表示哪台电脑都适用 */
 export type ProjectDir = { machine: string | null; cwd: string };
+/** 项目配置里的候选电脑：online = 此刻连着；at = 最近一次在这台上干活的时间 */
+export type Machine = { name: string; online: boolean; at: string | null };
 /** 项目：一个代码库的身份与背景知识 + 它在各台电脑上的目录，派活时按当前机器自动挑 */
 export type Project = { id: number; name: string; brief: string; dirs: ProjectDir[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
@@ -356,6 +358,8 @@ export class Api {
     (await this.call<{ memory: Memory }>("PATCH", `/roles/${roleId}/memories/${memoryId}`, { content })).memory;
   deleteMemory = (roleId: number, memoryId: number) => this.call("DELETE", `/roles/${roleId}/memories/${memoryId}`);
   projects = async () => (await this.call<{ projects: Project[] }>("GET", "/projects")).projects;
+  /** 项目配置里的可选电脑：在线执行器 + 这个账号用过的机器（离线也会列出来） */
+  machines = async () => (await this.call<{ machines: Machine[] }>("GET", "/machines")).machines;
   createProject = async (input: ProjectInput & { name: string }) => (await this.call<{ project: Project }>("POST", "/projects", input)).project;
   updateProject = async (id: number, input: ProjectInput) => (await this.call<{ project: Project }>("PATCH", `/projects/${id}`, input)).project;
   deleteProject = (id: number) => this.call("DELETE", `/projects/${id}`);
@@ -470,6 +474,8 @@ export type Handlers = {
   onAgents(agents: string[]): void;
   /** 处理意见新增或更新（细化完成也走这里，status 已是最新值） */
   onProposal(p: Proposal): void;
+  /** 服务端把某条会话的原生正文重新同步进了库（WorkBuddy 跑完一轮时会先同步） */
+  onSessionHistory(sessionId: string): void;
   /** 服务端以 4401 关闭连接：登录已失效，不再自动重连 */
   onAuthExpired(): void;
 };
@@ -566,6 +572,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "approval") h.onApproval(m.approval, !!m.notify);
         else if (m.type === "watchdog") h.onWatchdog(m.issue === "abort-spree" ? "abort-spree" : "stall", m.session);
         else if (m.type === "proposal") h.onProposal(m.proposal);
+        else if (m.type === "session.history") h.onSessionHistory(m.sessionId);
         else if (m.type === "agents") h.onAgents(m.agents ?? []);
       } catch {
         /* 忽略坏消息 */

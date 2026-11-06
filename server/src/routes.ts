@@ -62,7 +62,7 @@ import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
 import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
-import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listProjects, pickProjectDir, recentBrief, saveProject } from './projects.ts'
+import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, saveProject } from './projects.ts'
 import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
 import {
@@ -597,6 +597,60 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
   }
 
+  /** 向电脑端要一份原生日志（history.request 往返）。null = 电脑端没及时回 */
+  async function requestNativeHistory(userId: number, session: Session): Promise<HistoryResult | null> {
+    const requestId = randomUUID()
+    const waiting = new Promise<HistoryResult | null>(resolve => {
+      const timer = setTimeout(() => {
+        historyWaits.delete(requestId)
+        resolve(null)
+      }, historyTimeoutMs)
+      historyWaits.set(requestId, {
+        userId,
+        machine: session.machine,
+        resolve: r => {
+          clearTimeout(timer)
+          resolve(r)
+        },
+      })
+    })
+    const sent = sendExecutor(userId, session.machine, {
+      type: 'history.request',
+      requestId,
+      agent: session.agent,
+      sessionKey: session.id.slice(session.id.indexOf(':') + 1),
+      cwd: session.cwd,
+    })
+    if (!sent) {
+      historyWaits.delete(requestId)
+      return { messages: [], error: '电脑端不在线' }
+    }
+    return waiting
+  }
+
+  /**
+   * 拉一次正文并整段替换库里的记录，成功后通知在线客户端重载。
+   * 只读监听类（WorkBuddy）的正文只在电脑上，服务端库里可能停在上一轮。
+   */
+  async function syncNativeHistory(userId: number, session: Session): Promise<{ messages: Message[] } | { error: string; code: number }> {
+    const result = await requestNativeHistory(userId, session)
+    if (!result) return { error: '电脑端没有及时返回历史记录', code: 504 }
+    if (result.error) return { error: result.error, code: 502 }
+    const items = result.messages
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
+      .map(m => ({
+        role: m.role,
+        text: m.text,
+        sourceId: nativeKey(m.sourceId) ?? undefined,
+        branchPoint: nativeKey(m.branchPoint) ?? undefined,
+        // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
+        at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
+      }))
+    const messages = await serial(() => replaceHistory(pool, userId, session.id, items))
+    broadcast(userId, { type: 'session.history', sessionId: session.id })
+    return { messages }
+  }
+
   // 拿到真实 id 之前 run 就结束了：临时会话标 aborted 并提醒（走通知过滤管线）
   async function abortPending(userId: number, sessionId: string, error: string) {
     if (!isPendingId(sessionId)) return
@@ -643,11 +697,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
           await syncTask(req.userId,r.session.id,r.session.state)
           // 会话跑完：攒一条处理意见等人确认。补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，
           // 否则「问角色」也会产出一条待办，细化还会无限套娃。
+          // 只读监听类（WorkBuddy）的正文只在电脑上：必须先把这一轮的回复同步进库，再按最新回复攒任务单，
+          // 否则界面上就是「任务单先冒出来、最新回复还停在上一轮」。同步要等电脑端回话（最多 10s），
+          // 放到后台跑，别把这次事件上报的响应拖住。
           if (r.session.state === 'done' && !ev.quiet &&
               !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
-            const proposal = await generateProposal(pool, req.userId, r.session, r.session.eventAt)
-              .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
-            if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+            const done = r.session
+            void (async () => {
+              if (done.agent === 'workbuddy' && executors.has(execKey(req.userId, done.machine))) {
+                await syncNativeHistory(req.userId, done).catch(e => app.log.error(e, '同步会话正文失败'))
+              }
+              const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
+                .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
+              if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+            })()
           }
           // Watchdog：反复失败达到阈值时提醒一次（running 清零计数）
           if ((ev.state === 'aborted' || ev.state === 'running') && !ev.quiet &&
@@ -833,6 +896,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await resetThread(pool, req.userId)
     return { ok: true }
   }))
+  // 可选电脑：项目配置里的下拉项——在线执行器 + 这个账号用过的机器，离线也列出来
+  app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId)) })))
   // 项目：一个代码库的身份与背景知识，目录列表（每台电脑一条）也挂在它身上
   app.get('/projects', async req => serial(async () => ({ projects: await listProjects(pool, req.userId) })))
   app.post('/projects', async req => serial(async () => ({ project: await saveProject(pool, req.userId, req.body) })))
@@ -1428,43 +1493,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 一同步草稿卡就全变成孤儿；这条会话本来也只在助手面板里看，我们的记录就是全文。
     if (await isAssistantSession(pool, userId, id)) return { messages: await listMessages(pool, userId, id, 100) }
     if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
-    const requestId = randomUUID()
-    const waiting = new Promise<HistoryResult | null>(resolve => {
-      const timer = setTimeout(() => {
-        historyWaits.delete(requestId)
-        resolve(null)
-      }, historyTimeoutMs)
-      historyWaits.set(requestId, {
-        userId,
-        machine: session.machine,
-        resolve: r => {
-          clearTimeout(timer)
-          resolve(r)
-        },
-      })
-    })
-    sendExecutor(userId, session.machine, {
-      type: 'history.request',
-      requestId,
-      agent: session.agent,
-      sessionKey: id.slice(id.indexOf(':') + 1),
-      cwd: session.cwd,
-    })
-    const result = await waiting
-    if (!result) return reply.code(504).send({ error: '电脑端没有及时返回历史记录' })
-    if (result.error) return reply.code(502).send({ error: result.error })
-    const items = result.messages
-      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
-      .map(m => ({
-        role: m.role,
-        text: m.text,
-        sourceId: nativeKey(m.sourceId) ?? undefined,
-        branchPoint: nativeKey(m.branchPoint) ?? undefined,
-        // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
-        at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
-      }))
-    const messages = await serial(() => replaceHistory(pool, userId, id, items))
-    return { messages }
+    const result = await syncNativeHistory(userId, session)
+    if ('error' in result) return reply.code(result.code).send({ error: result.error })
+    return { messages: result.messages }
   })
 
   // ---------- WebSocket：viewer 和执行器（role=agent） ----------
