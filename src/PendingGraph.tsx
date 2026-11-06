@@ -134,26 +134,19 @@ type Props = {
  * 会话 · 图模式
  * 总览：每个项目一个气泡（大数字 = 待处理，虚环 + 胶囊 = 运行中），随机散布、各自漂移；
  * 展开：会话气泡同样随机散布（最急的靠中间），点击打开会话，项目名与计数移到顶部工具条；
- * 已处理：主图下方淡色小球带，点击分组才展开历史。
+ * 已处理：不进图，主图下方一个可折叠的纯列表。
  */
 export default function PendingGraph({ sessions, handled, approvals, onOpen }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [handledOpen, setHandledOpen] = useState<string | null>(null);
+  const [handledOpen, setHandledOpen] = useState(false);
 
   const groups = useMemo(() => groupByProject(sessions, approvals), [sessions, approvals]);
 
-  const handledGroups = useMemo(() => {
-    const m = new Map<string, Session[]>();
-    for (const s of handled) {
-      const key = s.project || "(未知项目)";
-      const arr = m.get(key);
-      if (arr) arr.push(s);
-      else m.set(key, [s]);
-    }
-    return [...m.entries()]
-      .map(([project, list]) => ({ project, sessions: list }))
-      .sort((a, b) => b.sessions.length - a.sessions.length);
-  }, [handled]);
+  // 已处理只做列表：按更新时间倒序（App 传来的已是这个顺序，这里再稳一道）
+  const handledList = useMemo(
+    () => [...handled].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)),
+    [handled],
+  );
 
   // 散布布局与展开环半径都要知道容器宽度
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -287,8 +280,6 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     );
   }
 
-  const openHandled = handledGroups.find((h) => h.project === handledOpen);
-
   return (
     <div className="pg-wrap" ref={wrapRef}>
       <div className="pg-stage pg-scatter" style={{ height: layout?.stageH ?? 380 }}>
@@ -326,30 +317,25 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
         <span>气泡大小 = 会话数量 · 点击展开项目</span>
       </p>
 
-      {handledGroups.length > 0 && (
+      {handledList.length > 0 && (
         <div className="pg-handled">
-          <div className="pg-handled-row">
-            <span className="pg-handled-label">已处理</span>
-            {handledGroups.map((h) => (
-              <button
-                key={h.project}
-                type="button"
-                className={`pg-mini${handledOpen === h.project ? " on" : ""}`}
-                title={`${h.project}：${h.sessions.length} 个已处理会话`}
-                aria-expanded={handledOpen === h.project}
-                onClick={() => setHandledOpen(handledOpen === h.project ? null : h.project)}
-              >
-                <span className="pg-mini-b">{h.sessions.length}</span>
-                <span className="pg-mini-name">{h.project}</span>
-              </button>
-            ))}
-          </div>
-          {openHandled && (
+          <button
+            type="button"
+            className={`pg-handled-toggle${handledOpen ? " open" : ""}`}
+            aria-expanded={handledOpen}
+            onClick={() => setHandledOpen(!handledOpen)}
+          >
+            <span className="pg-caret" aria-hidden>›</span>
+            已处理
+            <span className="count dim">{handledList.length}</span>
+          </button>
+          {handledOpen && (
             <ul className="pg-handled-list">
-              {openHandled.sessions.map((s) => (
+              {handledList.map((s) => (
                 <li key={s.id}>
-                  <button type="button" onClick={() => onOpen(s.id)}>
+                  <button type="button" onClick={() => onOpen(s.id)} title={s.title || s.summary || s.id}>
                     <span className={`tag ${s.agent}`}>{AGENT_LABEL[s.agent]}</span>
+                    <span className="pg-hl-proj">{s.project || "(未知项目)"}</span>
                     <span className="pg-hl-title">{s.title || s.summary || s.id}</span>
                     <span className="pg-hl-state">{STATE_LABEL[s.state] ?? s.state}</span>
                   </button>
