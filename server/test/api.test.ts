@@ -176,7 +176,7 @@ describe('AgentHub 服务端', () => {
     }
   })
 
-  it('WorkBuddy 事件支持状态与标题，拒绝远程执行和历史读取', async () => {
+  it('WorkBuddy 事件支持状态与标题，拒绝远程执行，但历史可以读', async () => {
     const key = sid(), id = `workbuddy:${key}`
     const first = await send([ev(key, 'running', { agent: 'workbuddy', cwd: 'D:\\Work2\\AgentHub', title: '分析 agenthub 能否支持 workbuddy 的消息' })])
     assert.equal(first.status, 200)
@@ -189,11 +189,17 @@ describe('AgentHub 服务端', () => {
     assert.equal(done.state, 'done')
     assert.equal(done.acked, false, '非静默的完成要留待处理')
     assert.equal(done.summary, '结论：可以，走只读轮询')
-    for (const [action, body] of [['messages', { text: 'hello' }], ['spawn', { mode: 'fresh', text: 'hello' }], ['history', {}]] as const) {
+    for (const [action, body] of [['messages', { text: 'hello' }], ['spawn', { mode: 'fresh', text: 'hello' }]] as const) {
       const response = await call('POST', `/sessions/${id}/${action}`, body)
       assert.equal(response.status, 409, JSON.stringify(response.body))
       assert.match(response.body.error, /WorkBuddy/)
     }
+    // 正文在电脑端的 transcript 里，读历史和 Claude / Codex 同一条链路：只受「电脑端不在线」约束，
+    // 不能再按「只读 agent」一句话拦掉，否则详情页永远停在「还没有同步到消息」。
+    const history = await call('POST', `/sessions/${id}/history`, {})
+    assert.equal(history.status, 409, JSON.stringify(history.body))
+    assert.match(history.body.error, /电脑端不在线/)
+    assert.doesNotMatch(history.body.error, /仅支持状态监听/)
   })
 
   it('ZCode 事件支持状态与标题，并且可以派活（不再按只读拒绝）', async () => {
