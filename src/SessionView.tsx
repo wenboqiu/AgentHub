@@ -259,7 +259,14 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const send = () => {
     const t = text.trim();
     // 只有图片、没有文字也允许发送
-    if ((!t && !images.length) || reason || pending === "send") return;
+    if (!t && !images.length) return;
+    // 输入框随时能写（草稿先存着）；发送键这时是灰的，Ctrl+Enter 也要说清卡在哪
+    if (reason) {
+      setNote(reason);
+      window.setTimeout(() => setNote(""), 3500);
+      return;
+    }
+    if (pending === "send") return;
     stick.current = true; // 发送后跳到最新消息
     guard("send", async () => {
       await api.send(id, t, images);
@@ -591,8 +598,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           aria-label="会话消息"
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={reason ?? (isAndroid ? "发消息给这个会话…" : "发消息给这个会话…（Ctrl+Enter 发送，可粘贴图片）")}
-          disabled={!!reason}
+          placeholder={
+            reason
+              ? "先把想说的写在这儿，能发的时候再发…"
+              : isAndroid
+                ? "发消息给这个会话…"
+                : "发消息给这个会话…（Ctrl+Enter 发送，可粘贴图片）"
+          }
           rows={2}
           onPaste={(e) => {
             // 粘贴板里带图片（截图）时优先当附件，纯文字粘贴保持原样
@@ -622,10 +634,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
             className="icon-button add-image"
             aria-label="添加图片"
             title={images.length >= MAX_IMAGES ? `最多附 ${MAX_IMAGES} 张图片` : `添加图片（最多 ${MAX_IMAGES} 张）`}
-            disabled={!!reason || pending === "send" || images.length >= MAX_IMAGES}
+            disabled={pending === "send" || images.length >= MAX_IMAGES}
             onClick={openPicker}
           >
-            <Icon name="image" />
+            <Icon name="plus" />
           </button>
           {active ? (
             <button onClick={stop} disabled={pending === "stop"}>

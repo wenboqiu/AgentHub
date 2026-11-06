@@ -207,7 +207,7 @@ export default function Assistant({
 
   const send = async (line: string) => {
     const body = line.trim();
-    if (!body || busy) return;
+    if (!body || busy || pending) return;
     setBusy(true); setErr("");
     try {
       if (!thread) {
@@ -326,8 +326,8 @@ export default function Assistant({
       )}
 
       <div className="assistant-composer">
-        <textarea value={text} rows={2} maxLength={4000} disabled={busy || pending}
-          placeholder={thread ? "继续说，例如：名字改成 前端实现，模型 sonnet" : "描述你要的角色，例如：要一个负责前端实现的人，用 Codex，改完必须跑 tsc"}
+        <textarea value={text} rows={2} maxLength={4000} disabled={busy}
+          placeholder={pending ? "助手还在回上一条，可以先写下一句…" : thread ? "继续说，例如：名字改成 前端实现，模型 sonnet" : "描述你要的角色，例如：要一个负责前端实现的人，用 Codex，改完必须跑 tsc"}
           onChange={e => setText(e.target.value)}
           onKeyDown={e => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(text); }
