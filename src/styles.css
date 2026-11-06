@@ -801,7 +801,11 @@ header h1 { white-space: nowrap; }
 
 /* ===== 待处理会话 · 图模式（气泡视图） ===== */
 .pg-wrap { margin: 0 4px; }
-.pg-toolbar { display: flex; padding: 0 4px; }
+.pg-toolbar { display: flex; align-items: center; gap: 10px; padding: 0 4px; }
+.pg-toolbar-name { font-size: 14px; font-weight: 600; color: var(--fg); }
+.pg-toolbar-chips { display: flex; gap: 6px; margin-left: auto; }
+.pg-chip { --tone: var(--accent); padding: 2px 9px; border-radius: 999px; font-size: 11px; line-height: 1.7; white-space: nowrap; border: 1px solid color-mix(in srgb, var(--tone) 30%, transparent); background: color-mix(in srgb, var(--tone) 12%, transparent); color: color-mix(in srgb, var(--tone) 72%, var(--fg)); }
+.pg-chip.tone-wait { --tone: var(--alert); }
 .pg-overview { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 26px; padding: 30px 8px 18px; }
 .pg-stage { position: relative; height: 440px; margin: 6px 0 2px; }
 .pg-slot.pg-scatter-slot { position: absolute; }
@@ -816,8 +820,6 @@ header h1 { white-space: nowrap; }
 
 .pg-slot { position: relative; display: block; padding: 0; min-width: 0; min-height: 0; border: 0; background: none; border-radius: 50%; }
 button.pg-slot { cursor: pointer; }
-.pg-slot.pg-orbit { position: absolute; left: 50%; top: 50%; }
-.pg-slot.pg-center-slot { position: absolute; left: 50%; top: 50%; pointer-events: none; }
 .pg-floater { display: block; width: 100%; height: 100%; border-radius: 50%; animation: pg-float 5.2s ease-in-out infinite; }
 
 .pg-bubble { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 100%; height: 100%; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--tone) 45%, transparent); background: radial-gradient(circle at 32% 26%, color-mix(in srgb, var(--tone) 30%, var(--card)), color-mix(in srgb, var(--tone) 11%, var(--card)) 72%); color: var(--fg); box-shadow: var(--shadow); animation: pg-pop .5s cubic-bezier(.34,1.56,.64,1) backwards; transition: transform .18s ease, box-shadow .18s ease; }
@@ -837,9 +839,7 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 .pg-bubble.tone-wait::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--alert) 55%, transparent); animation: pg-halo 1.9s ease-out infinite; }
 
 .pg-count { font-size: 26px; font-weight: 650; line-height: 1; color: color-mix(in srgb, var(--tone) 72%, var(--fg)); }
-.pg-bubble.pg-center .pg-count { font-size: 32px; }
 .pg-name { max-width: 86%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--dim); }
-.pg-bubble.pg-center .pg-name { font-size: 13px; font-weight: 550; color: var(--fg); }
 .pg-session .pg-state { font-size: 12.5px; font-weight: 600; color: color-mix(in srgb, var(--tone) 78%, var(--fg)); }
 .pg-session .pg-agent { font-size: 11px; color: var(--dim); }
 
@@ -879,10 +879,10 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 @keyframes pg-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
 @keyframes pg-halo { 0% { transform: scale(.92); opacity: .9; } 70%, 100% { transform: scale(1.24); opacity: 0; } }
 
-/* 窄屏收拢环绕半径，避免会话气泡横向溢出 */
+/* 窄屏气泡整体缩小一点，避免文字挤爆 */
 @media (max-width: 560px) {
-  .pg-stage { height: 400px; }
-  .pg-stage .pg-orbit { scale: .88; }
+  .pg-bubble.pg-session .pg-state { font-size: 11px; }
+  .pg-bubble.pg-session .pg-agent { font-size: 10px; }
 }
 
 /* ---------- 派单（Hub） ---------- */

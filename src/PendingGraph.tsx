@@ -55,6 +55,71 @@ function groupByProject(sessions: Session[], approvals: Set<string>): Group[] {
 const isUrgent = (s: Session, approvals: Set<string>) =>
   s.state === "waiting" || approvals.has(s.id);
 
+type ScatterInput = { key: string; size: number };
+type ScatterSpot = ScatterInput & { x: number; y: number };
+
+/**
+ * 在舞台内散布：第一颗放正中，其余从中心向外螺旋找第一个不重叠、不出界的位置。
+ * 起始角由 key 哈希决定，所以看着随机但每次进来都一样。返回 ok=false 表示有一颗被挤到兜底位。
+ */
+function placeAll(items: ScatterInput[], wrapW: number, stageH: number) {
+  const cx = wrapW / 2;
+  const cy = stageH / 2;
+  const maxD = Math.hypot(wrapW, stageH) / 2;
+  const placed: { x: number; y: number; r: number }[] = [];
+  const spots: ScatterSpot[] = [];
+  let ok = true;
+
+  items.forEach((it, i) => {
+    const rad = it.size / 2 + 6; // +6 给呼吸光环、运行弧留余量
+    let x = cx;
+    let y = cy;
+    if (i > 0) {
+      const a0 = i * GOLDEN_ANGLE + hash01(it.key) * Math.PI * 2;
+      let found: { x: number; y: number } | null = null;
+      for (let d = rad + 12; d < maxD + rad * 2 && !found; d += 8) {
+        // 沿圆周按约 42px 间距采样，保证不会有漏掉的空档
+        const steps = Math.min(90, Math.max(14, Math.round((Math.PI * 2 * d) / 42)));
+        for (let k = 0; k < steps; k++) {
+          const a = a0 + (k / steps) * Math.PI * 2;
+          const px = cx + Math.cos(a) * d;
+          const py = cy + Math.sin(a) * d;
+          if (px < rad + 6 || px > wrapW - rad - 6 || py < rad + 6 || py > stageH - rad - 6) continue;
+          if (placed.every((p) => Math.hypot(p.x - px, p.y - py) >= p.r + rad + 14)) {
+            found = { x: px, y: py };
+            break;
+          }
+        }
+      }
+      if (found) {
+        x = found.x;
+        y = found.y;
+      } else {
+        ok = false;
+        x = cx + (hash01(it.key, 5) - 0.5) * Math.max(wrapW - 2 * rad - 12, 0);
+        y = cy + (hash01(it.key, 6) - 0.5) * Math.max(stageH - 2 * rad - 12, 0);
+      }
+    }
+    placed.push({ x, y, r: rad });
+    spots.push({ ...it, x: Math.round(x), y: Math.round(y) });
+  });
+
+  return { spots, ok };
+}
+
+/** 按面积估一个够用的舞台高度，装不下就逐步加高重排，直到没有一颗被挤到兜底位 */
+function scatterStage(items: ScatterInput[], wrapW: number) {
+  const w = Math.max(wrapW, 260);
+  const need = items.reduce((sum, it) => sum + Math.PI * (it.size / 2 + 14) ** 2, 0);
+  let stageH = Math.round(Math.max(260, Math.min(900, (need * 2.1) / Math.max(w - 44, 240) + 30)));
+  let res = placeAll(items, w, stageH);
+  for (let k = 0; k < 6 && !res.ok && stageH < 900; k++) {
+    stageH = Math.min(900, Math.round(stageH * 1.18));
+    res = placeAll(items, w, stageH);
+  }
+  return { ...res, stageH };
+}
+
 type Props = {
   /** 待处理 + 运行中的会话（不含已处理） */
   sessions: Session[];
@@ -68,7 +133,7 @@ type Props = {
 /**
  * 会话 · 图模式
  * 总览：每个项目一个气泡（大数字 = 待处理，虚环 + 胶囊 = 运行中），随机散布、各自漂移；
- * 展开：内圈运行中（旋转弧）、外圈待处理，点击会话气泡打开会话；
+ * 展开：会话气泡同样随机散布（最急的靠中间），点击打开会话，项目名与计数移到顶部工具条；
  * 已处理：主图下方淡色小球带，点击分组才展开历史。
  */
 export default function PendingGraph({ sessions, handled, approvals, onOpen }: Props) {
@@ -149,69 +214,73 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
 
   if (current) {
     const { pending, running } = current;
-    const twoRings = pending.length > 0 && running.length > 0;
-    const R_OUT = Math.max(128, Math.min(180, (wrapW || 900) / 2 - 58));
-    const R_IN = Math.round(R_OUT * 0.56);
-    const rPending = twoRings ? R_OUT : Math.round(R_OUT * 0.78);
-    const rRunning = twoRings ? R_IN : Math.round(R_OUT * 0.78);
-    const stageH = 2 * (R_OUT + 54) + 32;
-    const urgentProject = pending.some((s) => isUrgent(s, approvals));
+    const runIds = new Set(running.map((s) => s.id));
     const total = pending.length + running.length;
+    // 会话多了就缩一点，保证同屏能铺开
+    const size = total > 26 ? 70 : total > 14 ? 78 : 88;
 
-    const orbit = (list: Session[], radius: number, size: number, kind: "pending" | "running") =>
-      list.map((s, i) => {
-        const n = list.length;
-        const angle = (i / n) * Math.PI * 2 - Math.PI / 2 + (kind === "running" ? Math.PI / Math.max(n, 1) : 0);
-        const x = Math.round(Math.cos(angle) * radius);
-        const y = Math.round(Math.sin(angle) * radius);
-        const urgent = isUrgent(s, approvals);
-        const run = kind === "running";
-        const tone = run ? "tone-blue" : urgent ? "tone-wait" : s.state === "done" ? "tone-done" : "tone-abort";
-        const label = run ? "运行中" : STATE_LABEL[s.state] ?? s.state;
-        const tip = `${AGENT_LABEL[s.agent]} · ${label}\n${s.title || s.summary || s.id}`;
-        return (
-          <button
-            key={s.id}
-            type="button"
-            className="pg-slot pg-orbit"
-            style={{ width: size, height: size, marginLeft: -size / 2, marginTop: -size / 2, transform: `translate(${x}px, ${y}px)` }}
-            title={tip}
-            aria-label={`打开会话：${label}`}
-            onClick={() => onOpen(s.id)}
-          >
-            <span className="pg-floater" style={{ animationDelay: `${(i % 4) * 0.55}s` }}>
-              <span className={`pg-bubble pg-session ${tone}${run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 60}ms` }}>
-                {run && <span className="pg-run-arc" />}
-                <span className="pg-state">{label}</span>
-                <span className="pg-agent">{AGENT_LABEL[s.agent]}</span>
-              </span>
-            </span>
-          </button>
-        );
-      });
+    // 要你动手的排最中间（越靠中心越先被放到舞台中央），运行中的甩到外圈
+    const rank = (s: Session) =>
+      isUrgent(s, approvals) ? 0 : s.state === "aborted" ? 1 : runIds.has(s.id) ? 3 : 2;
+    const entries = [...pending, ...running]
+      .sort((a, b) => rank(a) - rank(b))
+      .map((s) => ({ s, run: runIds.has(s.id), size: runIds.has(s.id) ? size - 8 : size }));
+
+    const { spots, stageH } = scatterStage(entries.map((e) => ({ key: e.s.id, size: e.size })), wrapW || 900);
 
     return (
       <div className="pg-wrap" ref={wrapRef}>
         <div className="pg-toolbar">
           <button type="button" className="link" onClick={() => setExpanded(null)}>‹ 返回总览</button>
+          <span className="pg-toolbar-name">{current.project}</span>
+          <span className="pg-toolbar-chips">
+            {pending.length > 0 && <span className="pg-chip tone-wait">{pending.length} 待处理</span>}
+            {running.length > 0 && <span className="pg-chip tone-blue">{running.length} 运行中</span>}
+          </span>
         </div>
         <div className="pg-stage" style={{ height: stageH }}>
-          {orbit(pending, rPending, 86, "pending")}
-          {orbit(running, rRunning, 76, "running")}
-          <div className="pg-slot pg-center-slot" style={{ width: 96, height: 96, marginLeft: -48, marginTop: -48 }} aria-hidden>
-            <span className="pg-floater" style={{ animationDelay: "0.3s" }}>
-              <span className={`pg-bubble pg-center ${urgentProject ? "tone-wait" : "tone-blue"}`}>
-                <span className="pg-count">{total}</span>
-                <span className="pg-name">{current.project}</span>
-              </span>
-            </span>
-          </div>
+          {entries.map((e, i) => {
+            const spot = spots[i];
+            const urgent = isUrgent(e.s, approvals);
+            const tone = e.run ? "tone-blue" : urgent ? "tone-wait" : e.s.state === "done" ? "tone-done" : "tone-abort";
+            const label = e.run ? "运行中" : STATE_LABEL[e.s.state] ?? e.s.state;
+            const tip = `${AGENT_LABEL[e.s.agent]} · ${label}\n${e.s.title || e.s.summary || e.s.id}`;
+            const dur = (7 + hash01(e.s.id, 3) * 4).toFixed(2); // 每颗漂移节奏不同
+            const delay = (-hash01(e.s.id, 4) * 10).toFixed(2);
+            return (
+              <button
+                key={e.s.id}
+                type="button"
+                className="pg-slot pg-scatter-slot"
+                style={{
+                  width: e.size,
+                  height: e.size,
+                  left: spot.x,
+                  top: spot.y,
+                  marginLeft: -e.size / 2,
+                  marginTop: -e.size / 2,
+                }}
+                title={tip}
+                aria-label={`打开会话：${label}`}
+                onClick={() => onOpen(e.s.id)}
+              >
+                <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
+                  <span className={`pg-bubble pg-session ${tone}${e.run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 50}ms` }}>
+                    {e.run && <span className="pg-run-arc" />}
+                    <span className="pg-state">{label}</span>
+                    <span className="pg-agent">{AGENT_LABEL[e.s.agent]}</span>
+                  </span>
+                </span>
+              </button>
+            );
+          })}
         </div>
         <p className="pg-legend">
-          <span><i className="pg-dot tone-blue" />运行中（内圈）</span>
+          <span><i className="pg-dot tone-blue" />运行中</span>
           <span><i className="pg-dot tone-wait" />等待授权</span>
           <span><i className="pg-dot tone-done" />已完成待确认</span>
           <span><i className="pg-dot tone-abort" />已中断待确认</span>
+          <span>点击气泡打开会话</span>
         </p>
       </div>
     );
