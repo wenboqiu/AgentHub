@@ -69,3 +69,20 @@ export function liveLabel(activity: RunActivity | null, agentLabel: string): str
     default: return text;
   }
 }
+
+/** 只读监听会话：超过这么久没有新记录就不再暗示「还在动」，把话说白 */
+export const LISTEN_QUIET_MS = 5 * 60_000;
+
+/**
+ * 只读监听会话（WorkBuddy / 豆包 / 只挂记录的那种）运行中那行。
+ * 这一类没有 run、拿不到 agent 的逐条活动（思考 / 工具 / 正文），只有服务端最后一条上报的时间，
+ * 所以只说「这一轮还没结束」和「多久没有新记录」，不编「思考中」。
+ */
+export function listenLabel(eventAt: string, agentLabel: string, now = Date.now()): string {
+  const quiet = now - Date.parse(eventAt);
+  const head = `${agentLabel} 这一轮还没结束`;
+  if (!Number.isFinite(quiet) || quiet <= 5_000) return head;
+  const sec = Math.round(quiet / 1000);
+  if (quiet < LISTEN_QUIET_MS) return `${head} · ${sec < 60 ? `${sec} 秒` : `${Math.floor(sec / 60)} 分钟`}前有新记录`;
+  return `${head} · ${Math.floor(sec / 60)} 分钟没有新记录`;
+}

@@ -9,11 +9,11 @@ import ProposalCard from "./ProposalCard";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import SessionSidebar from "./SessionSidebar";
-import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
+import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
 import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
-import { formatElapsed, liveLabel, runElapsed, runSummary } from "./lib/runMeta";
+import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary } from "./lib/runMeta";
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -224,13 +224,15 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
 
   // 运行中每秒走一次表：思考计时和「刚刚还在执行工具」都得靠它推进
   const active = isRunActive(run);
+  // 只读监听会话（WorkBuddy / 豆包）没有 run，逐条活动也就没有；只要服务端还说这次在跑，就该有一行说明
+  const listenLive = !active && !!session && isListenOnly(session.agent) && session.state === "running";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!active) return;
+    if (!active && !listenLive) return;
     setNow(Date.now());
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
-  }, [active, run?.id]);
+  }, [active, listenLive, run?.id]);
   // 内容指纹：条数 + 总字数。回复是流式长出来的（同一条消息变长、条数不变），
   // 只盯条数会在回复变长时漏掉跟随，末尾就会滑到输入框后面。
   const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0);
@@ -255,6 +257,15 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
 
   const terminalRun = !!run && messages.some(m=>m.runId===run.id && m.role==="system" && m.text.startsWith("已连接原终端"));
   const reason = sendBlockReason({ session, agents, running: active });
+  // 运行中那行：有 run 就说 agent 自己的话；只读监听没有 run，只说「还没结束 + 多久没新记录」
+  const listenSince = Date.parse(session.stateSince);
+  const liveText = approvals.length > 0
+    ? "等待你的确认"
+    : listenLive
+      ? `${listenLabel(session.eventAt, agentName(session.agent), now)}${isStuckRunning(session, now) ? "，可能已经停在那里" : ""}`
+      : liveLabel(activity, agentName(session.agent));
+  // 计时：有 run 按 run 起算；监听会话从进入运行态算起（state_since）
+  const liveElapsed = run ? runElapsed(run, now) : Number.isNaN(listenSince) ? 0 : Math.max(0, now - listenSince);
 
   const guard = (key: "send" | "stop" | "spawn" | "terminal" | "link", fn: () => Promise<unknown>) => {
     setPending(key);
@@ -485,13 +496,11 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           ))}
         </ul>
         {/* 运行中：这行只播报 agent 自己说了什么（思考原文 / 工具 / 正在写的正文），不编状态 */}
-        {active && !terminalRun && (
+        {((active && !terminalRun) || listenLive) && (
           <div className="live-row" role="status" aria-live="polite">
             <span className="live-dots" aria-hidden="true"><i /><i /><i /></span>
-            <span className="live-text" title={activity?.text || undefined}>
-              {approvals.length > 0 ? "等待你的确认" : liveLabel(activity, agentName(session.agent))}
-            </span>
-            <span className="live-time">{formatElapsed(run ? runElapsed(run, now) : 0)}</span>
+            <span className="live-text" title={liveText}>{liveText}</span>
+            <span className="live-time">{formatElapsed(liveElapsed)}</span>
           </div>
         )}
         {/* 跑完：这一轮花了多久、烧了多少 token */}
