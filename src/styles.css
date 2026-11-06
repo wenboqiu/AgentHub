@@ -775,7 +775,7 @@ header h1 { white-space: nowrap; }
 .pg-toolbar { display: flex; padding: 0 4px; }
 .pg-overview { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 26px; padding: 30px 8px 18px; }
 .pg-stage { position: relative; height: 440px; margin: 6px 0 2px; }
-.pg-scatter-slot { position: absolute; }
+.pg-slot.pg-scatter-slot { position: absolute; }
 
 @keyframes pg-drift {
   0%, 100% { transform: translate(0, 0); }
