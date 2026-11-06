@@ -19,6 +19,15 @@ export function clockAt(iso: string | null | undefined, now: Date = new Date()):
   return d.getFullYear() === now.getFullYear() ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`;
 }
 
+/** 「xx 前」式的相对时间：列表和侧栏共用 */
+export function ago(iso: string, now: number): string {
+  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+
 /** 悬停提示用的完整时间（跟随系统时区与语言） */
 export function fullAt(iso: string | null | undefined): string {
   if (!iso) return "";

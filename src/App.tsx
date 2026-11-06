@@ -17,19 +17,12 @@ import BoardPanel from "./BoardPanel";
 import HubPanel from "./HubPanel";
 import Icon from "./Icon";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
+import { ago } from "./lib/time";
 type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
 type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar"|"hub";
 const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历", hub:"派单" } as const;
 
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
-
-function ago(iso: string, now: number): string {
-  const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return `${Math.floor(s / 86400)} 天前`;
-}
 
 function sinceText(s: Session, now: number): string {
   const t = ago(s.stateSince, now);
@@ -335,6 +328,7 @@ export default function App() {
   const saveProposal = useCallback((p: Proposal) => setProposals(m => new Map(m).set(p.id, p)), []);
   const approvalSessions = useMemo(() => new Set([...approvals.values()].map((a) => a.sessionId)), [approvals]);
   const needsAttention = (s: Session) => isPending(s) || approvalSessions.has(s.id);
+  const attention = useMemo(() => new Set(list.filter(needsAttention).map((s) => s.id)), [list, approvalSessions]);
   const pending = list.filter(needsAttention);
   const running = list.filter((s) => !needsAttention(s) && s.state === "running");
   const others = list.filter((s) => !needsAttention(s) && s.state !== "running");
@@ -472,6 +466,9 @@ export default function App() {
         bus={bus}
         approvals={[...approvals.values()].filter((a) => a.sessionId === openId)}
         agents={agents}
+        sessions={list}
+        nowTick={now}
+        attention={attention}
         onBack={closeSession}
         tasks={taskList}
         onTask={openTask}

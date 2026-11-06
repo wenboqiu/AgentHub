@@ -199,8 +199,37 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .settings main > h2:first-child { margin-top: 4px; }
 
 .title.wrap { white-space: normal; margin: 20px 0 4px; }
+/* 会话详情页整体布局：左侧会话列表（仅桌面端）+ 右侧详情 */
+.session-shell { display: flex; align-items: stretch; min-height: 100vh; min-height: 100dvh; }
+.session-shell > .app { flex: 1; min-width: 0; }
 .session-view { display: flex; flex-direction: column; }
 .session-view .chat { flex: 1; }
+/* 左侧会话列表（参考 WorkBuddy）：吸顶独立滚动，收起时随布局消失 */
+.sidebar { flex-shrink: 0; position: sticky; top: 0; width: 276px; height: 100vh; height: 100dvh; overflow-y: auto; overscroll-behavior: contain; padding: 12px 10px calc(env(safe-area-inset-bottom) + 14px) max(10px, env(safe-area-inset-left)); border-right: 1px solid var(--line); background: var(--field); }
+.sidebar-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 8px 10px; font-size: 12px; font-weight: 600; letter-spacing: .5px; color: var(--dim); }
+.sidebar-head .sidebar-toggle { min-height: 32px; width: 32px; padding: 6px; }
+.sidebar .icon { width: 18px; height: 18px; }
+.sidebar-toggle .icon { transition: transform .18s ease; }
+.sidebar-head .sidebar-toggle .icon { transform: rotate(180deg); }
+.sidebar-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.sidebar-item { display: block; width: 100%; min-height: 0; text-align: left; padding: 10px 12px; border-radius: 14px; border-color: transparent; background: transparent; font-weight: 450; }
+.sidebar-item.active { background: var(--accent-soft); }
+@media (hover: hover) {
+  .sidebar-item:not(:disabled):hover { background: var(--card); border-color: var(--line); }
+  .sidebar-item.active:not(:disabled):hover { background: var(--accent-soft); border-color: transparent; }
+}
+.si-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.si-dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--dim); }
+.si-dot.running { background: var(--accent); }
+.si-dot.alert { background: var(--alert); }
+.si-dot.ok { background: var(--ok); }
+.si-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; font-weight: 600; }
+.si-time { flex-shrink: 0; font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.si-sub { display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--dim); }
+.si-meta { display: block; margin-top: 2px; font-size: 11px; color: var(--dim); opacity: .85; }
+.si-badge { flex-shrink: 0; font-size: 10.5px; font-weight: 650; padding: 1px 6px; border-radius: 6px; background: var(--alert-bg); color: var(--alert); }
+/* 窄窗口（或手机）放不下侧栏：直接隐藏，保持原来的全屏详情 */
+@media (max-width: 760px) { .sidebar { display: none; } }
 .msgs { list-style: none; margin: 24px 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
 .message-entry { min-width:0; max-width:min(85%,960px); }
 .message-entry.user { align-self:flex-end; }

@@ -8,6 +8,7 @@ import MessageActions from "./MessageActions";
 import ProposalCard from "./ProposalCard";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
+import SessionSidebar from "./SessionSidebar";
 import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
 import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
@@ -32,6 +33,12 @@ type Props = {
   localMachine: string;
   /** 跳到另一个会话（新开会话后跳到临时会话） */
   onSwitch(id: string): void;
+  /** 全部会话（已按更新时间倒序）：桌面端左侧会话列表用 */
+  sessions: Session[];
+  /** 相对时间用的当前时刻（App 每 30 秒推进一次） */
+  nowTick: number;
+  /** 需要人处理的会话 id 集合（待授权 / 有待确认事项） */
+  attention: Set<string>;
   api: Api;
   bus: Bus;
   /** 这个会话当前 pending 的授权（App 从 WS 维护） */
@@ -77,7 +84,7 @@ const parseQuestions = (detail: string): UserQuestion[] | null => {
   }
 };
 
-export default function SessionView({ sessionId, session, localMachine, onSwitch, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, roles, projects, autoDispatch, onProposal }: Props) {
+export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, roles, projects, autoDispatch, onProposal }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   /** 运行中：执行器刚上报的「正在做什么」（agent 自己的话），不是本地编的状态 */
@@ -106,6 +113,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [preview, setPreview] = useState<string | null>(null);
   /** 待发送的附图（data URL），最多 MAX_IMAGES 张 */
   const [images, setImages] = useState<string[]>([]);
+  /** 左侧会话列表是否收起（只影响桌面端，记住上次的展开状态） */
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem("agenthub.sidebar") === "0"; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem("agenthub.sidebar", sidebarCollapsed ? "0" : "1"); } catch {}
+  }, [sidebarCollapsed]);
   const fileRef = useRef<HTMLInputElement | null>(null);
   /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
   const stick = useRef(true);
@@ -377,9 +391,25 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     });
 
   return (
-    <div className="app session-view">
+    <div className={`session-shell${isDesktop && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      {isDesktop && (
+        <SessionSidebar
+          sessions={sessions}
+          currentId={id || sessionId}
+          attention={attention}
+          now={nowTick}
+          onSelect={onSwitch}
+          onCollapse={() => setSidebarCollapsed(true)}
+        />
+      )}
+      <div className="app session-view">
       <header>
         <button className="back-button" onClick={onBack}><Icon name="back"/>返回</button>
+        {isDesktop && sidebarCollapsed && (
+          <button className="icon-button sidebar-toggle" aria-label="展开会话列表" title="展开会话列表" onClick={() => setSidebarCollapsed(false)}>
+            <Icon name="chevron" />
+          </button>
+        )}
         <span className={`tag ${session.agent}`}>{AGENT_LABEL[session.agent]}</span>
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
@@ -649,6 +679,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           </button>
         </div>
       </footer>}
+      </div>
     </div>
   );
 }
