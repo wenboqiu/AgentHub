@@ -1,6 +1,8 @@
 import { useState } from "react";
 import type { Api, BoardEntry } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+import HubDispatchForm from "./HubDispatchForm";
+import Icon from "./Icon";
 // 派活看板：把「排队中 / 在跑 / 卡住」的活聚到一张板上。
 // 数据由服务端从任务、队列和执行记录现算，这里只负责分组展示和当场处置：
 // 卡住的可以重新派发或退回待办，排队的可以立即派发或取消排队。
@@ -71,6 +73,7 @@ export default function BoardPanel({
   onNotice(msg: string): void;
 }) {
   const [busyId, setBusyId] = useState(0);
+  const [showDispatch, setShowDispatch] = useState(false);
   const act = async (id: number, kind: "issue" | "todo" | "unqueue") => {
     setBusyId(id);
     const done = { issue: "已重新派发", todo: "已退回待办", unqueue: "已取消排队" }[kind];
@@ -98,11 +101,22 @@ export default function BoardPanel({
   );
   return (
     <>
-      <div className="page-heading"><div>
-        <p className="eyebrow">谁在干活，一眼看清</p>
-        <h2>派活看板</h2>
-        <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}</p>
-      </div></div>
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">谁在干活，一眼看清</p>
+          <h2>派活看板</h2>
+          <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}</p>
+        </div>
+        <button onClick={() => setShowDispatch(!showDispatch)} aria-expanded={showDispatch}>
+          <Icon name="plus" /> 本地派单
+        </button>
+      </div>
+      {showDispatch && (
+        <section className="box">
+          <h2>发新单（本地队列）</h2>
+          <HubDispatchForm />
+        </section>
+      )}
       <section>
         <h2>卡住 {stuck.length > 0 && <span className="count">{stuck.length}</span>}</h2>
         {stuck.length ? rows(stuck) : <p className="empty">没有异常，派出去的活都有人接着</p>}
