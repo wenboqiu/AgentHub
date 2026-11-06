@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 import type { FastifyInstance } from 'fastify'
 import pg from 'pg'
 import { buildApp } from '../src/index.ts'
+import { expirePending } from '../src/db.ts'
 import { DATABASE_URL, makeUser } from './helpers.ts'
 
 let TOKEN = ''
+let USER_ID = 0
 const run = Date.now()
 let n = 0
 const sid = () => `t${run}-${n++}`
@@ -43,7 +45,9 @@ describe('AgentHub 服务端', () => {
   before(async () => {
     app = await buildApp(DATABASE_URL, 'silent', {})
     base = await app.listen({ port: 0, host: '127.0.0.1' })
-    TOKEN = (await makeUser(pool)).token
+    const u = await makeUser(pool)
+    TOKEN = u.token
+    USER_ID = u.id
   })
   after(async () => {
     await app.close()
@@ -90,8 +94,31 @@ describe('AgentHub 服务端', () => {
     ws.close()
   })
 
-  it('乱序的旧事件被丢弃', async () => {
-    const s = sid()
+  it('完成态挂太久自动转入已处理；waiting 与新完成的不受影响', async () => {
+    const old1 = sid(), old2 = sid(), fresh = sid(), waiting = sid()
+    await send([
+      ev(old1, 'running', { at: iso(-9000) }), ev(old1, 'done', { at: iso(-8000) }),
+      ev(old2, 'running', { at: iso(-9000) }), ev(old2, 'aborted', { at: iso(-8000) }),
+      ev(fresh, 'running', { at: iso(-3000) }), ev(fresh, 'done', { at: iso(-2000) }),
+      ev(waiting, 'waiting', { at: iso(-8000) }),
+    ])
+    // 把 old1/old2/waiting 的状态起点拨回 3 小时前（waiting 用来验证它不过期）
+    await pool.query(
+      `UPDATE sessions SET state_since = now() - interval '3 hours'
+       WHERE user_id = $1 AND id = ANY($2)`,
+      [USER_ID, [`claude:${old1}`, `claude:${old2}`, `claude:${waiting}`]],
+    )
+    const expired = await expirePending(pool, 2 * 60 * 60_000)
+    const ids = expired.map(e => e.session.id)
+    assert.ok(ids.includes(`claude:${old1}`) && ids.includes(`claude:${old2}`))
+    assert.ok(!ids.includes(`claude:${fresh}`) && !ids.includes(`claude:${waiting}`))
+    assert.equal((await get(`claude:${old1}`)).acked, true)
+    assert.equal((await get(`claude:${old2}`)).acked, true)
+    assert.equal((await get(`claude:${fresh}`)).acked, false)
+    assert.equal((await get(`claude:${waiting}`)).acked, false)
+  })
+
+  it('乱序的旧事件被丢弃', async () => {    const s = sid()
     await send([ev(s, 'done', { at: iso(-1000) })])
     const r = await send([ev(s, 'running', { at: iso(-5000) })])
     assert.equal(r.body.accepted, 0)

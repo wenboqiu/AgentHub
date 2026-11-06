@@ -21,6 +21,7 @@ import {
   decideApproval,
   expireApproval,
   expireApprovalsOfRuns,
+  expirePending,
   failActiveRuns,
   getApproval,
   getRun,
@@ -127,6 +128,8 @@ export type RouteOptions = {
   queueSweepIntervalMs?: number
   /** 项目经理自动派发的巡检间隔（默认 60 秒） */
   dispatchIntervalMs?: number
+  /** 完成/中断的会话挂多久没人确认就自动转入已处理（默认 2 小时） */
+  pendingExpireMs?: number
 }
 
 type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
@@ -1728,12 +1731,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }).catch(e => app.log.error(e, '自动派发失败'))
   }, opts.dispatchIntervalMs ?? 60_000)
   dispatchTimer.unref()
+  // 完成态自动过期：done/aborted 挂太久没人确认就转入已处理，不在待处理区永久堆积；
+  // waiting（授权）是真正要人拍板的，不在此列。逐条广播，各端列表即时收敛。
+  const pendingExpireMs = opts.pendingExpireMs ?? 2 * 60 * 60_000
+  const expireTimer = setInterval(() => {
+    void (async () => {
+      for (const d of await expirePending(pool, pendingExpireMs)) pushSession(d.userId, d.session, false)
+    })().catch(e => app.log.error(e, '自动过期完成态失败'))
+  }, 60_000)
+  expireTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
     clearInterval(reminderTimer)
     clearInterval(watchdogTimer)
     clearInterval(queueTimer)
     clearInterval(dispatchTimer)
+    clearInterval(expireTimer)
     for (const c of clients) c.sock.close()
     for (const c of executors.values()) c.sock.close()
   })

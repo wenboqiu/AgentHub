@@ -339,6 +339,21 @@ export async function ackAll(pool: pg.Pool, userId: number): Promise<Session[]> 
   return r.rows.map(toSession)
 }
 
+/**
+ * 完成态自动过期：done/aborted 挂太久没人确认就自动记为已处理。
+ * 「完成」只是通知，不该永久占用待处理区；waiting（授权）要人拍板，不在此列。
+ * 返回被改的会话（带 userId），调用方逐条广播让各端列表即时收敛。
+ */
+export async function expirePending(pool: pg.Pool, olderThanMs: number): Promise<{ userId: number; session: Session }[]> {
+  const r = await pool.query<Row & { user_id: number }>(
+    `UPDATE sessions SET acked = true, updated_at = now()
+     WHERE acked = false AND state IN ('done', 'aborted') AND state_since < now() - ($1::bigint * interval '1 millisecond')
+     RETURNING *`,
+    [olderThanMs],
+  )
+  return r.rows.map(row => ({ userId: row.user_id, session: toSession(row) }))
+}
+
 export async function removeSession(pool: pg.Pool, userId: number, id: string): Promise<boolean> {
   const r = await pool.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])
   await pool.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, id])
