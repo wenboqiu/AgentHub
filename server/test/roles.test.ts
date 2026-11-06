@@ -55,11 +55,6 @@ function harness() {
     assert.equal(r.status, 200, JSON.stringify(r.body))
     return r.body.role as any
   }
-  const profile = async (body: Record<string, unknown>) => {
-    const r = await call('POST', '/profiles', body)
-    assert.equal(r.status, 200, JSON.stringify(r.body))
-    return r.body.profile as any
-  }
   const task = async (body: Record<string, unknown>) => {
     const r = await call('POST', '/tasks', { title: uniq('任务'), ...body })
     assert.equal(r.status, 200, JSON.stringify(r.body))
@@ -78,7 +73,7 @@ function harness() {
       await app.close()
       await pool.end()
     },
-    call, connect, executor, role, profile, task,
+    call, connect, executor, role, task,
   }
 }
 
@@ -93,7 +88,6 @@ describe('角色：谁来做 + 用什么模型 + 按什么准则', () => {
     assert.equal(r.agent, 'claude')
     assert.equal(r.model, 'opus')
     assert.equal(r.context, '只改前端代码，动手前先看现有写法')
-    assert.equal(r.profileId, null)
     assert.equal(r.tasks, 0)
 
     assert.equal((await h.call('POST', '/roles', { name: r.name })).status, 409)
@@ -114,16 +108,13 @@ describe('角色：谁来做 + 用什么模型 + 按什么准则', () => {
     assert.equal((await h.call('GET', '/roles')).body.roles.some((x: any) => x.id === r.id), false)
   })
 
-  it('建任务选角色：执行工具跟着角色走，角色挂的配置一并带出', async () => {
-    const p = await h.profile({ name: uniq('配置'), agent: 'claude', machine: 'role-pc', cwd: 'D:\\Work2\\RoleApp', priority: 'high', checklist: ['tsc 通过'] })
-    const r = await h.role({ name: uniq('组长'), agent: 'codex', model: 'gpt-5-codex', context: '先给方案再动手', profileId: p.id })
+  it('建任务选角色：执行工具跟着角色走', async () => {
+    const r = await h.role({ name: uniq('组长'), agent: 'codex', model: 'gpt-5-codex', context: '先给方案再动手' })
     const t = await h.task({ roleId: r.id })
     assert.equal(t.roleId, r.id)
     assert.equal(t.agent, 'codex', '执行工具来自角色')
-    assert.equal(t.machine, 'role-pc', '配置带出电脑')
-    assert.equal(t.cwd, 'D:\\Work2\\RoleApp')
-    assert.equal(t.priority, 'high')
-    assert.deepEqual(t.checklist.map((i: any) => i.text), ['tsc 通过'])
+    assert.equal(t.machine, null, '目录与电脑不归角色管，派发时按项目目录挑')
+    assert.equal(t.cwd, null)
     assert.equal(r.context, '先给方案再动手', '上下文不进任务字段，只在派活时下发')
   })
 

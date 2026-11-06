@@ -5,7 +5,6 @@ import { migrateDigests } from './digest.ts'
 import { migrateWatchdog } from './watchdog.ts'
 import { migrateReview } from './review.ts'
 import { migrateQueue } from './queue.ts'
-import { migrateProfiles } from './profiles.ts'
 import { migrateRoles } from './roles.ts'
 import { migrateProjects } from './projects.ts'
 import { migrateMemories } from './memories.ts'
@@ -199,10 +198,9 @@ export async function migrate(pool: pg.Pool) {
     await migrateWatchdog(client)
     await migrateReview(client)
     await migrateQueue(client)
-    await migrateProfiles(client)
-    // 项目引用 profiles（默认配置），必须排在它后面
+    // 项目引用 profiles 的老数据在 migrateProjects 里搬迁（目录收进项目），必须排在任务迁移后
     await migrateProjects(client)
-    // 角色引用 profiles，必须排在它后面
+    // 角色引用 roles
     await migrateRoles(client)
     // 记忆引用 roles 与 projects，必须排在两者后面
     await migrateMemories(client)
@@ -215,6 +213,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateArtifacts(client)
     // 审批来源（人 / 项目经理代批）加在 approvals 上，表在建库时就存在了
     await migrateReferee(client)
+    // profiles 实体已废弃（执行目录收进项目）：各处引用清完后删表兜底（CASCADE 清残留约束）
+    await client.query('DROP TABLE IF EXISTS profiles CASCADE')
   } finally {
     await client.query('SELECT pg_advisory_unlock(727001)').catch(() => {})
     client.release()

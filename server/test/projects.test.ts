@@ -54,11 +54,6 @@ function harness() {
     assert.equal(r.status, 200, JSON.stringify(r.body))
     return r.body.project as any
   }
-  const profile = async (body: Record<string, unknown>) => {
-    const r = await call('POST', '/profiles', body)
-    assert.equal(r.status, 200, JSON.stringify(r.body))
-    return r.body.profile as any
-  }
   const task = async (body: Record<string, unknown>) => {
     const r = await call('POST', '/tasks', { title: uniq('任务'), ...body })
     assert.equal(r.status, 200, JSON.stringify(r.body))
@@ -77,7 +72,7 @@ function harness() {
       await app.close()
       await pool.end()
     },
-    call, connect, executor, project, profile, task,
+    call, connect, executor, project, task,
   }
 }
 
@@ -91,8 +86,7 @@ describe('项目：一个代码库的身份与背景知识', () => {
     const p = await h.project({ name: uniq('AgentHub'), brief: 'Fastify + Postgres，改完要跑 tsc' })
     assert.equal(p.name.startsWith('AgentHub'), true)
     assert.equal(p.brief, 'Fastify + Postgres，改完要跑 tsc')
-    assert.equal(p.profileId, null)
-    assert.deepEqual(p.profileIds, [])
+    assert.deepEqual(p.dirs, [])
     assert.equal(p.tasks, 0)
 
     assert.equal((await h.call('POST', '/projects', { name: p.name })).status, 409)
@@ -126,16 +120,18 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.equal(reloaded.cwd, 'D:\\Work2\\Keep', '已填的执行字段保留')
   })
 
-  it('项目挂的默认配置在派活时兜底：任务没选配置也能定下电脑和目录', async () => {
+  it('项目目录在派活时兜底：任务没填目录也能按机器定下来', async () => {
     const machine = `proj-pc-${stamp}`
     const msgs = await h.executor(machine)
-    const profile = await h.profile({ name: uniq('项目默认配置'), agent: 'claude', machine, cwd: 'D:\\Work2\\ProjApp' })
-    const p = await h.project({ name: uniq('带配置的项目'), brief: '这个项目只跑 Node', profileId: profile.id })
-    const t = await h.task({ projectId: p.id })
-    // 建任务时选项目就带出默认配置：空着的电脑 / 目录由配置补齐
-    assert.equal(t.profileId, profile.id)
-    assert.equal(t.machine, machine)
-    assert.equal(t.cwd, 'D:\\Work2\\ProjApp')
+    const p = await h.project({
+      name: uniq('带目录的项目'),
+      brief: '这个项目只跑 Node',
+      dirs: [{ machine, cwd: 'D:\\Work2\\ProjApp' }],
+    })
+    const t = await h.task({ projectId: p.id, agent: 'claude' })
+    // 建任务时项目不落目录：留到派发时按机器挑，才不会把任务钉在某台电脑上
+    assert.equal(t.machine, null)
+    assert.equal(t.cwd, null)
     const started = await h.call('POST', `/tasks/${t.id}/start`, {})
     assert.equal(started.status, 200, JSON.stringify(started.body))
     const run = await waitFor(() => msgs.find(m => m.type === 'run.start' && m.runId === started.body.runId))
@@ -143,42 +139,52 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.match(run.instructions, /这个项目只跑 Node/, '项目背景随派活下发')
   })
 
-  it('一个项目挂多套配置：派活按这次要去的机器挑对应那套目录', async () => {
+  it('一个项目存多台电脑的目录：派活按这次要去的机器挑对应那条', async () => {
     const pcA = `proj-a-${stamp}`
     const pcB = `proj-b-${stamp}`
     await h.executor(pcA)
     const msgsB = await h.executor(pcB)
-    const a = await h.profile({ name: uniq('台式机配置'), agent: 'claude', machine: pcA, cwd: 'D:\\Work2\\MultiA' })
-    const b = await h.profile({ name: uniq('Mac 配置'), agent: 'claude', machine: pcB, cwd: '/Users/wenbo/MultiA' })
-    const p = await h.project({ name: uniq('多设备项目'), profileIds: [a.id, b.id] })
-    assert.equal(p.profileId, a.id, '第一套当兜底')
-    assert.deepEqual([...p.profileIds].sort((x: number, y: number) => x - y), [a.id, b.id].sort((x, y) => x - y))
+    const p = await h.project({
+      name: uniq('多设备项目'),
+      dirs: [
+        { machine: pcA, cwd: 'D:\\Work2\\MultiA' },
+        { machine: pcB, cwd: '/Users/wenbo/MultiA' },
+      ],
+    })
+    assert.deepEqual(p.dirs.map((d: any) => d.machine), [pcA, pcB])
 
-    const t = await h.task({ projectId: p.id })
-    // 挂多套时不把任务钉死在某套配置上，否则换台电脑派活就会带着另一台的目录
-    assert.equal(t.profileId, null)
+    const t = await h.task({ projectId: p.id, agent: 'claude' })
     assert.equal(t.cwd, null)
 
-    // 指到 B 电脑派活：用 B 那套的目录，不是第一套的
+    // 指到 B 电脑派活：用 B 那条的目录，不是第一条的
     const started = await h.call('POST', `/tasks/${t.id}/start`, { machine: pcB })
     assert.equal(started.status, 200, JSON.stringify(started.body))
     const run = await waitFor(() => msgsB.find(m => m.type === 'run.start' && m.runId === started.body.runId))
     assert.equal(run.cwd, '/Users/wenbo/MultiA')
 
-    // 已经填了目录（比如在 A 电脑上派过）就不再被配置覆盖
-    const pinned = await h.task({ projectId: p.id, machine: pcA, cwd: 'D:\\Work2\\SelfPick' })
+    // 已经填了目录（比如在 A 电脑上派过）就不再被项目目录覆盖
+    const pinned = await h.task({ projectId: p.id, agent: 'claude', machine: pcA, cwd: 'D:\\Work2\\SelfPick' })
     assert.equal(pinned.cwd, 'D:\\Work2\\SelfPick')
   })
 
-  it('只能挂自己的配置', async () => {
-    const mine = await h.project({ name: uniq('我的多设备项目') })
-    const other = await makeUser(h.pool)
-    const made = await h.call('POST', '/profiles', { name: uniq('别人的配置'), agent: 'claude' }, other.token)
-    assert.equal(made.status, 200, JSON.stringify(made.body))
-    const bad = await h.call('PATCH', `/projects/${mine.id}`, { profileIds: [made.body.profile.id] })
-    assert.equal(bad.status, 404)
-    // 失败后原来的挂载不变
-    assert.deepEqual((await h.call('GET', `/projects/${mine.id}`)).body.project.profileIds, [])
+  it('目录列表校验：同一台电脑只能有一条、目录必填', async () => {
+    const mine = await h.project({ name: uniq('目录校验项目') })
+    const dup = await h.call('PATCH', `/projects/${mine.id}`, {
+      dirs: [{ machine: 'pc-x', cwd: 'D:\\A' }, { machine: 'pc-x', cwd: 'D:\\B' }],
+    })
+    assert.equal(dup.status, 400)
+    const noCwd = await h.call('PATCH', `/projects/${mine.id}`, { dirs: [{ machine: 'pc-x', cwd: '' }] })
+    assert.equal(noCwd.status, 400)
+    // 不绑机器的目录也只允许一条
+    const dupAny = await h.call('PATCH', `/projects/${mine.id}`, {
+      dirs: [{ machine: null, cwd: 'D:\\A' }, { machine: null, cwd: 'D:\\B' }],
+    })
+    assert.equal(dupAny.status, 400)
+    const ok = await h.call('PATCH', `/projects/${mine.id}`, {
+      dirs: [{ machine: null, cwd: 'D:\\通用' }, { machine: 'pc-x', cwd: 'D:\\A' }],
+    })
+    assert.equal(ok.status, 200)
+    assert.equal(ok.body.project.dirs.length, 2)
   })
 
   it('不能引用别人的项目', async () => {

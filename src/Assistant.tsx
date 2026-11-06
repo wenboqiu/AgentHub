@@ -5,7 +5,6 @@ import type {
   AssistantDraft,
   AssistantDraftFields,
   AssistantState,
-  Profile,
   Task,
 } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
@@ -22,7 +21,7 @@ const EXAMPLES = [
   "服务端接口和迁移交给它，用 Claude，模型 sonnet",
 ];
 
-type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string; profileId: string };
+type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string };
 
 const toForm = (d: AssistantDraftFields | null): Form => ({
   name: d?.name ?? "",
@@ -31,7 +30,6 @@ const toForm = (d: AssistantDraftFields | null): Form => ({
   model: d?.model ?? "",
   context: d?.context ?? "",
   tools: (d?.tools ?? []).join("、"),
-  profileId: d?.profileId === null || d?.profileId === undefined ? "" : String(d.profileId),
 });
 
 const toFields = (f: Form): Partial<AssistantDraftFields> => ({
@@ -41,7 +39,6 @@ const toFields = (f: Form): Partial<AssistantDraftFields> => ({
   model: f.model.trim() || null,
   context: f.context.trim(),
   tools: f.tools.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean),
-  profileId: f.profileId ? Number(f.profileId) : null,
 });
 
 const clock = (iso: string) => {
@@ -53,7 +50,6 @@ const clock = (iso: string) => {
 function DraftCard({
   api,
   draft,
-  profiles,
   busy,
   onBusy,
   onCreated,
@@ -61,7 +57,6 @@ function DraftCard({
 }: {
   api: Api;
   draft: AssistantDraft;
-  profiles: Profile[];
   busy: boolean;
   onBusy(v: boolean): void;
   onCreated(): void;
@@ -121,12 +116,6 @@ function DraftCard({
           </select>
         </label>
         <label>模型<ModelPicker key={form.agent} agent={form.agent} value={form.model} disabled={busy} onChange={model => set({ model })} /></label>
-        <label>默认配置
-          <select value={form.profileId} disabled={busy} onChange={e => set({ profileId: e.target.value })}>
-            <option value="">不挂配置</option>
-            {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </label>
         <label>可用工具<input value={form.tools} maxLength={600} disabled={busy} onChange={e => set({ tools: e.target.value })} /></label>
       </div>
       <label>上下文（角色准则）
@@ -146,12 +135,10 @@ function DraftCard({
 
 export default function Assistant({
   api,
-  profiles,
   onCreated,
   onClose,
 }: {
   api: Api;
-  profiles: Profile[];
   onCreated(): void;
   onClose(): void;
 }) {
@@ -314,7 +301,7 @@ export default function Assistant({
                 <div className="assistant-bubble">{m.text}</div>
                 <span className="dim assistant-time">{m.role === "user" ? "你" : AGENT_LABEL[thread?.agent ?? ""] ?? "助手"} · {clock(m.createdAt)}</span>
                 {draft && (
-                  <DraftCard api={api} draft={draft} profiles={profiles} busy={busy}
+                  <DraftCard api={api} draft={draft} busy={busy}
                     onBusy={setBusy} onCreated={onCreated} onError={setErr} />
                 )}
               </div>

@@ -36,17 +36,16 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
     c.note,
   ].filter(Boolean);
 }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
-export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "profileId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | keyof Schedule>>;
-/** 项目配置：一组执行环境 + 默认优先级 + 检查项模板，起个名字复用 */
-export type Profile = { id: number; name: string; agent: Task["agent"]; machine: string | null; cwd: string | null; priority: Task["priority"]; checklist: string[]; tasks: number; createdAt: string; updatedAt: string };
-export type ProfileInput = Partial<Omit<Profile, "id" | "tasks" | "createdAt" | "updatedAt">>;
-/** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文），可再挂一个默认配置 */
-export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; profileId: number | null; tasks: number; createdAt: string; updatedAt: string };
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | keyof Schedule>>;
+/** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */
+export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; createdAt: string; updatedAt: string };
 export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
-/** 项目：一个代码库的身份与背景知识，可挂多套执行配置（每台电脑一套），派活时按机器挑 */
-export type Project = { id: number; name: string; brief: string; profileId: number | null; profileIds: number[]; tasks: number; createdAt: string; updatedAt: string };
+/** 一条目录 = 这个项目在某台电脑上住在哪；machine 为空表示哪台电脑都适用 */
+export type ProjectDir = { machine: string | null; cwd: string };
+/** 项目：一个代码库的身份与背景知识 + 它在各台电脑上的目录，派活时按当前机器自动挑 */
+export type Project = { id: number; name: string; brief: string; dirs: ProjectDir[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
 /** 角色助手：一句话需求交给电脑端的 agent 整理成草稿，人确认后才建角色 */
@@ -58,7 +57,6 @@ export type AssistantDraftFields = {
   model: string | null;
   context: string;
   tools: string[];
-  profileId: number | null;
   /** agent 交代的缺口或假设，只给人看，不落库 */
   note: string;
 };
@@ -91,7 +89,7 @@ export type AssistantState = {
   runError: string;
   online: string[];
   suggestion: { agent: AssistantAgent; machine: string; cwd: string };
-  /** 这台账号在电脑上用过 / 配置里登记的目录，供下拉直接选；machine 为空表示不分机器 */
+  /** 项目里登记过、这台账号在电脑上用过的目录，供下拉直接选；machine 为空表示不分机器 */
   dirs: { machine: string; cwd: string }[];
   roles: number;
 };
@@ -129,8 +127,6 @@ export type Assignee = {
   roleName: string;
   roleTitle: string;
   agent: string;
-  profileId: number | null;
-  profileName: string;
   machine: string;
   cwd: string;
 };
@@ -154,7 +150,6 @@ export type Proposal = {
   priority: Task["priority"];
   roleId: number | null;
   projectId: number | null;
-  profileId: number | null;
   assignee: Assignee;
   evidence: Evidence[];
   note: string;
@@ -165,7 +160,7 @@ export type Proposal = {
   createdAt: string;
   updatedAt: string;
 };
-export type ProposalInput = Partial<Pick<Proposal, "title" | "notes" | "checklist" | "priority" | "roleId" | "projectId" | "profileId">>;
+export type ProposalInput = Partial<Pick<Proposal, "title" | "notes" | "checklist" | "priority" | "roleId" | "projectId">>;
 
 /** 项目经理：全局一个，负责细化意见，可选地把已确认的任务自动派出去 */
 /** 代批策略：会话卡在等授权时，项目经理能自己放行哪些操作 */
@@ -345,10 +340,6 @@ export class Api {
   createTask = async (input: TaskInput & {title: string}) => (await this.call<{task: Task}>("POST", "/tasks", input)).task;
   updateTask = async (id: number, input: TaskInput) => (await this.call<{task: Task}>("PATCH", `/tasks/${id}`, input)).task;
   deleteTask = (id: number) => this.call("DELETE", `/tasks/${id}`);
-  profiles = async () => (await this.call<{ profiles: Profile[] }>("GET", "/profiles")).profiles;
-  createProfile = async (input: ProfileInput & { name: string }) => (await this.call<{ profile: Profile }>("POST", "/profiles", input)).profile;
-  updateProfile = async (id: number, input: ProfileInput) => (await this.call<{ profile: Profile }>("PATCH", `/profiles/${id}`, input)).profile;
-  deleteProfile = (id: number) => this.call("DELETE", `/profiles/${id}`);
   roles = async () => (await this.call<{ roles: Role[] }>("GET", "/roles")).roles;
   /** projectId 传 undefined = 全部；传 null = 只列跨项目的通用经验 */
   memories = async (roleId: number, projectId?: number | null) =>

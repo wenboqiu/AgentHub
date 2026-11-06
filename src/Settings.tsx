@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Api, type Device, type NotifyKind, type NotifySettings } from "./lib/api";
-import Profiles from "./Profiles";
 import Manager from "./Manager";
 import Roles from "./Roles";
 import Projects from "./Projects";
@@ -74,14 +73,13 @@ type Props = {
 };
 
 /** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
-type Page = "root" | "account" | "notify" | "roles" | "projects" | "profiles" | "manager" | "desktop" | "android";
+type Page = "root" | "account" | "notify" | "roles" | "projects" | "manager" | "desktop" | "android";
 
 const PAGE_TITLE: Record<Exclude<Page, "root">, string> = {
   account: "账号与安全",
   notify: "通知规则",
   roles: "角色",
   projects: "项目",
-  profiles: "项目配置",
   manager: "项目经理",
   desktop: "本机执行与采集",
   android: "Android 后台提醒",
@@ -103,8 +101,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   // 账号级通知规则（Fast Path 过滤管线）
   const [ns, setNs] = useState<NotifySettings | null>(null);
   const [nsMsg, setNsMsg] = useState("");
-  // 一级列表上的计数（角色 / 项目 / 配置各自改完后回来会变）
-  const [counts, setCounts] = useState<{ roles: number; projects: number; profiles: number } | null>(null);
+  // 一级列表上的计数（角色 / 项目各自改完后回来会变）
+  const [counts, setCounts] = useState<{ roles: number; projects: number } | null>(null);
 
   // 登录表单
   const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
@@ -166,13 +164,13 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     api.notifySettings().then(setNs).catch(() => {});
   }, [api]);
 
-  // 列表上的条数：回到一级列表时重取，改完角色 / 项目 / 配置能立刻看到
+  // 列表上的条数：回到一级列表时重取，改完角色 / 项目能立刻看到
   useEffect(() => {
     if (!api || page !== "root") return;
     let dead = false;
-    Promise.all([api.roles(), api.projects(), api.profiles()]).then(
-      ([roles, projects, profiles]) => {
-        if (!dead) setCounts({ roles: roles.length, projects: projects.length, profiles: profiles.length });
+    Promise.all([api.roles(), api.projects()]).then(
+      ([roles, projects]) => {
+        if (!dead) setCounts({ roles: roles.length, projects: projects.length });
       },
       () => {},
     );
@@ -410,8 +408,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             <h2>派活</h2>
             <ul className="settings-list">
               <SettingsRow icon="people" title="角色" summary="执行工具、模型与上下文，按项目攒经验" badge={countText(counts?.roles, "个")} onClick={() => setPage("roles")} />
-              <SettingsRow icon="folder" title="项目" summary="项目说明与约定，派活时带给执行端" badge={countText(counts?.projects, "个")} onClick={() => setPage("projects")} />
-              <SettingsRow icon="sliders" title="项目配置" summary="电脑、目录、默认优先级与检查项模板" badge={countText(counts?.profiles, "个")} onClick={() => setPage("profiles")} />
+              <SettingsRow icon="folder" title="项目" summary="项目说明、约定与各台电脑上的目录，派活时带给执行端" badge={countText(counts?.projects, "个")} onClick={() => setPage("projects")} />
               <SettingsRow icon="board" title="项目经理" summary="把处理意见排成任务单，按限额派出确认过的任务" onClick={() => setPage("manager")} />
             </ul>
 
@@ -584,8 +581,6 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
         {page === "roles" && api && <Roles api={api} />}
 
         {page === "projects" && api && <Projects api={api} />}
-
-        {page === "profiles" && api && <Profiles api={api} />}
 
         {page === "manager" && api && <Manager api={api} />}
 

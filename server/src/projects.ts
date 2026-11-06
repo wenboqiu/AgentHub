@@ -1,30 +1,26 @@
 import type pg from 'pg'
 import { TaskError, object, text } from './tasks.ts'
 
-// 项目：一个代码库（或一条业务线）的身份与背景知识。
-// 和「项目配置(profile)」的分工——项目说的是「这是什么、有什么约定」，
-// 配置说的是「在哪台电脑、哪个目录、按什么验收模板做」。项目可以指一套默认配置，
-// 派活时任务没指定配置就用它；但项目本身不存机器和路径，避免两处各写一份。
+// 项目：一个代码库（或一条业务线）的身份与背景知识，加上它在各台电脑上的目录。
+// 目录列表（dirs）直接挂在项目上：一条 = 电脑（可空，空 = 哪台都能用）+ 目录路径。
+// 派活时按这次要去的机器自动挑对应那条，路径不会串设备；agent 归角色管，这里不管。
 //
 // 角色 × 项目 = 员工在某项目上的经验分区（见 memories.ts）。
 
 type DB = Pick<pg.Pool, 'query'>
+/** 项目在某台电脑上的目录；machine 为空 = 不绑机器（任意电脑可用） */
+export type ProjectDir = { machine: string | null; cwd: string }
 export type Project = {
   id: number; name: string; brief: string
-  /** 兜底配置：任务没指定配置、也没有更匹配的机器时用它；等于 profileIds 的第一个 */
-  profileId: number | null
-  /** 项目挂的所有执行配置（每台电脑一套）；派活时按当前机器挑 */
-  profileIds: number[]
+  /** 每台电脑一条目录；派活时按机器挑 */
+  dirs: ProjectDir[]
   tasks: number; createdAt: string; updatedAt: string
 }
-
-/** 派活只看这几个字段，不必把配置整套读出来 */
-export type ProjectProfile = { id: number; name: string; agent: string | null; machine: string | null; cwd: string | null }
 
 const MAX_NAME = 60
 const MAX_BRIEF = 4000
 const MAX_PROJECTS = 50
-const MAX_PROFILES = 10
+const MAX_DIRS = 10
 
 export async function migrateProjects(db: DB) {
   await db.query(`CREATE TABLE IF NOT EXISTS projects (
@@ -32,23 +28,28 @@ export async function migrateProjects(db: DB) {
     user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name text NOT NULL,
     brief text NOT NULL DEFAULT '',
-    profile_id bigint REFERENCES profiles(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(user_id, name),
     UNIQUE(user_id, id))`)
-  // 一个项目可以挂多套执行配置（家里台式机的目录、Mac 上的目录各自一套），
-  // 派活时按当前那台电脑挑，项目本身仍然不存路径。
-  await db.query(`CREATE TABLE IF NOT EXISTS project_profiles (
-    user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    project_id bigint NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    profile_id bigint NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
-    PRIMARY KEY (project_id, profile_id))`)
-  await db.query('CREATE INDEX IF NOT EXISTS idx_project_profiles_profile ON project_profiles(user_id, profile_id)')
-  // 老数据：原来那个单一 profile_id 就是第一套
-  await db.query(`INSERT INTO project_profiles(user_id, project_id, profile_id)
-    SELECT user_id, id, profile_id FROM projects WHERE profile_id IS NOT NULL
-    ON CONFLICT DO NOTHING`)
+  // 目录列表内嵌在项目行里：一条 = 电脑 + 路径，整存整取（编辑时整列替换）
+  await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS dirs jsonb NOT NULL DEFAULT '[]'::jsonb`)
+  // 老数据迁移：目录原来外挂成 profiles（project_profiles 中转），现在收进项目行。
+  // 只在旧表还在的时候搬一次；新库从来没有这两张表，直接跳过。
+  const legacy = (await db.query(
+    `SELECT to_regclass('project_profiles') IS NOT NULL AS pp, to_regclass('profiles') IS NOT NULL AS pr`,
+  )).rows[0] as { pp: boolean; pr: boolean }
+  if (legacy.pp && legacy.pr) {
+    await db.query(`UPDATE projects p SET dirs = sub.js FROM (
+      SELECT pp.project_id, jsonb_agg(jsonb_build_object('machine', pr.machine, 'cwd', pr.cwd) ORDER BY pr.id) js
+      FROM project_profiles pp JOIN profiles pr ON pr.id = pp.profile_id
+      WHERE pr.cwd IS NOT NULL AND pr.cwd <> ''
+      GROUP BY pp.project_id
+    ) sub WHERE p.id = sub.project_id AND p.dirs = '[]'::jsonb`)
+  }
+  await db.query('DROP TABLE IF EXISTS project_profiles CASCADE')
+  await db.query('DROP TABLE IF EXISTS profiles CASCADE')
+  await db.query('ALTER TABLE projects DROP COLUMN IF EXISTS profile_id CASCADE')
   // 任务只记「属于哪个项目」；项目删掉后任务回到未归属，已派活字段不动
   await db.query('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS project_id bigint')
   await db.query(`DO $$ BEGIN
@@ -75,25 +76,25 @@ export async function migrateProjects(db: DB) {
 
 const row = (r: any): Project => ({
   id: Number(r.id), name: r.name, brief: r.brief ?? '',
-  profileId: r.profile_id === null || r.profile_id === undefined ? null : Number(r.profile_id),
-  profileIds: (r.profile_ids ?? []).map((x: unknown) => Number(x)),
+  dirs: dirsOf(r.dirs),
   tasks: Number(r.tasks ?? 0),
   createdAt: r.created_at.toISOString(), updatedAt: r.updated_at.toISOString(),
 })
 
-/** 配置编号数组：去重、丢掉非正整数，顺序保留（第一项当兜底） */
-const numList = (v: unknown): number[] => {
+/** 目录列表 defensively 解析：坏数据当空列表，不让一条脏 jsonb 把项目页打挂 */
+const dirsOf = (v: unknown): ProjectDir[] => {
   if (!Array.isArray(v)) return []
-  const out: number[] = []
+  const out: ProjectDir[] = []
   for (const x of v) {
-    const n = Number(x)
-    if (Number.isSafeInteger(n) && n > 0 && !out.includes(n)) out.push(n)
+    if (!x || typeof x !== 'object' || Array.isArray(x)) continue
+    const o = x as Record<string, unknown>
+    if (typeof o.cwd !== 'string' || !o.cwd) continue
+    out.push({ machine: typeof o.machine === 'string' && o.machine ? o.machine : null, cwd: o.cwd })
   }
   return out
 }
 
-const COLUMNS = `p.*, (SELECT count(*) FROM tasks t WHERE t.user_id=p.user_id AND t.project_id=p.id) tasks,
-  (SELECT coalesce(array_agg(pp.profile_id ORDER BY pp.profile_id), '{}') FROM project_profiles pp WHERE pp.project_id=p.id) profile_ids`
+const COLUMNS = `p.*, (SELECT count(*) FROM tasks t WHERE t.user_id=p.user_id AND t.project_id=p.id) tasks`
 
 export async function listProjects(db: DB, user: number): Promise<Project[]> {
   return (await db.query(`SELECT ${COLUMNS} FROM projects p WHERE p.user_id=$1 ORDER BY p.updated_at DESC,p.id DESC`, [user])).rows.map(row)
@@ -115,21 +116,20 @@ export async function saveProject(db: DB, user: number, raw: unknown, projectId?
   const b = object(raw), out: Record<string, unknown> = {}
   if (projectId === undefined || 'name' in b) out.name = text(b.name, '项目名', MAX_NAME)
   if ('brief' in b) out.brief = text(b.brief ?? '', '项目说明', MAX_BRIEF, true)
-  // 新调用方传 profileIds（可多套）；只传 profileId 的老调用方按一套处理
-  let profileIds: number[] | null = null
-  if ('profileIds' in b) profileIds = numList(b.profileIds)
-  else if ('profileId' in b) {
-    const p = b.profileId === null ? null : Number(b.profileId)
-    profileIds = p !== null && Number.isSafeInteger(p) && p > 0 ? [p] : []
-  }
-  if (profileIds !== null) {
-    if (profileIds.length > MAX_PROFILES) throw new TaskError(`一个项目最多挂 ${MAX_PROFILES} 套配置`)
-    if (profileIds.length) {
-      const found = await db.query('SELECT id FROM profiles WHERE user_id=$1 AND id = ANY($2::bigint[])', [user, profileIds])
-      if (found.rowCount !== profileIds.length) throw new TaskError('配置不存在', 404)
-    }
-    // 第一套当兜底：任务没指定配置、也没有机器能匹配时用它
-    out.profile_id = profileIds[0] ?? null
+  let dirs: ProjectDir[] | null = null
+  if ('dirs' in b) {
+    if (!Array.isArray(b.dirs) || b.dirs.length > MAX_DIRS) throw new TaskError(`目录最多 ${MAX_DIRS} 条`)
+    const seen = new Set<string>()
+    dirs = b.dirs.map(x => {
+      const o = object(x)
+      const machine = ('machine' in o ? o.machine : null) === null || o.machine === '' ? null : text(o.machine, '电脑名', 4000, true) || null
+      const cwd = text(o.cwd, '项目目录', 4000)
+      const key = machine ?? ''
+      if (seen.has(key)) throw new TaskError(machine ? `${machine} 已经有一条目录了` : '不绑机器的目录只能有一条')
+      seen.add(key)
+      return { machine, cwd }
+    })
+    out.dirs = JSON.stringify(dirs)
   }
   if (projectId === undefined) {
     const n = Number((await db.query('SELECT count(*) c FROM projects WHERE user_id=$1', [user])).rows[0]?.c ?? 0)
@@ -147,14 +147,6 @@ export async function saveProject(db: DB, user: number, raw: unknown, projectId?
   }
   if (!r.rows[0]) throw new TaskError('项目不存在', 404)
   const id = Number(r.rows[0].id)
-  if (profileIds !== null) {
-    // 先插后删：中途失败最多多一条，不会先把现有配置删光
-    if (profileIds.length) {
-      await db.query(`INSERT INTO project_profiles(user_id, project_id, profile_id)
-        SELECT $1, $2, unnest($3::bigint[]) ON CONFLICT DO NOTHING`, [user, id, profileIds])
-    }
-    await db.query('DELETE FROM project_profiles WHERE project_id=$1 AND NOT (profile_id = ANY($2::bigint[]))', [id, profileIds])
-  }
   return getProject(db, user, id)
 }
 
@@ -165,34 +157,23 @@ export async function deleteProject(db: DB, user: number, projectId: number): Pr
   return affected
 }
 
-/** 项目挂的所有执行配置，按编号排序（UI 另从 /profiles 拿全量，这里服务派活） */
-export async function projectProfiles(db: DB, user: number, projectId: number): Promise<ProjectProfile[]> {
-  const r = await db.query(
-    `SELECT p.id, p.name, p.agent, p.machine, p.cwd FROM project_profiles pp
-     JOIN profiles p ON p.user_id = pp.user_id AND p.id = pp.profile_id
-     WHERE pp.user_id = $1 AND pp.project_id = $2 ORDER BY p.id`,
-    [user, projectId],
-  )
-  return r.rows.map(x => ({ id: Number(x.id), name: x.name, agent: x.agent, machine: x.machine, cwd: x.cwd }))
-}
-
 /**
- * 派活时给项目挑一套配置：
- * ① 和这次要去的那台电脑同名 → 目录肯定对；② 没绑电脑的配置（哪台都能用）；
- * ③ 任意一套「电脑在线」的；④ 都没有就用第一套，让后面的报错去说明原因。
+ * 派活时给项目挑一条目录：
+ * ① 和这次要去的那台电脑同名 → 目录肯定对；② 不绑机器的（哪台都能用）；
+ * ③ 任意一条「电脑在线」的；④ 都没有就用第一条，让后面的报错去说明原因。
  */
-export async function pickProjectProfile(
+export async function pickProjectDir(
   db: DB, user: number, projectId: number | null, machine: string, online: string[],
-): Promise<ProjectProfile | null> {
+): Promise<ProjectDir | null> {
   if (projectId === null) return null
-  const list = await projectProfiles(db, user, projectId)
+  const list = (await getProject(db, user, projectId)).dirs
   if (!list.length) return null
   if (machine) {
-    const hit = list.find(p => p.machine === machine)
+    const hit = list.find(d => d.machine === machine)
     if (hit) return hit
   }
-  return list.find(p => !p.machine)
-    ?? list.find(p => p.machine !== null && online.includes(p.machine))
+  return list.find(d => !d.machine)
+    ?? list.find(d => d.machine !== null && online.includes(d.machine))
     ?? list[0]
 }
 

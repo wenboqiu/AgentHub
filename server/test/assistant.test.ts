@@ -94,7 +94,6 @@ describe('角色助手：草稿解析（纯函数，不碰库）', () => {
       model: '',
       context: 'z'.repeat(MAX_DRAFT_CONTEXT + 500),
       tools: ['Read', 'Read', ' Edit ', 42, ''],
-      profileId: '7',
       note: 'n'.repeat(800),
     }))
     assert.equal(draft?.name.length, 60)
@@ -103,19 +102,16 @@ describe('角色助手：草稿解析（纯函数，不碰库）', () => {
     assert.equal(draft?.model, null)
     assert.equal(draft?.context.length, MAX_DRAFT_CONTEXT)
     assert.deepEqual(draft?.tools, ['Read', 'Edit'])
-    assert.equal(draft?.profileId, 7)
     assert.equal(draft?.note.length, 500)
   })
 
-  it('首条消息带契约、防重名清单与配置清单；追问只补一句提醒', () => {
+  it('首条消息带契约与防重名清单；追问只补一句提醒', () => {
     const open = openingMessage({
       request: '要个前端实现',
       roles: [{ name: '评审', title: '只看 diff' }, { name: '无名' }],
-      profiles: [{ id: 3, name: '日常前端' }],
     })
     assert.ok(open.includes(CONTRACT))
     assert.ok(open.includes('评审（只看 diff）') && open.includes('无名'))
-    assert.ok(open.includes('3=日常前端'))
     assert.ok(open.endsWith('【用户需求】要个前端实现'))
     assert.ok(followupMessage('改名成 前端').includes('只回那个 JSON'))
   })
@@ -159,7 +155,7 @@ describe('角色助手：派活出草稿，确认才建角色', () => {
 
     exec.send({
       type: 'run.message', runId, role: 'assistant',
-      text: reply({ name: uniq('前端实现'), title: '负责前端页面与交互', agent: 'codex', model: 'gpt-6.1-sol', context: '动手前先读现有写法，改完跑 tsc', tools: ['Read', 'Edit', 'Bash'], profileId: null, note: '没提验收标准，先按 tsc 通过算' }),
+      text: reply({ name: uniq('前端实现'), title: '负责前端页面与交互', agent: 'codex', model: 'gpt-6.1-sol', context: '动手前先读现有写法，改完跑 tsc', tools: ['Read', 'Edit', 'Bash'], note: '没提验收标准，先按 tsc 通过算' }),
     })
     const withDraft = await waitFor(async () => {
       const s = await h.call('GET', '/assistant')

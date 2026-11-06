@@ -24,7 +24,6 @@ export type Draft = {
   model: string | null
   context: string
   tools: string[]
-  profileId: number | null
   /** agent 自己交代的缺口或假设，不落库，只给人看 */
   note: string
 }
@@ -90,26 +89,23 @@ export async function migrateAssistant(db: DB) {
 export const CONTRACT = `你在 AgentHub 里当「角色顾问」，把用户一句需求整理成一份角色草稿。
 
 只回一个 JSON 对象（可以用 \`\`\`json 包起来），不要写任何解释、寒暄或额外段落。字段：
-{"name":"角色名，不超过 60 字，必填","title":"一句话职责，不超过 120 字","agent":"claude | codex | zcode | null","model":"模型 id，不确定就 null","context":"这个角色的做事准则，不超过 1500 字","tools":["Read","Edit"],"profileId":null,"note":"你还缺什么信息、替用户做了哪些假设"}
+{"name":"角色名，不超过 60 字，必填","title":"一句话职责，不超过 120 字","agent":"claude | codex | zcode | null","model":"模型 id，不确定就 null","context":"这个角色的做事准则，不超过 1500 字","tools":["Read","Edit"],"note":"你还缺什么信息、替用户做了哪些假设"}
 
 规矩：
 - 信息不全也别反问，先给最合理的草稿，缺口写进 note，用户会在界面上改。
 - agent 只能从 claude / codex / zcode 里选；用户没指定就按职责挑一个最合适的。
 - model 写成执行端的模型 id（例如 opus、sonnet、gpt-6.1-sol）；拿不准一律 null，别编。
 - context 写成对这个角色下的命令式约定：做什么、不做什么、改完怎么验证；不要复述用户原话。
-- profileId 只能取「配置清单」里给出的编号，没有合适的就给 null。
 - 不要读写任何文件，不要执行任何命令。
 - 用户确认后才会真正创建角色，你只负责出草稿。`
 
-/** 首条消息：契约 + 已有角色（防重名）+ 配置清单 + 用户原话 */
+/** 首条消息：契约 + 已有角色（防重名）+ 用户原话 */
 export function openingMessage(input: {
   request: string
   roles: { name: string; title?: string }[]
-  profiles: { id: number; name: string }[]
 }): string {
   const head = [CONTRACT]
   if (input.roles.length) head.push(`【已有角色】${input.roles.map(r => (r.title ? `${r.name}（${r.title}）` : r.name)).join('、')}\n不要重名；新角色和它们职责重叠时，note 里提醒一句。`)
-  if (input.profiles.length) head.push(`【配置清单】${input.profiles.map(p => `${p.id}=${p.name}`).join('；')}`)
   head.push(`【用户需求】${input.request}`)
   return head.join('\n\n')
 }
@@ -123,11 +119,6 @@ export function followupMessage(request: string): string {
 
 const clamp = (v: unknown, max: number): string =>
   typeof v === 'string' ? v.replaceAll('\0', '').trim().slice(0, max) : ''
-
-const num = (v: unknown): number | null => {
-  const n = typeof v === 'number' ? v : typeof v === 'string' && /^[1-9]\d*$/.test(v.trim()) ? Number(v) : NaN
-  return Number.isSafeInteger(n) && n > 0 ? n : null
-}
 
 /** 从回复里抠出 JSON：先代码块，再整段花括号，最后逐行找 */
 function candidates(raw: string): string[] {
@@ -167,7 +158,6 @@ export function parseDraft(raw: string): Draft | null {
       model: clamp(obj.model, 120) || null,
       context: clamp(obj.context, MAX_DRAFT_CONTEXT),
       tools,
-      profileId: num(obj.profileId),
       note: clamp(obj.note, 500),
     }
   }
@@ -282,7 +272,7 @@ export async function markDraft(db: DB, user: number, id: number, status: 'creat
 export function draftPatch(raw: unknown): Record<string, unknown> {
   const b = object(raw ?? {})
   const out: Record<string, unknown> = {}
-  for (const key of ['name', 'title', 'agent', 'model', 'context', 'tools', 'profileId'] as const) {
+  for (const key of ['name', 'title', 'agent', 'model', 'context', 'tools'] as const) {
     if (key in b) out[key] = b[key]
   }
   return out

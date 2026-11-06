@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Api, Delivery, Profile, Project, Proposal, ProposalInput, Role, Task } from "./lib/api";
+import type { Api, Delivery, Project, Proposal, ProposalInput, Role, Task } from "./lib/api";
 import { constraintsSummary } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import { planDelivery } from "./lib/delivery";
@@ -59,15 +59,7 @@ export default function ProposalCard({
   const [form, setForm] = useState<Form>(() => toForm(proposal));
   const [done, setDone] = useState<null | { kind: "created"; text: string } | { kind: "discarded" }>(null);
   const [refining, setRefining] = useState(false);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
   const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
-
-  // 配置用来把「执行人」落到具体哪台电脑、哪个目录；卡片里自己拉一次，不往上层传
-  useEffect(() => {
-    let gone = false;
-    api.profiles().then(v => { if (!gone) setProfiles(v); }).catch(() => {});
-    return () => { gone = true; };
-  }, [api]);
 
   // 重写结果从 WS 推回来（origin 变 agent）：把「正在看」收掉，表单换成新的
   useEffect(() => {
@@ -90,12 +82,11 @@ export default function ProposalCard({
   const project = projects.find(p => String(p.id) === form.projectId);
   // 换了执行人之后，原来那套机器/目录就不再适用，不能再沿用服务端算好的值
   const sameRole = String(proposal.assignee.roleId ?? "") === form.roleId;
-  // 执行人的「地方」：角色的默认配置 > 项目的兜底配置 > 服务端已经算好的那套
-  const pid = role?.profileId ?? project?.profileId ?? (sameRole ? proposal.assignee.profileId : null);
-  const profile = profiles.find(p => p.id === pid);
-  const agent = role?.agent || profile?.agent || (sameRole ? proposal.assignee.agent : "");
-  const machine = profile?.machine ?? (sameRole ? proposal.assignee.machine : "");
-  const cwd = profile?.cwd ?? (sameRole ? proposal.assignee.cwd : "");
+  // 执行人的「地方」：项目的目录列表（按电脑匹配的优先，其次不绑机器的）> 服务端已经算好的那套
+  const dir = (project?.dirs ?? []).find(d => d.machine) ?? (project?.dirs ?? [])[0] ?? null;
+  const agent = role?.agent || (sameRole ? proposal.assignee.agent : "");
+  const machine = dir?.machine ?? (sameRole ? proposal.assignee.machine : "");
+  const cwd = dir?.cwd ?? (sameRole ? proposal.assignee.cwd : "");
   // 去向按「现在选的执行人」预览：换人 / 换机器之后能不能续，当场就能看出来
   const plan = planDelivery(form.delivery, proposal.fork, { agent, machine, cwd });
 
@@ -148,7 +139,6 @@ export default function ProposalCard({
         </div>
         <p className="dim proposal-place">
           {[agent ? AGENT_LABEL[agent] ?? agent : "执行工具未定", machine || "电脑待定", cwd || "目录待定"].join(" · ")}
-          {profile ? `（配置：${profile.name}）` : ""}
         </p>
       </div>
 

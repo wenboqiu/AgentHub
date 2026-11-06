@@ -7,7 +7,7 @@ type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: 'fork' | 'fresh'; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; profileId: number | null; roleId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null }
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: 'fork' | 'fresh'; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -31,7 +31,7 @@ export function id(raw: unknown): number {
 const iso = (v: Date) => v.toISOString()
 const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
 const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority, doneAt: r.done_at ? iso(r.done_at) : null })
-const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], constraints: normalizeConstraints(r.constraints), startMode: r.start_mode === 'fork' ? 'fork' : 'fresh', forkFrom: r.fork_from ?? null, goalId: r.goal_id === null ? null : Number(r.goal_id), projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id), profileId: r.profile_id === null || r.profile_id === undefined ? null : Number(r.profile_id), roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null, queuedAt: r.queued_at ? iso(r.queued_at) : null })
+const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], constraints: normalizeConstraints(r.constraints), startMode: r.start_mode === 'fork' ? 'fork' : 'fresh', forkFrom: r.fork_from ?? null, goalId: r.goal_id === null ? null : Number(r.goal_id), projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id), roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null, queuedAt: r.queued_at ? iso(r.queued_at) : null })
 // 排队态由 task_dispatch_queue 推导（任务被删时队列行随 FK 一起走）
 const TASK_COLUMNS = `t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids,
       (SELECT min(r.created_at) FROM runs r WHERE r.user_id=t.user_id AND r.task_id=t.id AND r.status IN ('queued','running')) timer_since,
@@ -51,6 +51,8 @@ export async function migrateTasks(db: DB) {
     agent text CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode')), machine text, cwd text,
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), done_at timestamptz,
     UNIQUE(user_id,id))`)
+  // profiles 实体已废弃（执行目录收进项目）：任务不再挂配置，列连带外键一起清掉（必须在建表之后）
+  await db.query('ALTER TABLE tasks DROP COLUMN IF EXISTS profile_id CASCADE')
   await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low'))`)
   // 执行工具从 claude/codex 扩到 doubao/workbuddy/zcode（后三者只做状态监听）：老库里的列级 CHECK 要换掉
   await db.query(`DO $$
@@ -170,12 +172,6 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
       out.agent = b.agent || null
     }
     for (const key of ['machine','cwd']) if (key in b) out[key] = b[key] === null ? null : text(b[key], key === 'cwd' ? '项目目录' : '电脑名', 4000, true) || null
-    if ('profileId' in b) {
-      const p = b.profileId === null ? null : id(b.profileId)
-      // 直接查表而不是引入 profiles.ts：两个模块互相依赖会成环
-      if (p !== null && !(await db.query('SELECT id FROM profiles WHERE user_id=$1 AND id=$2', [user,p])).rowCount) throw new TaskError('配置不存在', 404)
-      out.profile_id = p
-    }
     if ('roleId' in b) {
       const r = b.roleId === null ? null : id(b.roleId)
       if (r !== null && !(await db.query('SELECT id FROM roles WHERE user_id=$1 AND id=$2', [user,r])).rowCount) throw new TaskError('角色不存在', 404)

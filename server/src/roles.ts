@@ -1,17 +1,16 @@
 import type pg from 'pg'
 import { TaskError, object, text, type Task } from './tasks.ts'
-import { applyProfile, findProfile, type Agent, type Profile } from './profiles.ts'
+import type { Agent } from './db.ts'
 
 // 角色：把一个「谁来做、用什么模型、按什么准则做」存成名字。
-// 和项目配置的分工——角色管人（执行工具 / 模型 / 上下文），配置管地方（电脑 / 目录 / 优先级 / 验收模板）；
-// 角色可以再挂一个默认配置，选角色就把那套地方也带出来。
+// 执行目录不归角色管——那是项目的事（项目上按电脑存目录，派活时按机器挑）。
 // 注意上下文是「执行端真正收到的系统提示」，不是提醒文案：Claude 走 append-system-prompt，
 // Codex 没有等价钩子，由执行器把上下文放在首条消息前面。
 
 type DB = Pick<pg.Pool, 'query'>
 export type Role = {
   id: number; name: string; title: string; agent: Agent | null; model: string | null; context: string
-  tools: string[]; profileId: number | null; tasks: number; createdAt: string; updatedAt: string
+  tools: string[]; tasks: number; createdAt: string; updatedAt: string
 }
 
 const AGENTS: Agent[] = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode']
@@ -31,11 +30,12 @@ export async function migrateRoles(db: DB) {
     model text,
     context text NOT NULL DEFAULT '',
     tools jsonb NOT NULL DEFAULT '[]'::jsonb,
-    profile_id bigint REFERENCES profiles(id) ON DELETE SET NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE(user_id, name),
     UNIQUE(user_id, id))`)
+  // profiles 实体已废弃：角色的「默认配置」随之取消，列连带外键一起清掉（必须在建表之后）
+  await db.query('ALTER TABLE roles DROP COLUMN IF EXISTS profile_id CASCADE')
   // 执行工具扩到 zcode：老库里的列级 CHECK 要换掉
   await db.query(`DO $$
   DECLARE def text;
@@ -67,7 +67,7 @@ const row = (r: any): Role => ({
   id: Number(r.id), name: r.name, title: r.title ?? '',
   agent: r.agent, model: r.model, context: r.context ?? '',
   tools: Array.isArray(r.tools) ? r.tools.filter((t: unknown): t is string => typeof t === 'string') : [],
-  profileId: r.profile_id === null ? null : Number(r.profile_id), tasks: Number(r.tasks ?? 0),
+  tasks: Number(r.tasks ?? 0),
   createdAt: r.created_at.toISOString(), updatedAt: r.updated_at.toISOString(),
 })
 
@@ -109,11 +109,6 @@ export async function saveRole(db: DB, user: number, raw: unknown, roleId?: numb
       return name
     }))
   }
-  if ('profileId' in b) {
-    const p = b.profileId === null ? null : Number(b.profileId)
-    if (p !== null && !(await db.query('SELECT id FROM profiles WHERE user_id=$1 AND id=$2', [user, p])).rowCount) throw new TaskError('配置不存在', 404)
-    out.profile_id = p
-  }
   if (roleId === undefined) {
     const n = Number((await db.query('SELECT count(*) c FROM roles WHERE user_id=$1', [user])).rows[0]?.c ?? 0)
     if (n >= MAX_ROLES) throw new TaskError(`角色最多 ${MAX_ROLES} 个`)
@@ -140,16 +135,12 @@ export async function deleteRole(db: DB, user: number, roleId: number): Promise<
 }
 
 /**
- * 选角色后套到任务上：只补空着的执行工具，已选的不覆盖；
- * 角色挂了默认配置就一并套用（同样是只补空字段、模板并入清单）。
+ * 选角色后套到任务上：只补空着的执行工具，已选的不覆盖。
+ * 目录不在这里补——那是派发时按项目目录按机器挑的事。
  */
 export async function applyRole(db: DB, user: number, task: Task, role: Role): Promise<Partial<Task> & Record<string, unknown>> {
   const patch: Record<string, unknown> = { roleId: role.id }
   if (!task.agent && role.agent) patch.agent = role.agent
-  if (role.profileId !== null) {
-    const profile: Profile | null = await findProfile(db, user, role.profileId)
-    if (profile) Object.assign(patch, await applyProfile(db, user, { ...task, ...patch } as Task, profile))
-  }
   return patch
 }
 

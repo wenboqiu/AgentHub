@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Api, Memory, Profile, Project, Role, RoleInput } from "./lib/api";
+import type { Api, Memory, Project, Role, RoleInput } from "./lib/api";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS } from "./lib/agents";
 import Assistant from "./Assistant";
 import ModelPicker from "./ModelPicker";
@@ -9,14 +9,13 @@ const DISPATCHABLE = DISPATCHABLE_AGENTS;
 
 // 角色管理：像员工一样——有职责、执行工具、模型、准则、可用工具声明，
 // 还有一份按项目分区的记忆（手写的须知 + 验收打回自动沉淀的经验）。
-// 和项目配置分工——角色管人，配置管地方（电脑 / 目录 / 优先级 / 验收模板）；
-// 角色可以挂一个默认配置，选角色时连地方一起带出来。
+// 角色只管「人」；「在哪台电脑、哪个目录」是项目的事（项目里的目录列表，按当前电脑自动挑）。
 
-type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string; profileId: string };
-const BLANK: Form = { name: "", title: "", agent: "claude", model: "", context: "", tools: "", profileId: "" };
+type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string };
+const BLANK: Form = { name: "", title: "", agent: "claude", model: "", context: "", tools: "" };
 const toForm = (r: Role): Form => ({
   name: r.name, title: r.title, agent: r.agent ?? "", model: r.model ?? "", context: r.context,
-  tools: r.tools.join("、"), profileId: r.profileId === null ? "" : String(r.profileId),
+  tools: r.tools.join("、"),
 });
 const toInput = (f: Form): RoleInput => ({
   name: f.name.trim(),
@@ -26,10 +25,9 @@ const toInput = (f: Form): RoleInput => ({
   context: f.context.trim(),
   // 逗号/顿号/空格都能分隔，方便从文档里直接粘
   tools: f.tools.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean),
-  profileId: f.profileId ? Number(f.profileId) : null,
 });
 
-function Fields({ form, busy, profiles, onChange }: { form: Form; busy: boolean; profiles: Profile[]; onChange(patch: Partial<Form>): void }) {
+function Fields({ form, busy, onChange }: { form: Form; busy: boolean; onChange(patch: Partial<Form>): void }) {
   return (
     <>
       <div className="form-grid">
@@ -37,7 +35,6 @@ function Fields({ form, busy, profiles, onChange }: { form: Form; busy: boolean;
         <label>职责<input value={form.title} maxLength={120} disabled={busy} placeholder="例如 负责服务端接口与迁移" onChange={e => onChange({ title: e.target.value })} /></label>
         <label>执行工具<select value={form.agent} disabled={busy} onChange={e => onChange({ agent: e.target.value, model: "" })}><option value="">未指定</option>{DISPATCHABLE.map(key => <option key={key} value={key}>{AGENT_LABEL[key]}</option>)}</select></label>
         <label>模型<ModelPicker key={form.agent} agent={form.agent} value={form.model} disabled={busy} onChange={model => onChange({ model })} /></label>
-        <label>默认配置<select value={form.profileId} disabled={busy} onChange={e => onChange({ profileId: e.target.value })}><option value="">不挂配置</option>{profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
         <label>可用工具<input value={form.tools} maxLength={600} disabled={busy} placeholder="例如 Read、Edit、Bash" onChange={e => onChange({ tools: e.target.value })} /></label>
       </div>
       <label>上下文（角色准则，最多 4000 字）
@@ -106,7 +103,6 @@ function Memories({ api, roleId, projects, onError }: { api: Api; roleId: number
 
 export default function Roles({ api }: { api: Api }) {
   const [list, setList] = useState<Role[] | null>(null);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [forms, setForms] = useState<Record<string, Form>>({});
   const [adding, setAdding] = useState(false), [draft, setDraft] = useState<Form>(BLANK);
@@ -120,7 +116,6 @@ export default function Roles({ api }: { api: Api }) {
       (rs) => { setList(rs); setForms(Object.fromEntries(rs.map((r) => [String(r.id), toForm(r)]))); },
       () => setList([]),
     );
-    api.profiles().then(setProfiles, () => setProfiles([]));
     api.projects().then(setProjects, () => setProjects([]));
   }, [api]);
   useEffect(() => { load(); }, [load]);
@@ -132,8 +127,6 @@ export default function Roles({ api }: { api: Api }) {
     finally { setBusy(false); }
   };
 
-  const profileName = (id: number | null) => (id === null ? "" : profiles.find(p => p.id === id)?.name ?? "");
-
   return (
     <section className="box">
       <div className="box-head">
@@ -143,9 +136,9 @@ export default function Roles({ api }: { api: Api }) {
         </button>
       </div>
       <p className="hint">
-        把「谁来干、什么职责、用什么模型、按什么准则、记得什么」存成一个名字——像一名员工。建任务或派活时选角色，执行工具就定了，模型、准则、项目背景和这个项目的经验一起下发给电脑端；挂上默认配置还能把电脑、目录、验收模板一起带出来。
+        把「谁来干、什么职责、用什么模型、按什么准则、记得什么」存成一个名字——像一名员工。建任务或派活时选角色，执行工具就定了，模型、准则、项目背景和这个项目的经验一起下发给电脑端；在哪个目录干活由选中的项目按当前电脑自动挑。
       </p>
-      {assist && <Assistant api={api} profiles={profiles} onCreated={load} onClose={() => setAssist(false)} />}
+      {assist && <Assistant api={api} onCreated={load} onClose={() => setAssist(false)} />}
       {list === null ? (
         <p className="hint">加载中…</p>
       ) : (
@@ -164,7 +157,6 @@ export default function Roles({ api }: { api: Api }) {
                   <span className="dim role-title">{r.title || "职责未写"}</span>
                   <span className="role-meta">
                     {r.model && <code>{r.model}</code>}
-                    {r.profileId !== null && <span>配置 {profileName(r.profileId) || r.profileId}</span>}
                     <span>{r.tasks} 个任务</span>
                   </span>
                   {dirty && <span className="badge">未保存</span>}
@@ -172,7 +164,7 @@ export default function Roles({ api }: { api: Api }) {
                 </button>
                 {expanded && (
                   <>
-                    <Fields form={form} busy={busy} profiles={profiles} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
+                    <Fields form={form} busy={busy} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
                     <div className="btns">
                       <button className="primary" disabled={busy || !dirty} onClick={() => void run(() => api.updateRole(r.id, toInput(form)), "角色已保存")}>保存</button>
                       <button className="ghost" disabled={busy} onClick={() => void run(() => api.deleteRole(r.id), "角色已删除")}>删除</button>
@@ -189,7 +181,7 @@ export default function Roles({ api }: { api: Api }) {
           {adding ? (
             <div className="profile-card">
               <div className="profile-head"><strong>新建角色</strong></div>
-              <Fields form={draft} busy={busy} profiles={profiles} onChange={(patch) => setDraft((f) => ({ ...f, ...patch }))} />
+              <Fields form={draft} busy={busy} onChange={(patch) => setDraft((f) => ({ ...f, ...patch }))} />
               <div className="btns">
                 <button className="primary" disabled={busy || !draft.name.trim()} onClick={() => void run(async () => { await api.createRole(toInput(draft) as RoleInput & { name: string }); setDraft(BLANK); setAdding(false); }, "角色已创建")}>创建</button>
                 <button className="ghost" onClick={() => { setAdding(false); setDraft(BLANK); }}>取消</button>

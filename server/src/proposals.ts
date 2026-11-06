@@ -3,6 +3,7 @@ import { listMessages, type Session } from './db.ts'
 import { TaskError, type Task } from './tasks.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
 import { NO_CONSTRAINTS, normalizeConstraints, hasConstraints, boundaryLine, type TaskConstraints } from './referee.ts'
+import type { ProjectDir } from './projects.ts'
 
 // 处理意见（Proposal）：一个会话跑完后，先替人把「接下来该做什么」想好，放在会话上等人确认。
 //
@@ -26,14 +27,12 @@ export type Delivery = 'fork' | 'fresh'
 export type ProposalStatus = 'pending' | 'accepted' | 'discarded'
 export type Priority = 'high' | 'medium' | 'low'
 
-/** 项目经理安排好的执行人：角色是人、配置是地方（机器 + 目录 + 执行工具） */
+/** 项目经理安排好的执行人：角色是人、目录是地方（机器 + 目录来自项目的目录列表） */
 export type Assignee = {
   roleId: number | null
   roleName: string
   roleTitle: string
   agent: string
-  profileId: number | null
-  profileName: string
   machine: string
   cwd: string
 }
@@ -75,8 +74,7 @@ export type Proposal = {
   priority: Priority
   roleId: number | null
   projectId: number | null
-  profileId: number | null
-  /** 读出来时按 role_id / profile_id 展开成可展示的执行人（含机器与目录） */
+  /** 读出来时按 role_id / project_id 展开成可展示的执行人（含机器与目录） */
   assignee: Assignee
   evidence: Evidence[]
   /** 生成方的补充说明（假设、缺口），不落进任务 */
@@ -105,8 +103,6 @@ export type ProposalDraft = {
   priority: Priority
   roleId: number | null
   projectId: number | null
-  /** 执行人挂的配置；没给就按角色/项目兜底 */
-  profileId: number | null
   note: string
 }
 
@@ -121,7 +117,7 @@ const defaultDelivery = (kind: ProposalKind): Delivery => (kind === 'followup' ?
 export const PROPOSAL_TITLE = '意见细化：'
 
 const EMPTY_ASSIGNEE: Assignee = {
-  roleId: null, roleName: '', roleTitle: '', agent: '', profileId: null, profileName: '', machine: '', cwd: '',
+  roleId: null, roleName: '', roleTitle: '', agent: '', machine: '', cwd: '',
 }
 
 /**
@@ -193,7 +189,6 @@ export async function migrateProposals(db: DB) {
     priority text NOT NULL DEFAULT 'medium' CHECK (priority IN ('high','medium','low')),
     role_id bigint,
     project_id bigint,
-    profile_id bigint,
     evidence jsonb NOT NULL DEFAULT '[]'::jsonb,
     note text NOT NULL DEFAULT '',
     origin text NOT NULL DEFAULT 'heuristic' CHECK (origin IN ('heuristic','agent')),
@@ -204,8 +199,8 @@ export async function migrateProposals(db: DB) {
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (user_id, session_id, event_at))`)
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS refine_run_id text')
-  // 老库补列：执行人挂的配置（新库建表时已有）
-  await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS profile_id bigint')
+  // 老库清理：执行人挂的配置已废弃（目录收进项目），列直接删掉
+  await db.query('ALTER TABLE session_proposals DROP COLUMN IF EXISTS profile_id')
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'fresh'`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_pending ON session_proposals(user_id,status,created_at DESC)')
@@ -230,7 +225,6 @@ const row = (r: any): Proposal => ({
   priority: r.priority ?? 'medium',
   roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id),
   projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id),
-  profileId: r.profile_id === null || r.profile_id === undefined ? null : Number(r.profile_id),
   assignee: EMPTY_ASSIGNEE,
   evidence: Array.isArray(r.evidence) ? r.evidence : [],
   note: r.note ?? '',
@@ -245,50 +239,51 @@ const row = (r: any): Proposal => ({
 
 // ---------- 定执行人：项目经理要给出一张能直接开工的任务单 ----------
 
-export type RoleLite = { id: number; name: string; title: string; agent: string; profileId: number | null }
-export type ProfileLite = { id: number; name: string; agent: string; machine: string; cwd: string }
+export type RoleLite = { id: number; name: string; title: string; agent: string }
 
 export type AssigneeCtx = {
   roles: Map<number, RoleLite>
-  profiles: Map<number, ProfileLite>
-  /** 项目 → 兜底配置 */
-  projectProfiles: Map<number, number>
+  /** 项目 → 它在各台电脑上的目录列表 */
+  projectDirs: Map<number, ProjectDir[]>
 }
 
-/** 一次把角色、配置、项目的兜底配置读齐，批量展开时不做 N+1 */
+/** 一次把角色、项目的目录读齐，批量展开时不做 N+1 */
 async function assigneeCtx(db: DB, user: number): Promise<AssigneeCtx> {
-  const [roles, profiles, projects] = await Promise.all([
-    db.query('SELECT id,name,title,agent,profile_id FROM roles WHERE user_id=$1', [user]),
-    db.query('SELECT id,name,agent,machine,cwd FROM profiles WHERE user_id=$1', [user]),
-    db.query('SELECT id,profile_id FROM projects WHERE user_id=$1 AND profile_id IS NOT NULL', [user]),
+  const [roles, projects] = await Promise.all([
+    db.query('SELECT id,name,title,agent FROM roles WHERE user_id=$1', [user]),
+    db.query('SELECT id,dirs FROM projects WHERE user_id=$1', [user]),
   ])
   return {
     roles: new Map(roles.rows.map((r: any) => [Number(r.id), {
       id: Number(r.id), name: r.name ?? '', title: r.title ?? '', agent: r.agent ?? '',
-      profileId: r.profile_id === null || r.profile_id === undefined ? null : Number(r.profile_id),
     }])),
-    profiles: new Map(profiles.rows.map((r: any) => [Number(r.id), {
-      id: Number(r.id), name: r.name ?? '', agent: r.agent ?? '', machine: r.machine ?? '', cwd: r.cwd ?? '',
-    }])),
-    projectProfiles: new Map(projects.rows.map((r: any) => [Number(r.id), Number(r.profile_id)])),
+    projectDirs: new Map(projects.rows.map((r: any) => [Number(r.id), Array.isArray(r.dirs) ? r.dirs as ProjectDir[] : []])),
   }
 }
 
-/** 角色 + 配置 + 项目兜底，合成一份能显示、也能直接建任务的人选 */
-export function assigneeOf(ctx: AssigneeCtx, roleId: number | null, profileId: number | null, projectId: number | null): Assignee {
+/** 角色 + 项目目录（按来源会话的机器挑），合成一份能显示、也能直接建任务的人选 */
+export function assigneeOf(ctx: AssigneeCtx, roleId: number | null, projectId: number | null, machineHint = ''): Assignee {
   const role = roleId === null ? null : ctx.roles.get(roleId) ?? null
-  const pid = profileId ?? role?.profileId ?? (projectId === null ? null : ctx.projectProfiles.get(projectId) ?? null)
-  const profile = pid === null ? null : ctx.profiles.get(pid) ?? null
+  const dirs = projectId === null ? [] : ctx.projectDirs.get(projectId) ?? []
+  const dir = pickDir(dirs, machineHint)
   return {
     roleId: role?.id ?? null,
     roleName: role?.name ?? '',
     roleTitle: role?.title ?? '',
-    agent: role?.agent || profile?.agent || '',
-    profileId: profile?.id ?? null,
-    profileName: profile?.name ?? '',
-    machine: profile?.machine ?? '',
-    cwd: profile?.cwd ?? '',
+    agent: role?.agent || '',
+    machine: dir?.machine ?? '',
+    cwd: dir?.cwd ?? '',
   }
+}
+
+/** 挑目录：来源会话那台电脑的 → 不绑机器的 → 第一条 */
+function pickDir(dirs: ProjectDir[], machine: string): ProjectDir | null {
+  if (!dirs.length) return null
+  if (machine) {
+    const hit = dirs.find(d => d.machine === machine)
+    if (hit) return hit
+  }
+  return dirs.find(d => !d.machine) ?? dirs[0]
 }
 
 /**
@@ -300,11 +295,10 @@ export function assigneeOf(ctx: AssigneeCtx, roleId: number | null, profileId: n
  */
 export async function pickAssignee(db: DB, user: number, input: {
   taskRoleId: number | null
-  taskProfileId: number | null
   projectId: number | null
   managerRoleId: number | null
-}): Promise<{ roleId: number | null; profileId: number | null; reason: string }> {
-  const keep = (roleId: number, reason: string) => ({ roleId, profileId: input.taskProfileId, reason })
+}): Promise<{ roleId: number | null; reason: string }> {
+  const keep = (roleId: number, reason: string) => ({ roleId, reason })
   if (input.taskRoleId !== null && input.taskRoleId !== input.managerRoleId) return keep(input.taskRoleId, '沿用原任务的执行人')
   if (input.projectId !== null) {
     const r = await db.query(
@@ -317,7 +311,7 @@ export async function pickAssignee(db: DB, user: number, input: {
   }
   const roles = await db.query('SELECT id FROM roles WHERE user_id=$1 AND id <> COALESCE($2,0) ORDER BY id LIMIT 2', [user, input.managerRoleId])
   if (roles.rowCount === 1) return keep(Number(roles.rows[0].id), '只有一个执行角色，先派给他')
-  return { roleId: input.taskRoleId, profileId: input.taskProfileId, reason: '没有可判断的依据，执行人留空由你选' }
+  return { roleId: input.taskRoleId, reason: '没有可判断的依据，执行人留空由你选' }
 }
 
 /**
@@ -334,7 +328,7 @@ export async function fillAssignees(db: DB, user: number, list: Proposal[]): Pro
   )
   return list.map(p => ({
     ...p,
-    assignee: assigneeOf(ctx, p.roleId, p.profileId, p.projectId),
+    assignee: assigneeOf(ctx, p.roleId, p.projectId, sessions.get(p.sessionId)?.machine ?? ''),
     fork: sessions.get(p.sessionId) ?? NO_FORK,
   }))
 }
@@ -410,7 +404,6 @@ export function heuristicDraft(input: {
       priority: task.priority === 'high' ? 'high' : 'medium',
       roleId: task.roleId,
       projectId: task.projectId,
-      profileId: task.profileId,
       note: '原任务的清单还没走完，标题取的是第一项未完成项，可以改。',
     }
   }
@@ -433,7 +426,6 @@ export function heuristicDraft(input: {
       delivery: 'fork',
       roleId: task?.roleId ?? null,
       projectId: task?.projectId ?? null,
-      profileId: task?.profileId ?? null,
       note: '会话里留下了失败信号，按高优先级处理；确认后建议直接派回同一个角色。',
     }
   }
@@ -454,7 +446,6 @@ export function heuristicDraft(input: {
       delivery: 'fresh',
       roleId: task?.roleId ?? null,
       projectId: task?.projectId ?? null,
-      profileId: task?.profileId ?? null,
       note: '标题是从会话收尾的那句话里摘的，确认前改成可执行的写法更好。',
     }
   }
@@ -475,7 +466,6 @@ export function heuristicDraft(input: {
       delivery: 'fresh',
       roleId: task?.roleId ?? null,
       projectId: task?.projectId ?? null,
-      profileId: task?.profileId ?? null,
       note: '没从回复里找到明确的下一步，标题只是占位；点「让项目经理细化」会更准。',
     }
   }
@@ -511,12 +501,10 @@ export async function generateProposal(pool: pg.Pool, userId: number, session: S
   const manager = (await pool.query('SELECT role_id FROM dispatch_manager WHERE user_id=$1', [userId])).rows[0]
   const pick = await pickAssignee(pool, userId, {
     taskRoleId: draft.roleId,
-    taskProfileId: draft.profileId,
     projectId: draft.projectId,
     managerRoleId: manager?.role_id === null || manager?.role_id === undefined ? null : Number(manager.role_id),
   })
   draft.roleId = pick.roleId
-  draft.profileId = pick.profileId
   draft.note = [draft.note, `执行人：${pick.reason}。`].filter(Boolean).join(' ')
   const saved = await saveProposal(pool, userId, {
     sessionId: session.id,
@@ -546,15 +534,15 @@ async function saveProposal(pool: DB, userId: number, input: {
   const r = await pool.query(
     `INSERT INTO session_proposals(
        user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
-       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,profile_id,evidence,note,origin)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,evidence,note,origin)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
      ON CONFLICT (user_id,session_id,event_at) DO NOTHING RETURNING *`,
     [userId, input.sessionId, input.sessionTitle.slice(0, 200), input.sessionAgent, input.sessionProject.slice(0, 200),
       input.taskId, input.eventAt, input.draft.kind, input.draft.title.slice(0, MAX_TITLE),
       input.draft.notes.slice(0, MAX_NOTES), JSON.stringify(input.draft.checklist),
       JSON.stringify(normalizeConstraints(input.draft.constraints)),
       input.draft.delivery ?? defaultDelivery(input.draft.kind),
-      input.draft.priority, input.draft.roleId, input.draft.projectId, input.draft.profileId,
+      input.draft.priority, input.draft.roleId, input.draft.projectId,
       JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin],
   )
   const inserted = r.rows[0]
@@ -684,7 +672,6 @@ export function parseRefine(raw: string): ParsedRefine | null {
         priority,
         roleId: num(obj.roleId),
         projectId: num(obj.projectId),
-        profileId: null,
         note: clamp(obj.note, 500),
       },
     }
@@ -696,13 +683,12 @@ export function parseRefine(raw: string): ParsedRefine | null {
 export async function replaceDraft(pool: DB, userId: number, id: number, draft: ProposalDraft): Promise<Proposal> {
   const r = await pool.query(
     `UPDATE session_proposals SET kind=$3,title=$4,notes=$5,checklist=$6,priority=$7,
-       role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),delivery=$12,
-       constraints=$13,
-       profile_id=COALESCE($11,(SELECT r.profile_id FROM roles r WHERE r.user_id=$1 AND r.id=$8),profile_id)
+       role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),delivery=$11,
+       constraints=$12
      WHERE user_id=$1 AND id=$2 AND status='pending' RETURNING *`,
     [userId, id, draft.kind, draft.title.slice(0, MAX_TITLE), draft.notes.slice(0, MAX_NOTES),
       JSON.stringify(draft.checklist), draft.priority, draft.roleId, draft.projectId, draft.note.slice(0, 500),
-      draft.profileId, draft.delivery ?? defaultDelivery(draft.kind),
+      draft.delivery ?? defaultDelivery(draft.kind),
       JSON.stringify(draft.constraints ?? NO_CONSTRAINTS)],
   )
   if (!r.rows[0]) throw new TaskError('这条意见已经处理过了', 409)
@@ -765,7 +751,7 @@ export async function markProposal(db: DB, userId: number, id: number, status: '
 export function proposalPatch(raw: unknown): Record<string, unknown> {
   const b = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
   const out: Record<string, unknown> = {}
-  for (const key of ['title', 'notes', 'checklist', 'priority', 'roleId', 'projectId', 'profileId'] as const) {
+  for (const key of ['title', 'notes', 'checklist', 'priority', 'roleId', 'projectId'] as const) {
     if (key in b) out[key] = b[key]
   }
   return out

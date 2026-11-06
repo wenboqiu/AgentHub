@@ -60,9 +60,8 @@ import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
-import { applyProfile, deleteProfile, findProfile, getProfile, listProfiles, saveProfile } from './profiles.ts'
 import { applyRole, deleteRole, findRole, getRole, listRoles, roleModel, saveRole } from './roles.ts'
-import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listProjects, pickProjectProfile, recentBrief, saveProject } from './projects.ts'
+import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listProjects, pickProjectDir, recentBrief, saveProject } from './projects.ts'
 import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
 import {
@@ -371,38 +370,19 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
 
   const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
-  // 选了角色：补齐空着的执行工具，并把角色挂的默认配置一并套上（只补空字段，优先级跟着配置走）
+  // 选了角色：补齐空着的执行工具。执行目录不在这里补——那是派发时按项目目录按机器挑的事
   const roleDefaults = async (userId: number, task: Task, b: Record<string, unknown>): Promise<Task> => {
     if (!('roleId' in b) || task.roleId === null) return task
     const role = await getRole(pool, userId, task.roleId)
     const patch = await applyRole(pool, userId, task, role)
-    if (!('priority' in b) && role.profileId !== null) {
-      const p = await findProfile(pool, userId, role.profileId)
-      if (p && p.priority !== 'medium') patch.priority = p.priority
-    }
     return saveTask(pool, userId, patch, task.id)
   }
-  // 选了项目而任务还没挂配置：项目只挂一套时直接带上；挂多套时留给派活按机器挑，
-  // 免得把任务钉在另一台电脑的目录上
-  const projectDefaults = async (userId: number, task: Task, b: Record<string, unknown>): Promise<Task> => {
-    if (!('projectId' in b) || task.projectId === null || task.profileId !== null) return task
-    const project = await findProject(pool, userId, task.projectId)
-    if (!project || project.profileIds.length !== 1) return task
-    return saveTask(pool, userId, { profileId: project.profileIds[0] }, task.id)
-  }
-  // 建任务的两条入口共用：「新建任务」和「确认处理意见」走的必须是同一套补值链——
-  // 角色决定执行工具并可带出自己的配置，项目补默认配置，配置再补齐字段与检查项模板。
+  // 建任务的两条入口共用：「新建任务」和「确认处理意见」走的是同一套补值——
+  // 角色决定执行工具；目录不落任务，留给派发时按项目 + 当前机器现挑，才不会把任务钉在某台电脑上。
   // 分成两个入口各写一遍的话，从会话生成的任务和手建的任务迟早会长得不一样。
   const createTaskWithDefaults = async (userId: number, body: Record<string, unknown>): Promise<Task> => {
     let task = await saveTask(pool, userId, body)
     task = await roleDefaults(userId, task, body)
-    task = await projectDefaults(userId, task, body)
-    if (task.profileId !== null) {
-      const profile = await getProfile(pool, userId, task.profileId)
-      const patch = await applyProfile(pool, userId, task, profile)
-      if (!('priority' in body) && profile.priority !== 'medium') patch.priority = profile.priority
-      task = await saveTask(pool, userId, patch, task.id)
-    }
     return task
   }
   // 通知过滤管线：提醒广播和快照里的提醒都带 notify（静音的照常入列，只是不弹通知）
@@ -474,19 +454,16 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const role = (await findRole(pool, userId, task.roleId)) ?? (await findRole(pool, userId, fallbackRoleId))
     // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
     const project = await findProject(pool, userId, task.projectId)
-    // 任务关联了配置但字段还空着（比如配置是后改的）：派活时用配置兜底；任务没选配置就用角色挂的那个
-    const explicitProfile = await findProfile(pool, userId, task.profileId)
-      ?? await findProfile(pool, userId, role?.profileId ?? null)
     const online = agentList(userId)
-    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台（配置兜底放在后面）
+    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台
     let machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 4000)
-    // 项目可以挂多套配置（每台电脑一套），按这次要去的机器挑对应那套，目录才不会串设备
-    const profile = explicitProfile ?? await pickProjectProfile(pool, userId, project?.id ?? null, machine, online)
-    if (!machine && profile?.machine) machine = profile.machine
-    const agent = b.agent ?? role?.agent ?? task.agent ?? profile?.agent
+    // 项目里存着各台电脑的目录，按这次要去的机器挑对应那条，目录才不会串设备
+    const dir = await pickProjectDir(pool, userId, project?.id ?? null, machine, online)
+    if (!machine && dir?.machine) machine = dir.machine
+    const agent = b.agent ?? role?.agent ?? task.agent
     if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
-    const cwd = taskText(b.cwd ?? task.cwd ?? profile?.cwd ?? '', '项目目录', 4000)
+    const cwd = taskText(b.cwd ?? task.cwd ?? dir?.cwd ?? '', '项目目录', 4000)
     // 开跑方式：任务上记着「第一次接着哪个会话」（确认任务单时定的），请求里显式给了就用请求的。
     // 能不能续按最终的工具 / 电脑 / 目录现算——角色可能被改过，续不上就退回新会话，不硬来。
     const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : task.startMode
@@ -684,21 +661,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     broadcast(req.userId, { type: 'notify.settings', settings })
     return { settings }
   }))
-  // 项目配置：一组执行环境（agent / 电脑 / 目录）+ 默认优先级 + 检查项模板，起个名字复用
-  app.get('/profiles', async req => serial(async () => ({ profiles: await listProfiles(pool, req.userId) })))
-  app.post('/profiles', async req => serial(async () => ({ profile: await saveProfile(pool, req.userId, req.body) })))
-  app.patch('/profiles/:id', async req => serial(async () => ({
-    profile: await saveProfile(pool, req.userId, req.body, entityId((req.params as {id:string}).id)),
-  })))
-  app.delete('/profiles/:id', async req => serial(async () => {
-    const id = entityId((req.params as {id:string}).id)
-    // 配置删掉后任务上的执行字段留着，只是不再指向任何配置；这些任务要推一次才能看到变化
-    const affected = (await listTasks(pool, req.userId)).filter(t => t.profileId === id).map(t => t.id)
-    await deleteProfile(pool, req.userId, id)
-    for (const taskId of affected) pushTask(req.userId, await getTask(pool, req.userId, taskId))
-    return { ok: true }
-  }))
-  // 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文），可再挂一个默认配置
+  // 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）
   app.get('/roles', async req => serial(async () => ({ roles: await listRoles(pool, req.userId) })))
   app.post('/roles', async req => serial(async () => ({ role: await saveRole(pool, req.userId, req.body) })))
   app.patch('/roles/:id', async req => serial(async () => ({
@@ -740,24 +703,25 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 服务端只额外记住「这个会话属于助手」，好把 agent 回的 JSON 认成草稿。
   app.get('/assistant', async req => serial(async () => {
     const thread = await getThread(pool, req.userId)
-    const [messages, drafts, run, roles, profiles, dirRows] = await Promise.all([
+    const [messages, drafts, run, roles, projectRows, dirRows] = await Promise.all([
       thread?.sessionId ? listMessages(pool, req.userId, thread.sessionId, 100) : Promise.resolve([]),
       thread ? listDrafts(pool, req.userId, thread.id) : Promise.resolve([]),
       thread?.lastRunId ? getRun(pool, req.userId, thread.lastRunId) : Promise.resolve(null),
       listRoles(pool, req.userId),
-      listProfiles(pool, req.userId),
-      // 目录候选：这台账号用过的目录，界面下拉直接选，省得每次都手打路径
+      // 项目上登记的目录（每台电脑一条）：这是用户刻意维护的目录候选
+      pool.query(`SELECT dirs FROM projects WHERE user_id = $1 AND dirs <> '[]'::jsonb`, [req.userId]),
+      // 这台账号在电脑上用过的目录，界面下拉直接选，省得每次都手打路径
       pool.query(`SELECT machine, cwd, max(updated_at) at FROM sessions
                   WHERE user_id = $1 AND cwd <> '' GROUP BY machine, cwd ORDER BY at DESC LIMIT 40`, [req.userId]),
     ])
     const online = agentList(req.userId)
     const seen = new Set<string>()
     const dirs = [
-      // 配置里登记的排在前面：那是用户刻意维护的目录
-      ...profiles.filter(p => p.cwd).map(p => ({ machine: p.machine ?? '', cwd: p.cwd as string })),
+      // 项目里登记的排在前面：那是用户刻意维护的目录
+      ...projectRows.rows.flatMap((r: any) => Array.isArray(r.dirs) ? r.dirs.filter((d: any) => d && typeof d.cwd === 'string' && d.cwd) : []),
       ...dirRows.rows.map(r => ({ machine: String(r.machine ?? ''), cwd: String(r.cwd) })),
     ].filter(d => {
-      const key = `${d.machine}\0${d.cwd}`
+      const key = `${d.machine ?? ''}\0${d.cwd}`
       if (seen.has(key)) return false
       seen.add(key)
       return true
@@ -790,11 +754,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 目录留空 = 用电脑端自己的默认工作目录（<文档>/AgentHub，卸载重装也还在）
     const cwd = typeof b.cwd === 'string' ? b.cwd : ''
     const thread = await startThread(pool, req.userId, { agent: b.agent, machine, cwd })
-    const [roles, profiles] = await Promise.all([listRoles(pool, req.userId), listProfiles(pool, req.userId)])
+    const roles = await listRoles(pool, req.userId)
     const prompt = openingMessage({
       request,
       roles: roles.map(r => ({ name: r.name, title: r.title })),
-      profiles: profiles.map(p => ({ id: p.id, name: p.name })),
     })
     const res = await startSession(
       req.userId, { agent: thread.agent, machine: thread.machine, cwd: thread.cwd },
@@ -834,7 +797,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const id = entityId((req.params as {id:string}).id)
     const draft = await getDraft(pool, req.userId, id)
     if (draft.status !== 'pending') throw new TaskError('这张草稿已经处理过了', 409)
-    const base = draft.draft ?? { name: '', title: '', agent: null, model: null, context: '', tools: [], profileId: null }
+    const base = draft.draft ?? { name: '', title: '', agent: null, model: null, context: '', tools: [] }
     const role = await saveRole(pool, req.userId, { ...base, ...draftPatch(req.body) })
     const updated = await markDraft(pool, req.userId, id, 'created', role.id)
     return { role, draft: updated }
@@ -847,7 +810,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await resetThread(pool, req.userId)
     return { ok: true }
   }))
-  // 项目：一个代码库的身份与背景知识，可指向一套默认执行配置
+  // 项目：一个代码库的身份与背景知识，目录列表（每台电脑一条）也挂在它身上
   app.get('/projects', async req => serial(async () => ({ projects: await listProjects(pool, req.userId) })))
   app.post('/projects', async req => serial(async () => ({ project: await saveProject(pool, req.userId, req.body) })))
   app.patch('/projects/:id', async req => serial(async () => ({
@@ -908,12 +871,6 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     let task = await saveTask(pool,req.userId,req.body,id)
     // 只有这次请求显式换了角色才套用，避免每次编辑都重算
     task = await roleDefaults(req.userId, task, b)
-    task = await projectDefaults(req.userId, task, b)
-    // 只有这次请求显式改了配置 / 项目才套用，避免每次编辑任务都重算一遍检查项
-    if (('profileId' in b || 'projectId' in b) && task.profileId !== null) {
-      const profile = await getProfile(pool, req.userId, task.profileId)
-      task = await saveTask(pool, req.userId, await applyProfile(pool, req.userId, task, profile), task.id)
-    }
     // 标记完成时收尾手动计时的执行记录，日历才能看到真实的结束时间
     if ((req.body as {status?:unknown}|null)?.status === 'done')
       for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
@@ -1102,8 +1059,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
     const b = object(req.body ?? {})
     const patch = proposalPatch(b)
-    // 执行人优先取项目经理排好的（角色 + 配置），界面改了哪个字段就按界面的来。
-    // 配置只带「明确指派过的那一套」：项目兜底配置留给派发时按在线机器挑，别把任务钉在离线的电脑上。
+    // 执行人优先取项目经理排好的（角色 + 项目目录），界面改了哪个字段就按界面的来。
+    // 目录不在任务上钉死：派发时按项目目录与在线机器再挑一次，别把任务钉在离线的电脑上。
     // 去向：界面可以改，没改就按项目经理给的那条。写进任务里而不是只传给这次派发——
     // 「只建任务」之后由项目经理自动派发时，也得按同样的方式开场。
     const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : proposal.delivery
@@ -1113,7 +1070,6 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       priority: proposal.priority,
       roleId: proposal.assignee.roleId,
       projectId: proposal.projectId,
-      profileId: proposal.profileId,
       checklist: toChecklist(proposal.checklist),
       // 项目经理声明的执行边界跟着任务走：代批和派发都要用它
       constraints: proposal.constraints,

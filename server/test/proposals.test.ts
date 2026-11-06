@@ -12,7 +12,7 @@ const mockTask = (over: Partial<Task> = {}): Task => ({
   id: 1, title: '修登录超时', notes: '会话 30 分钟就断', status: 'doing', priority: 'medium',
   checklist: [], constraints: { paths: [], net: false, push: false, scripts: false, note: '' },
   startMode: 'fresh', forkFrom: null,
-  goalId: null, projectId: 2, profileId: null, roleId: 3,
+  goalId: null, projectId: 2, roleId: 3,
   agent: 'claude', machine: 'pc', cwd: 'D:/x', sessionIds: [],
   createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z', doneAt: null,
   timerStartedAt: null, queuedAt: null, startAt: null, dueAt: null, remindStart: true, remindDue: true,
@@ -190,33 +190,38 @@ test('没有配额时不去查库', async () => {
   assert.deepEqual(await pickCandidates(db, 1, 0), [])
 })
 
-test('执行人：角色的默认配置优先，机器与目录跟着角色走', () => {
+test('执行人：目录按来源会话的机器从项目目录列表里挑', () => {
   const ctx = {
-    roles: new Map([[3, { id: 3, name: '老张', title: '后端', agent: 'claude' as const, profileId: 11 }]]),
-    profiles: new Map([[11, { id: 11, name: '家里台式', agent: 'claude', machine: 'pc-home', cwd: 'D:/Work2/AgentHub' }]]),
-    projectProfiles: new Map([[2, 12]]),
+    roles: new Map([[3, { id: 3, name: '老张', title: '后端', agent: 'claude' as const }]]),
+    projectDirs: new Map([[2, [
+      { machine: 'pc-home', cwd: 'D:/Work2/AgentHub' },
+      { machine: 'mac-mini', cwd: '/Users/w/AgentHub' },
+    ]]]),
   }
-  const a = assigneeOf(ctx, 3, null, 2)
+  const a = assigneeOf(ctx, 3, 2, 'pc-home')
   assert.equal(a.roleName, '老张')
-  assert.equal(a.profileId, 11)
+  assert.equal(a.agent, 'claude')
   assert.equal(a.machine, 'pc-home')
   assert.equal(a.cwd, 'D:/Work2/AgentHub')
+  // 来源会话在另一台电脑：目录跟着换，不会串设备
+  const b = assigneeOf(ctx, 3, 2, 'mac-mini')
+  assert.equal(b.machine, 'mac-mini')
+  assert.equal(b.cwd, '/Users/w/AgentHub')
 })
 
-test('执行人：只有项目兜底配置时也能落到电脑和目录', () => {
+test('执行人：不绑机器的目录当通用兜底', () => {
   const ctx = {
-    roles: new Map([[3, { id: 3, name: '老张', title: '', agent: 'codex' as const, profileId: null }]]),
-    profiles: new Map([[12, { id: 12, name: 'Mac', agent: 'codex', machine: 'mac-mini', cwd: '/Users/w' }]]),
-    projectProfiles: new Map([[2, 12]]),
+    roles: new Map([[3, { id: 3, name: '老张', title: '', agent: 'codex' as const }]]),
+    projectDirs: new Map([[2, [{ machine: null, cwd: '/Users/w' }]]]),
   }
-  const a = assigneeOf(ctx, 3, null, 2)
-  assert.equal(a.profileId, 12)
+  const a = assigneeOf(ctx, 3, 2, '某台没登记的电脑')
   assert.equal(a.agent, 'codex')
-  assert.equal(a.machine, 'mac-mini')
+  assert.equal(a.machine, '')
+  assert.equal(a.cwd, '/Users/w')
 })
 
 test('执行人：没有任何依据时留空，由人来选', () => {
-  const a = assigneeOf({ roles: new Map(), profiles: new Map(), projectProfiles: new Map() }, null, null, null)
+  const a = assigneeOf({ roles: new Map(), projectDirs: new Map() }, null, null)
   assert.equal(a.roleId, null)
   assert.equal(a.machine, '')
 })
