@@ -867,7 +867,6 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 
 .pg-count { font-size: 26px; font-weight: 650; line-height: 1; color: color-mix(in srgb, var(--tone) 72%, var(--fg)); }
 .pg-name { max-width: 88%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 550; line-height: 1.3; color: var(--fg); }
-.pg-bubble.pg-idle .pg-name { color: var(--dim); font-weight: 500; }
 .pg-session { gap: 1px; padding: 0 8%; }
 .pg-session .pg-state { font-size: 10.5px; font-weight: 600; line-height: 1.25; color: color-mix(in srgb, var(--tone) 78%, var(--fg)); }
 .pg-session .pg-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 100%; font-size: 11px; line-height: 1.22; text-align: center; color: var(--fg); word-break: break-word; }
@@ -885,7 +884,8 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 /* 运行中：项目球外的旋转虚环 + 计数胶囊 */
 .pg-run-ring { position: absolute; inset: -9px; border-radius: 50%; border: 1px dashed color-mix(in srgb, var(--accent) 65%, transparent); animation: pg-spin 26s linear infinite; pointer-events: none; }
 .pg-pill { position: absolute; left: 50%; top: 100%; transform: translate(-50%, 6px); padding: 2px 9px; border-radius: 999px; font-size: 11px; line-height: 1.5; white-space: nowrap; background: var(--accent-soft); color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent); }
-.pg-count.pg-zero { color: var(--dim); }
+/* 只有运行中的项目：数字是运行中数量，用蓝调区分「不是待办」 */
+.pg-count.pg-run-count { color: color-mix(in srgb, var(--accent) 76%, var(--fg)); }
 
 /* 运行中会话气泡：旋转弧表示在跑 */
 .pg-bubble.pg-run .pg-run-arc { position: absolute; inset: -4px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 45%, transparent); animation: pg-spin 2.6s linear infinite; pointer-events: none; }

@@ -1,6 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+
+/** 舞台下方留给图例、已处理开关和页面留白的高度 */
+const STAGE_BOTTOM_RESERVE = 128;
+
+/** 舞台高度上/下限：太矮放不开，太高气泡会散成一片 */
+const STAGE_MIN_H = 320;
+const STAGE_MAX_H = 1000;
+
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 const STATE_LABEL: Record<string, string> = { waiting: "等待授权", done: "已完成", aborted: "已中断", running: "运行中" };
 
@@ -28,9 +37,9 @@ function hash01(name: string, salt = 0): number {
   return (((hash32(name) + salt * 2654435761) >>> 8) % 1000) / 1000;
 }
 
-/** 气泡大小随会话数缩放（74–136px） */
-function bubbleSize(count: number): number {
-  return Math.round(Math.min(136, 74 + Math.sqrt(Math.max(count, 1)) * 22));
+/** 气泡大小随会话数缩放（74–136px），再按舞台大小整体缩放 */
+function bubbleSize(count: number, fit = 1): number {
+  return Math.round(Math.min(136, 74 + Math.sqrt(Math.max(count, 1)) * 22) * fit);
 }
 
 const GOLDEN_ANGLE = 2.39996; // 黄金角：散布均匀又不显网格感
@@ -39,16 +48,36 @@ type Group = { project: string; pending: Session[]; running: Session[] };
 
 function groupByProject(sessions: Session[], approvals: Set<string>): Group[] {
   const m = new Map<string, Group>();
+  // 同一目录在不同机器/会话里大小写可能不一致（AgentHub / agenthub），按小写归并，否则会拆成两个球
+  const spellings = new Map<string, Map<string, number>>();
   for (const s of sessions) {
-    const key = s.project || "(未知项目)";
+    const raw = (s.project || "").trim() || "(未知项目)";
+    const key = raw.toLowerCase();
     let g = m.get(key);
     if (!g) {
-      g = { project: key, pending: [], running: [] };
+      g = { project: raw, pending: [], running: [] };
       m.set(key, g);
     }
+    const spell = spellings.get(key) ?? new Map<string, number>();
+    spell.set(raw, (spell.get(raw) ?? 0) + 1);
+    spellings.set(key, spell);
     // 运行中但有待授权的事项（approvals 里有）算「要你处理」，放外圈
     if (s.state === "running" && !approvals.has(s.id)) g.running.push(s);
     else g.pending.push(s);
+  }
+  // 球上显示出现次数最多的那种写法，避免名字随最后一个会话跳动
+  for (const [key, g] of m) {
+    const spell = spellings.get(key);
+    if (!spell) continue;
+    let best = g.project;
+    let bestN = -1;
+    for (const [name, n] of spell) {
+      if (n > bestN || (n === bestN && name < best)) {
+        best = name;
+        bestN = n;
+      }
+    }
+    g.project = best;
   }
   return [...m.values()].sort(
     (a, b) =>
@@ -114,13 +143,16 @@ function placeAll(items: ScatterInput[], wrapW: number, stageH: number) {
 }
 
 /** 按面积估一个够用的舞台高度，装不下就逐步加高重排，直到没有一颗被挤到兜底位 */
-function scatterStage(items: ScatterInput[], wrapW: number) {
+function scatterStage(items: ScatterInput[], wrapW: number, maxH: number) {
   const w = Math.max(wrapW, 260);
   const need = items.reduce((sum, it) => sum + Math.PI * (it.size / 2 + 14) ** 2, 0);
-  let stageH = Math.round(Math.max(260, Math.min(900, (need * 2.1) / Math.max(w - 44, 240) + 30)));
+  // 先按内容估高，再至少铺到窗口能给的高度的 3/4；窗口越大铺得越开，
+  // 但内容确实装不下时允许超出可视高度（页面滚动），别把球硬塞成一团
+  const est = (need * 2.1) / Math.max(w - 44, 240) + 40;
+  let stageH = Math.round(clamp(Math.max(est, maxH * 0.75), 300, Math.max(maxH, 300)));
   let res = placeAll(items, w, stageH);
-  for (let k = 0; k < 6 && !res.ok && stageH < 900; k++) {
-    stageH = Math.min(900, Math.round(stageH * 1.18));
+  for (let k = 0; k < 6 && !res.ok && stageH < 1400; k++) {
+    stageH = Math.min(1400, Math.round(stageH * 1.15));
     res = placeAll(items, w, stageH);
   }
   return { ...res, stageH };
@@ -154,28 +186,60 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     [handled],
   );
 
-  // 散布布局与展开环半径都要知道容器宽度
+  // 散布布局要知道容器的宽和「窗口还能给多高」：窗口一缩放，两者都要跟着变
   const wrapRef = useRef<HTMLDivElement | null>(null);
-  const [wrapW, setWrapW] = useState(0);
-  useEffect(() => {
-    const el = wrapRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => setWrapW(el.clientWidth));
-    ro.observe(el);
-    setWrapW(el.clientWidth);
-    return () => ro.disconnect();
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const rafRef = useRef(0);
+
+  const measure = useCallback(() => {
+    // 拖窗口时 resize 每帧都来，合并到下一帧测一次，避免重复重排
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      const el = wrapRef.current;
+      if (!el) return;
+      // 用文档坐标算顶部位置，页面滚动不影响结果
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      const w = el.clientWidth;
+      const h = clamp(Math.round(window.innerHeight - top - STAGE_BOTTOM_RESERVE), STAGE_MIN_H, STAGE_MAX_H);
+      setBox((prev) => (Math.abs(prev.w - w) < 1 && Math.abs(prev.h - h) < 1 ? prev : { w, h }));
+    });
   }, []);
 
+  // 舞台高度由我们写死给 stage，窗口变高并不会改到 wrap 的尺寸，
+  // 所以光靠 ResizeObserver 收不到「窗口变高」这件事，必须同时听 window.resize
+  useEffect(() => {
+    measure();
+    const el = wrapRef.current;
+    const ro = new ResizeObserver(measure);
+    if (el) ro.observe(el);
+    window.addEventListener("resize", measure);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", measure);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+    };
+  }, [measure, expanded]);
+
+  /** 舞台大了球也放大一点，窗口小了收一点，避免空荡或挤爆 */
+  const fit = useMemo(
+    () => (box.w && box.h ? clamp(Math.min(box.w / 900, box.h / 460), 0.86, 1.45) : 1),
+    [box.w, box.h],
+  );
+
   const layout = useMemo(() => {
-    if (!wrapW || groups.length === 0) return null;
+    if (!box.w || groups.length === 0) return null;
     // 贪心散布：大球先放中间，后面的球沿黄金角螺旋找第一个不重叠、不出界的位置；
     // 哈希抖动让布局看着随机，但每次进来都一样
-    const stageH = Math.min(560, 300 + (groups.length - 1) * 46);
-    const cx = wrapW / 2;
+    const needH = 300 + (groups.length - 1) * 46;
+    // 舞台直接吃满窗口给的高度，球多了再由散布算法往外铺，窗口一缩放区域跟着变
+    const stageH = Math.round(clamp(Math.max(needH, box.h), STAGE_MIN_H, box.h));
+    const cx = box.w / 2;
     const cy = Math.round(stageH / 2);
     const placed: { x: number; y: number; r: number }[] = [];
     const pos = groups.map((g, i) => {
-      const size = bubbleSize(g.pending.length + g.running.length);
+      const size = bubbleSize(g.pending.length + g.running.length, fit);
       // 带运行中胶囊的球下方要多占一截，碰撞间距相应放大，避免胶囊压到邻居
       const pad = g.running.length > 0 ? 12 : 0;
       const rad = size / 2 + pad;
@@ -184,12 +248,12 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
       if (i > 0) {
         const a0 = i * GOLDEN_ANGLE + hash01(g.project) * 1.3;
         let found: { x: number; y: number } | null = null;
-        for (let d = rad + 10; d < Math.max(wrapW, stageH) && !found; d += 7) {
+        for (let d = rad + 10; d < Math.max(box.w, stageH) && !found; d += 7) {
           for (let k = 0; k < 14; k++) {
             const a = a0 + (k / 14) * Math.PI * 2 + hash01(g.project, k + 1) * 0.2;
             const px = cx + Math.cos(a) * d;
             const py = cy + Math.sin(a) * d * 0.8; // 纵向压扁，铺得更开
-            if (px < rad + 6 || px > wrapW - rad - 6 || py < rad + 6 || py > stageH - rad - 6) continue;
+            if (px < rad + 6 || px > box.w - rad - 6 || py < rad + 6 || py > stageH - rad - 6) continue;
             if (placed.every((p) => Math.hypot(p.x - px, p.y - py) >= p.r + rad + 18)) {
               found = { x: Math.round(px), y: Math.round(py) };
               break;
@@ -197,7 +261,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
           }
         }
         const spot = found ?? {
-          x: Math.round(cx + (hash01(g.project, 5) - 0.5) * Math.max(wrapW - 2 * rad - 12, 0)),
+          x: Math.round(cx + (hash01(g.project, 5) - 0.5) * Math.max(box.w - 2 * rad - 12, 0)),
           y: Math.round(cy + (hash01(g.project, 6) - 0.5) * Math.max(stageH - 2 * rad - 12, 0)),
         };
         x = spot.x;
@@ -207,7 +271,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
       return { g, size, x, y };
     });
     return { pos, stageH };
-  }, [groups, wrapW]);
+  }, [groups, box.w, box.h, fit]);
 
   const current = expanded ? groups.find((g) => g.project === expanded) : undefined;
 
@@ -215,8 +279,8 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     const { pending, running } = current;
     const runIds = new Set(running.map((s) => s.id));
     const total = pending.length + running.length;
-    // 会话多了就缩一点，保证同屏能铺开
-    const size = total > 26 ? 70 : total > 14 ? 78 : 88;
+    // 会话多了就缩一点，保证同屏能铺开；再乘上舞台整体的缩放系数
+    const size = Math.round((total > 26 ? 70 : total > 14 ? 78 : 88) * fit);
 
     // 要你动手的排最中间（越靠中心越先被放到舞台中央），运行中的甩到外圈
     const rank = (s: Session) =>
@@ -225,7 +289,11 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
       .sort((a, b) => rank(a) - rank(b))
       .map((s) => ({ s, run: runIds.has(s.id), size: runIds.has(s.id) ? size - 8 : size }));
 
-    const { spots, stageH } = scatterStage(entries.map((e) => ({ key: e.s.id, size: e.size })), wrapW || 900);
+    const { spots, stageH } = scatterStage(
+      entries.map((e) => ({ key: e.s.id, size: e.size })),
+      box.w || 900,
+      box.h || STAGE_MIN_H,
+    );
 
     return (
       <div className="pg-wrap" ref={wrapRef}>
@@ -290,25 +358,37 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     <div className="pg-wrap" ref={wrapRef}>
       <div className="pg-stage pg-scatter" style={{ height: layout?.stageH ?? 380 }}>
         {(layout?.pos ?? []).map(({ g, size, x, y }, i) => {
+          const pendingCount = g.pending.length;
+          const runningCount = g.running.length;
+          // 大数字优先显示待处理数；只有运行中的项目改显示运行中数，
+          // 否则球上写 0、点开却有一个会话，看着像算错了
+          const hasPending = pendingCount > 0;
+          const shown = hasPending ? pendingCount : runningCount;
           const urgent = g.pending.some((s) => isUrgent(s, approvals));
+          const tone = hasPending ? (urgent ? "tone-wait" : hashTone(g.project)) : "tone-blue";
           const dur = (7 + hash01(g.project, 3) * 4).toFixed(2); // 每个球漂移节奏不同
           const delay = (-hash01(g.project, 4) * 10).toFixed(2);
+          const breakdown = hasPending
+            ? `${pendingCount} 个待处理${runningCount ? ` · ${runningCount} 个运行中` : ""}`
+            : `${runningCount} 个运行中`;
           return (
             <button
               key={g.project}
               type="button"
               className="pg-slot pg-scatter-slot"
               style={{ width: size, height: size, left: x, top: y, marginLeft: -size / 2, marginTop: -size / 2 }}
-              title={`展开 ${g.project}：${g.pending.length} 个待处理${g.running.length ? ` · ${g.running.length} 个运行中` : ""}`}
-              aria-label={`项目 ${g.project}，${g.pending.length} 个待处理，${g.running.length} 个运行中`}
+              title={`展开 ${g.project}：${breakdown}`}
+              aria-label={`项目 ${g.project}，${breakdown}`}
               onClick={() => setExpanded(g.project)}
             >
               <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
-                <span className={`pg-bubble ${urgent ? "tone-wait" : hashTone(g.project)}${g.pending.length === 0 ? " pg-idle" : ""}`} style={{ animationDelay: `${i * 60}ms` }}>
-                  {g.running.length > 0 && <span className="pg-run-ring" />}
-                  <span className={`pg-count${g.pending.length === 0 ? " pg-zero" : ""}`}>{g.pending.length}</span>
+                <span className={`pg-bubble ${tone}`} style={{ animationDelay: `${i * 60}ms` }}>
+                  {runningCount > 0 && <span className="pg-run-ring" />}
+                  <span className={`pg-count${hasPending ? "" : " pg-run-count"}`}>{shown}</span>
                   <span className="pg-name" title={g.project}>{g.project}</span>
-                  {g.running.length > 0 && <span className="pg-pill">{g.running.length} 运行中</span>}
+                  {runningCount > 0 && (
+                    <span className="pg-pill">{hasPending ? `${runningCount} 运行中` : "运行中"}</span>
+                  )}
                 </span>
               </span>
             </button>
@@ -318,9 +398,9 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
 
       <p className="pg-legend">
         <span><i className="pg-dot tone-wait" />有待授权</span>
-        <span><i className="pg-dot tone-blue" />待查看</span>
+        <span><i className="pg-dot tone-blue" />只有运行中</span>
         <span><i className="pg-dot pg-dot-ring" />虚环 = 有运行中</span>
-        <span>气泡大小 = 会话数量 · 点击展开项目</span>
+        <span>数字 = 待处理数，无待处理时显示运行中数</span>
       </p>
 
       {handledList.length > 0 && (
