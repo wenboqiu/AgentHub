@@ -11,7 +11,7 @@ const session = { title: '修登录超时', agent: 'claude' as const, project: '
 const mockTask = (over: Partial<Task> = {}): Task => ({
   id: 1, title: '修登录超时', notes: '会话 30 分钟就断', status: 'doing', priority: 'medium',
   checklist: [], constraints: { paths: [], net: false, push: false, scripts: false, note: '' },
-  startMode: 'fresh', forkFrom: null,
+  startMode: 'fresh', forkFrom: null, autoDispatch: false,
   goalId: null, projectId: 2, roleId: 3,
   agent: 'claude', machine: 'pc', cwd: 'D:/x', sessionIds: [],
   createdAt: '2026-11-01T00:00:00.000Z', updatedAt: '2026-11-01T00:00:00.000Z', doneAt: null,

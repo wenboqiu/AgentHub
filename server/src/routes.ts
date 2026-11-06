@@ -96,7 +96,7 @@ import {
   toChecklist,
   type Delivery,
 } from './proposals.ts'
-import { getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
+import { composeTicket, getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 
@@ -460,6 +460,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 项目里存着各台电脑的目录，按这次要去的机器挑对应那条，目录才不会串设备
     const dir = await pickProjectDir(pool, userId, project?.id ?? null, machine, online)
     if (!machine && dir?.machine) machine = dir.machine
+    // 项目目录登记成「哪台都行」而又有多台在线：随便挑一台。否则会排进空机器名，永远等不到上线
+    if (!machine && online.length) machine = online[0]
     const agent = b.agent ?? role?.agent ?? task.agent
     if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
@@ -478,11 +480,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (mode === 'fork' && src) sessionKey = sessionKeyOf(src.id)
       if (!sessionKey) mode = 'fresh'
     }
-    const text = taskText(b.text ?? (task.notes || task.title), '第一条消息', 8000)
     // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
     const memories = role ? await pickMemories(pool, userId, role.id, task.projectId) : []
     // 项目近况：最近几条任务结论，让接手的人知道这个项目眼下到哪一步了
     const recent = await recentBrief(pool, userId, task.projectId)
+    // 发单时正文可以留空：项目经理在这儿补一份骨架并落库，执行端才不会只拿到一个标题。
+    // 只补空正文，人写过的一个字都不动。
+    const filled = task.autoDispatch && !task.notes.trim()
+      ? composeTicket({
+        title: task.title,
+        project: project?.name ?? '',
+        brief: project?.brief ?? '',
+        recent,
+        role: role ? [role.name, role.title].filter(Boolean).join(' · ') : '',
+        cwd,
+      })
+      : ''
+    if (filled) pushTask(userId, await saveTask(pool, userId, { notes: filled }, task.id))
+    const text = taskText(b.text ?? (filled || task.notes || task.title), '第一条消息', 8000)
     const instructions = [
       composeInstructions({
         role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },

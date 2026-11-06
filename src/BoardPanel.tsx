@@ -1,9 +1,12 @@
 import { useState } from "react";
-import type { Api, BoardEntry } from "./lib/api";
+import type { Api, BoardEntry, Project, Role } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+import DispatchForm from "./DispatchForm";
+import Icon from "./Icon";
 // 派活看板：把「排队中 / 在跑 / 卡住」的活聚到一张板上。
 // 数据由服务端从任务、队列和执行记录现算，这里只负责分组展示和当场处置：
 // 卡住的可以重新派发或退回待办，排队的可以立即派发或取消排队。
+// 发新单也在这儿：先定项目，配置和角色能留空，剩下的由项目经理补齐后派出去。
 
 function ago(iso: string, now: number): string {
   const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
@@ -60,17 +63,26 @@ function Entry({
 }
 
 export default function BoardPanel({
-  api, board, now, onRefresh, onOpen, onNotice,
+  api, board, now, projects, roles, managerReady, onRefresh, onOpen, onNotice,
 }: {
   api: Api;
   /** 看板数据由 App 层统一获取（Tab 角标也要用），这里只展示 */
   board: { entries: BoardEntry[]; agents: string[] };
   now: number;
+  projects: Project[];
+  roles: Role[];
+  /** 项目经理开着自动派发：发单后它会自己补配置、补人、派出去 */
+  managerReady: boolean;
   onRefresh(): void;
   onOpen(id: number): void;
   onNotice(msg: string): void;
 }) {
   const [busyId, setBusyId] = useState(0);
+  const [showForm, setShowForm] = useState(false);
+  const created = () => {
+    setShowForm(false);
+    onRefresh();
+  };
   const act = async (id: number, kind: "issue" | "todo" | "unqueue") => {
     setBusyId(id);
     const done = { issue: "已重新派发", todo: "已退回待办", unqueue: "已取消排队" }[kind];
@@ -104,7 +116,16 @@ export default function BoardPanel({
           <h2>派活看板</h2>
           <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}</p>
         </div>
+        <button className="primary" aria-expanded={showForm} onClick={() => setShowForm(!showForm)}>
+          <Icon name={showForm ? "close" : "plus"} /> {showForm ? "收起" : "发新单"}
+        </button>
       </div>
+      {showForm && (
+        <DispatchForm
+          api={api} projects={projects} roles={roles} managerReady={managerReady}
+          onCreated={created} onCancel={() => setShowForm(false)} onNotice={onNotice}
+        />
+      )}
       <section>
         <h2>卡住 {stuck.length > 0 && <span className="count">{stuck.length}</span>}</h2>
         {stuck.length ? rows(stuck) : <p className="empty">没有异常，派出去的活都有人接着</p>}

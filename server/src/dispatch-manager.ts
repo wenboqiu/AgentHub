@@ -177,8 +177,8 @@ export async function recentAutoCount(db: DB, user: number): Promise<number> {
 export type Candidate = { id: number; title: string; priority: string }
 
 /**
- * 可自动派发的任务：来自已被确认的处理意见、还没派过、失败次数没超限。
- * 按优先级再按生成顺序，先派要紧的、先提出的。
+ * 可自动派发的任务：人已经确认的处理意见生成的，或者人直接「发新单」交给它的；
+ * 还没派过、失败次数没超限。按优先级再按生成顺序，先派要紧的、先提出的。
  */
 export async function pickCandidates(db: DB, user: number, limit: number): Promise<Candidate[]> {
   if (limit <= 0) return []
@@ -186,9 +186,9 @@ export async function pickCandidates(db: DB, user: number, limit: number): Promi
     `SELECT t.id, t.title, t.priority FROM tasks t
      WHERE t.user_id = $1
        AND t.status = 'todo'
-       AND EXISTS (
+       AND (t.auto_dispatch OR EXISTS (
          SELECT 1 FROM session_proposals p
-         WHERE p.user_id = t.user_id AND p.created_task_id = t.id AND p.status = 'accepted')
+         WHERE p.user_id = t.user_id AND p.created_task_id = t.id AND p.status = 'accepted'))
        AND NOT EXISTS (
          SELECT 1 FROM runs r WHERE r.user_id = t.user_id AND r.task_id = t.id AND r.status IN ('queued','running'))
        AND NOT EXISTS (
@@ -206,8 +206,25 @@ export async function pickCandidates(db: DB, user: number, limit: number): Promi
   return r.rows.map(v => ({ id: Number(v.id), title: v.title, priority: v.priority }))
 }
 
-export async function logAuto(db: DB, user: number, taskId: number, result: 'dispatched' | 'queued' | 'failed', runId: string | null = null, error = ''): Promise<void> {
-  await db.query(
+/**
+ * 发单时正文可以留空：项目经理按手里已有的事实补一份能直接开工的骨架。
+ * 只拼已知信息，不替人猜业务细节——拼不出来的部分写成「先问再做」，比编一段更像样。
+ */
+export function composeTicket(input: {
+  title: string; project: string; brief: string; recent: string[]; role: string; cwd: string;
+}): string {
+  const lines = ['## 目标', input.title.trim()]
+  const bg: string[] = []
+  if (input.project) bg.push(`项目：${input.project}${input.cwd ? `（${input.cwd}）` : ''}`)
+  if (input.brief) bg.push(`项目说明：${input.brief}`)
+  if (input.role) bg.push(`执行角色：${input.role}`)
+  if (input.recent.length) bg.push(`最近进展：\n${input.recent.slice(-3).map(r => `- ${r}`).join('\n')}`)
+  if (bg.length) lines.push('', '## 背景', ...bg)
+  lines.push('', '## 交付', '- 做完说清改了哪些文件、怎么验证（构建 / 类型检查 / 测试）', '- 拿不准的先问，别自己猜业务规则')
+  return lines.join('\n').slice(0, 4000)
+}
+
+export async function logAuto(db: DB, user: number, taskId: number, result: 'dispatched' | 'queued' | 'failed', runId: string | null = null, error = ''): Promise<void> {  await db.query(
     'INSERT INTO dispatch_auto_log(user_id,task_id,run_id,result,error) VALUES($1,$2,$3,$4,$5)',
     [user, taskId, runId, result, error.slice(0, 500)],
   )

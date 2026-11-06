@@ -136,6 +136,10 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .entity-form { display: grid; gap: 22px; margin: 0 0 24px; padding: 28px; background: var(--card); border-radius: 24px; }
 .entity-form label, .selection-panel label { display: flex; flex-direction: column; gap: 9px; min-width: 0; font-size: 13px; font-weight: 550; }
 .entity-form textarea, .selection-panel textarea { min-height: 110px; }
+/* 发新单：标题与说明同一行，控件另起一行；说明压成小字不抢戏 */
+.dispatch-form .field-label { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.dispatch-form .field-label .dim { font-weight: 400; font-size: 12px; }
+.dispatch-form .hint { margin: 0; }
 .entity-form > .primary { justify-self: start; min-width: 100px; }
 .form-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 22px; }
 .action-bar, .task-links { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0; }

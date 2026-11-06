@@ -36,8 +36,8 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
     c.note,
   ].filter(Boolean);
 }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
-export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | keyof Schedule>>;
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | "autoDispatch" | keyof Schedule>>;
 /** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */
 export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; createdAt: string; updatedAt: string };
 export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updatedAt">>;
