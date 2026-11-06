@@ -123,7 +123,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     try {
       await saveConfig(c);
       onSaved(c, { keepOpen: true });
-      setMsg(on ? "图模式已开启" : "已恢复卡片列表");
+      setMsg(on ? "对话页已改为气泡图" : "对话页已改为列表");
       window.setTimeout(() => setMsg(""), 2000);
     } catch (e) {
       setMsg(`保存失败：${String(e)}`);
@@ -431,11 +431,18 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
             <h2>外观</h2>
             <section className="box">
-              <label className="check">
-                <input type="checkbox" checked={cfg.graphMode} onChange={(e) => toggleGraphMode(e.target.checked)} />
-                待处理会话用图模式展示（每个项目一个气泡，点击展开会话）
+              <label>
+                对话页展示方式
+                <select value={form.graphMode ? "graph" : "list"} onChange={(e) => void toggleGraphMode(e.target.value === "graph")}>
+                  <option value="graph">气泡图（默认）</option>
+                  <option value="list">列表</option>
+                </select>
               </label>
-              <p className="hint">开启后「待处理」区域按项目聚合为气泡图；关闭时使用卡片列表。改动立即生效。</p>
+              <p className="hint">
+                {form.graphMode
+                  ? "气泡图：待处理 / 进行中的对话按项目聚成气泡，点一下展开会话。"
+                  : "列表：待处理 / 进行中的对话按状态分行平铺，一条一行。"}
+              </p>
               {msg && <p className="msg">{msg}</p>}
             </section>
           </>

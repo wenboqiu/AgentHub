@@ -11,7 +11,7 @@ export type Config = {
   deniedRoots: string[];
   /** 仅桌面：允许手机远程执行 */
   remoteEnabled: boolean;
-  /** 待处理会话用图模式展示（项目气泡 + 会话气泡） */
+  /** 对话页（待处理 / 进行中）用气泡图展示；false = 卡片列表 */
   graphMode: boolean;
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
@@ -48,13 +48,34 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: false };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: true };
+
+/**
+ * 气泡图改成默认之后的一次性迁移：老配置里 graphMode 基本是「没选过」的 false，
+ * 这里直接切到新默认；迁移过后用户在设置里的选择（哪怕又选回列表）不再被覆盖。
+ */
+const GRAPH_DEFAULT_MIGRATED = "agenthub.graph-default-v2";
+function migrateGraphMode(c: Config): Config {
+  let migrated = "";
+  try {
+    migrated = localStorage.getItem(GRAPH_DEFAULT_MIGRATED) ?? "";
+  } catch {
+    return c; // 存储不可用就按已存的值来，不改用户选择
+  }
+  if (migrated === "1") return c;
+  try {
+    localStorage.setItem(GRAPH_DEFAULT_MIGRATED, "1");
+  } catch {
+    return c;
+  }
+  return { ...c, graphMode: true };
+}
 
 export async function loadConfig(): Promise<Config> {
-  if (isDesktop) return invoke<Config>("get_config");
+  if (isDesktop) return migrateGraphMode({ ...defaults, ...(await invoke<Config>("get_config")) });
   try {
     const { controlToken: _legacy, ...saved } = JSON.parse(localStorage.getItem(LS_KEY) ?? "{}"); // 旧版的控制密钥丢掉
-    return { ...defaults, ...saved };
+    return migrateGraphMode({ ...defaults, ...saved });
   } catch {
     return defaults;
   }
