@@ -1,3 +1,4 @@
+import { useEffect, useMemo, useState } from "react";
 import { AGENT_LABEL } from "./lib/agents";
 import type { Session } from "./lib/api";
 import { ago } from "./lib/time";
@@ -23,11 +24,57 @@ const STATE_DOT: Record<string, string> = {
   done: "ok",
 };
 
+type Section = { key: "pending" | "running" | "rest"; label: string; hint: string; items: Session[] };
+
+const FOLD_KEY = "agenthub.sidebarSections";
+
 /**
  * 会话详情页左侧的会话列表（参考 WorkBuddy）：不用回列表页就能快速切到别的会话。
+ * 分成「待处理 / 进行中 / 已处理」三段，各自可折叠，待处理与进行中默认展开、已处理默认收起。
  * 只在桌面端渲染；手机上空间有限，维持原来的全屏详情。
  */
 export default function SessionSidebar({ sessions, currentId, attention, now, onSelect, onCollapse }: Props) {
+  const sections = useMemo<Section[]>(() => {
+    const pending: Session[] = [];
+    const running: Session[] = [];
+    const rest: Session[] = [];
+    for (const s of sessions) {
+      if (attention.has(s.id)) pending.push(s);
+      else if (s.state === "running") running.push(s);
+      else rest.push(s);
+    }
+    const all: Section[] = [
+      { key: "pending", label: "待处理", hint: "等你处理", items: pending },
+      { key: "running", label: "进行中", hint: "在跑", items: running },
+      { key: "rest", label: "已处理", hint: "历史", items: rest },
+    ];
+    return all.filter((g) => g.items.length > 0);
+  }, [sessions, attention]);
+
+  // 折叠状态记在本机，下次进来保持一致；没记录过的按默认（已处理收起）
+  const [openMap, setOpenMap] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(FOLD_KEY) || "{}") as Record<string, boolean>;
+    } catch {
+      return {};
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(FOLD_KEY, JSON.stringify(openMap));
+    } catch {}
+  }, [openMap]);
+
+  const isOpen = (g: Section) => openMap[g.key] ?? g.key !== "rest";
+
+  // 当前会话若落在收起的段里（比如从别处跳进一个已处理的会话），自动展开那一段
+  useEffect(() => {
+    if (!currentId) return;
+    const hit = sections.find((g) => g.items.some((s) => s.id === currentId));
+    if (hit && !(openMap[hit.key] ?? hit.key !== "rest")) setOpenMap((m) => ({ ...m, [hit.key]: true }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentId, sections]);
+
   return (
     <nav className="sidebar" aria-label="会话列表">
       <div className="sidebar-head">
@@ -36,31 +83,53 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
           <Icon name="chevron" />
         </button>
       </div>
-      {sessions.length === 0 && <p className="empty">还没有会话</p>}
-      <ul className="sidebar-list">
-        {sessions.map((s) => {
-          const needsAttention = attention.has(s.id);
-          return (
-            <li key={s.id}>
-              <button
-                className={`sidebar-item${s.id === currentId ? " active" : ""}`}
-                aria-current={s.id === currentId ? "true" : undefined}
-                onClick={() => onSelect(s.id)}
-                title={s.title || s.project || undefined}
-              >
-                <span className="si-top">
-                  <span className={`si-dot ${STATE_DOT[s.state] ?? "dim"}`} aria-hidden="true" />
-                  <span className="si-name">{s.project || "(未知项目)"}</span>
-                  {needsAttention && <span className="si-badge">待处理</span>}
-                  <span className="si-time">{ago(s.updatedAt, now)}</span>
-                </span>
-                {(s.title || s.summary) && <span className="si-sub">{s.title || s.summary}</span>}
-                <span className="si-meta">{AGENT_LABEL[s.agent]} · {s.machine}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+
+      {sections.length === 0 && <p className="empty">还没有会话</p>}
+
+      {sections.map((g) => {
+        const open = isOpen(g);
+        return (
+          <section key={g.key} className={`sidebar-sec${open ? " open" : ""}`}>
+            <button
+              type="button"
+              className="sidebar-sec-head"
+              aria-expanded={open}
+              onClick={() => setOpenMap((m) => ({ ...m, [g.key]: !open }))}
+            >
+              <Icon name="chevron" />
+              <span className="sidebar-sec-label">{g.label}</span>
+              <span className={`sidebar-sec-count${g.key === "pending" ? " alert" : ""}`}>{g.items.length}</span>
+              <span className="sidebar-sec-hint">{g.hint}</span>
+            </button>
+            {open && (
+              <ul className="sidebar-list">
+                {g.items.map((s) => {
+                  const needsAttention = attention.has(s.id);
+                  return (
+                    <li key={s.id}>
+                      <button
+                        className={`sidebar-item${s.id === currentId ? " active" : ""}`}
+                        aria-current={s.id === currentId ? "true" : undefined}
+                        onClick={() => onSelect(s.id)}
+                        title={s.title || s.project || undefined}
+                      >
+                        <span className="si-top">
+                          <span className={`si-dot ${STATE_DOT[s.state] ?? "dim"}`} aria-hidden="true" />
+                          <span className="si-name">{s.project || "(未知项目)"}</span>
+                          {needsAttention && <span className="si-badge">待处理</span>}
+                          <span className="si-time">{ago(s.updatedAt, now)}</span>
+                        </span>
+                        {(s.title || s.summary) && <span className="si-sub">{s.title || s.summary}</span>}
+                        <span className="si-meta">{AGENT_LABEL[s.agent]} · {s.machine}</span>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        );
+      })}
     </nav>
   );
 }
