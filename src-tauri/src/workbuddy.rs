@@ -6,7 +6,9 @@
 //! WorkBuddy 不提供 hook，也没有可调用的 CLI/IPC，因此只能读 transcript：
 //! - 正文、标题、目录都能拿到（比豆包日志完整）；
 //! - **没有会话结束事件**。完成判定同时要求「尾部是已完成回复或已归的工具结果」
-//!   「没有未归的工具调用」「文件静默超过确认窗口」；静默只作确认窗口，不单独作为依据；
+//!   「没有未归的工具调用」「文件静默超过确认窗口」；静默只作确认窗口，不单独作为依据。
+//!   未归调用按 callId 集合配对；注入的 user 行（system-reminder / task-notification 等）
+//!   不清零未归调用，避免后台工具还在飞时被提前判完成；
 //! - 因此本模块只做状态与消息监听，不参与远程执行。
 
 use crate::{
@@ -18,7 +20,7 @@ use crate::{
 use chrono::TimeZone;
 use serde_json::Value;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
@@ -33,8 +35,11 @@ const RECENT: Duration = Duration::from_secs(3 * 86400);
 const BACKFILL_MS: i64 = 7 * 86400 * 1000;
 /// 末条助手回复完成后，静默多久确认一轮结束
 const QUIET_MS: i64 = 20_000;
-/// 工具结果之后还要留更长的窗口：模型可能正在思考，静默不代表结束
-const TOOL_QUIET_MS: i64 = 60_000;
+/// 工具结果之后还要留更长的窗口：模型可能正在思考，静默不代表结束。
+/// 真实 transcript 回放显示「结果→下一行」的间隔有 ~1% 超过 60s、最长 900s
+/// （下一行几乎都是 reasoning，思考期间文件完全静默）；60s 时「提前判完成」
+/// 占所有完成判定的 ~31%，提到 3 分钟后降到 ~5%。
+const TOOL_QUIET_MS: i64 = 180_000;
 
 /// transcript 尾部结构：决定「安静下来」是否可以判定结束
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -62,7 +67,10 @@ pub struct FileState {
     last_ms: i64,
     last_at: String,
     tail: Tail,
-    open_calls: usize,
+    /// 未归的工具调用 callId：结果按 callId 配对归还，避免计数错乱
+    open_ids: HashSet<String>,
+    /// 没有 callId 的调用退化按计数配对
+    open_unknown: usize,
     /// 最近一次上报的 (state, at)，避免重复上报
     emitted: Option<(String, String)>,
     /// 历史会话：不回填、不再上报
@@ -154,13 +162,24 @@ impl FileState {
                 }
                 "function_call" => {
                     self.track(&v);
-                    self.open_calls += 1;
+                    match v.get("callId").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        Some(id) => {
+                            self.open_ids.insert(id.to_string());
+                        }
+                        None => self.open_unknown += 1,
+                    }
                     self.state = "running".into();
                     self.tail = Tail::None;
                 }
                 "function_call_result" => {
                     self.track(&v);
-                    self.open_calls = self.open_calls.saturating_sub(1);
+                    // callId 对不上多半是调用发生在窗口截断之前：忽略，不凭空抵消
+                    match v.get("callId").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                        Some(id) => {
+                            self.open_ids.remove(id);
+                        }
+                        None => self.open_unknown = self.open_unknown.saturating_sub(1),
+                    }
                     self.tail = Tail::ToolResult;
                 }
                 _ => {}
@@ -202,15 +221,21 @@ impl FileState {
     fn feed_message(&mut self, v: &Value) {
         match v.get("role").and_then(Value::as_str).unwrap_or("") {
             "user" => {
+                // 纯注入块（system-reminder / task-notification / cb_summary）不是真的用户输入：
+                // 不代表新一轮开始，更不能清掉仍在飞的未归工具调用，否则会提前误判完成
+                let real_input = user_text(v);
                 if self.title.is_none() {
-                    if let Some(t) = user_text(v) {
-                        self.title = Some(truncate_chars(&t, 40));
+                    if let Some(t) = &real_input {
+                        self.title = Some(truncate_chars(t, 40));
                     }
+                }
+                if real_input.is_some() {
+                    self.open_ids.clear();
+                    self.open_unknown = 0;
                 }
                 self.user_turn = true;
                 self.state = "running".into();
                 self.tail = Tail::None;
-                self.open_calls = 0;
             }
             "assistant" => {
                 self.state = "running".into();
@@ -244,7 +269,7 @@ impl FileState {
         }
         let state = if self.state == "running" {
             // 已安静下来的历史会话按尾部结构给出结论；仍在生成/有未归调用则记 unknown
-            match (self.tail, self.open_calls) {
+            match (self.tail, self.open_calls()) {
                 (Tail::Reply, 0) | (Tail::ToolResult, 0) => "done",
                 (Tail::Incomplete, _) => "aborted",
                 _ => "unknown",
@@ -260,7 +285,7 @@ impl FileState {
 
     /// 文件安静下来后确认本轮是否结束；不满足条件返回 None
     pub fn confirm_quiet(&mut self, now_ms: i64) -> Option<Event> {
-        if self.skipped || self.session_id.is_none() || self.state != "running" || self.open_calls > 0 {
+        if self.skipped || self.session_id.is_none() || self.state != "running" || self.open_calls() > 0 {
             return None;
         }
         let (state, window) = match self.tail {
@@ -278,6 +303,11 @@ impl FileState {
         self.state = state.to_string();
         let summary = if state == "done" { self.summary.clone() } else { None };
         Some(self.event(state, summary, false))
+    }
+
+    /// 未归的工具调用总数（按 callId 配对 + 无 callId 的计数兜底）
+    fn open_calls(&self) -> usize {
+        self.open_ids.len() + self.open_unknown
     }
 
     fn state_or_unknown(&self) -> &str {
@@ -503,11 +533,28 @@ mod tests {
     }
 
     fn call(ts: i64) -> String {
-        serde_json::json!({"type":"function_call","timestamp":ts,"name":"Read"}).to_string()
+        call_id(ts, "call_1")
+    }
+
+    fn call_id(ts: i64, id: &str) -> String {
+        serde_json::json!({"type":"function_call","timestamp":ts,"name":"Read","callId":id}).to_string()
     }
 
     fn result(ts: i64) -> String {
-        serde_json::json!({"type":"function_call_result","timestamp":ts}).to_string()
+        result_id(ts, "call_1")
+    }
+
+    fn result_id(ts: i64, id: &str) -> String {
+        serde_json::json!({"type":"function_call_result","timestamp":ts,"callId":id}).to_string()
+    }
+
+    /// 纯注入的用户行（通知 / reminder），不是真实用户输入
+    fn injected(ts: i64, tag: &str) -> String {
+        serde_json::json!({
+            "type": "message", "role": "user", "status": "completed", "timestamp": ts,
+            "content": [{"type": "input_text", "text": format!("<{tag}>后台任务已完成</{tag}>")}]
+        })
+        .to_string()
     }
 
     fn live() -> FileState {
@@ -545,6 +592,60 @@ mod tests {
         s.feed(&[&result(T0 + 2_000)], T0 + 2_000);
         // 工具结果后要给模型留更长的时间继续生成
         assert!(s.confirm_quiet(T0 + 2_000 + QUIET_MS).is_none());
+        assert_eq!(s.confirm_quiet(T0 + 2_000 + TOOL_QUIET_MS).unwrap().state, "done");
+    }
+
+    #[test]
+    fn injected_user_messages_do_not_clear_open_calls() {
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑后台任务", T0)], T0);
+        // 两个工具先后起飞，后台任务先返回（task-notification 注入行夹在中间）
+        s.feed(&[&call_id(T0 + 1_000, "call_a"), &call_id(T0 + 1_001, "call_b")], T0 + 1_001);
+        s.feed(&[&result_id(T0 + 2_000, "call_a")], T0 + 2_000);
+        // 注入块到达：不能把还在飞的 call_b 清掉
+        s.feed(&[&injected(T0 + 2_100, "task-notification"), &injected(T0 + 2_200, "system-reminder")], T0 + 2_200);
+        // call_b 的结果落盘：60 秒静默窗口内不能判结束
+        s.feed(&[&result_id(T0 + 3_000, "call_b")], T0 + 3_000);
+        assert!(s.confirm_quiet(T0 + 3_000 + QUIET_MS).is_none());
+        assert_eq!(s.confirm_quiet(T0 + 3_000 + TOOL_QUIET_MS).unwrap().state, "done");
+    }
+
+    #[test]
+    fn real_user_input_resets_open_calls() {
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "第一轮", T0)], T0);
+        s.feed(&[&call_id(T0 + 1_000, "call_a")], T0 + 1_000);
+        // 用户打断并重新提问：新一轮开始，旧调用不再阻塞完成判定
+        s.feed(&[&msg("user", "completed", "换个话题", T0 + 2_000)], T0 + 2_000);
+        s.feed(&[&msg("assistant", "completed", "好的", T0 + 3_000)], T0 + 3_000);
+        assert_eq!(s.confirm_quiet(T0 + 3_000 + QUIET_MS).unwrap().state, "done");
+    }
+
+    #[test]
+    fn unpaired_call_ids_do_not_block_completion() {
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "查一下", T0)], T0);
+        // 结果的 callId 是窗口截断之前起飞的调用：不凭空抵消，但也不能让新调用被错误归零
+        s.feed(
+            &[&call_id(T0 + 1_000, "call_x"), &result_id(T0 + 2_000, "call_before_window"), &call_id(T0 + 2_100, "call_y")],
+            T0 + 2_100,
+        );
+        assert!(s.confirm_quiet(T0 + 2_100 + 10 * TOOL_QUIET_MS).is_none(), "call_y 仍在飞，不能判结束");
+        s.feed(&[&result_id(T0 + 3_000, "call_x")], T0 + 3_000);
+        assert!(s.confirm_quiet(T0 + 3_000 + 10 * TOOL_QUIET_MS).is_none(), "call_y 仍未归还");
+        s.feed(&[&result_id(T0 + 4_000, "call_y")], T0 + 4_000);
+        assert_eq!(s.confirm_quiet(T0 + 4_000 + TOOL_QUIET_MS).unwrap().state, "done");
+    }
+
+    #[test]
+    fn calls_without_call_id_fall_back_to_counting() {
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑", T0)], T0);
+        let no_id_call = serde_json::json!({"type":"function_call","timestamp":T0+1_000,"name":"Read"}).to_string();
+        let no_id_result = serde_json::json!({"type":"function_call_result","timestamp":T0+2_000}).to_string();
+        s.feed(&[&no_id_call], T0 + 1_000);
+        assert!(s.confirm_quiet(T0 + 1_000 + 10 * TOOL_QUIET_MS).is_none());
+        s.feed(&[&no_id_result], T0 + 2_000);
         assert_eq!(s.confirm_quiet(T0 + 2_000 + TOOL_QUIET_MS).unwrap().state, "done");
     }
 
@@ -732,3 +833,4 @@ mod tests {
         assert!(parsed > 0, "没有解析到任何近期会话");
     }
 }
+
