@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_LABEL } from "./lib/agents";
 import type { Session } from "./lib/api";
 import { ago } from "./lib/time";
@@ -29,6 +29,21 @@ const STATE_DOT: Record<string, string> = {
 type Section = { key: "pending" | "running" | "rest"; label: string; hint: string; items: Session[] };
 
 const FOLD_KEY = "agenthub.sidebarSections";
+/** 侧栏宽度：拖动分隔条调整，记住到本机 */
+const WIDTH_KEY = "agenthub.sidebarWidth";
+const MIN_W = 200;
+const MAX_W = 560;
+const DEFAULT_W = 276;
+/** 上限同时受视口约束：最多占一半宽，别把对话流挤没了 */
+const maxWidth = () => Math.max(MIN_W, Math.min(MAX_W, Math.round(window.innerWidth * 0.5)));
+const clampWidth = (w: number) => Math.max(MIN_W, Math.min(maxWidth(), Math.round(w)));
+const readWidth = () => {
+  try {
+    const n = Number(localStorage.getItem(WIDTH_KEY));
+    if (Number.isFinite(n) && n > 0) return clampWidth(n);
+  } catch {}
+  return DEFAULT_W;
+};
 
 /**
  * 会话详情页左侧的会话列表（参考 WorkBuddy）：不用回列表页就能快速切到别的会话。
@@ -77,8 +92,95 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, sections]);
 
+  // 宽度：拖动时直接改 DOM（不逐帧 setState，列表重渲染会卡），松手才落状态 + 存本机
+  const [width, setWidth] = useState(readWidth);
+  const navRef = useRef<HTMLElement | null>(null);
+  const dragRef = useRef<{ x: number; start: number; last: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const applyWidth = (w: number) => {
+    if (navRef.current) navRef.current.style.width = `${w}px`;
+  };
+  const commitWidth = (w: number) => {
+    const next = clampWidth(w);
+    applyWidth(next);
+    setWidth(next);
+    try { localStorage.setItem(WIDTH_KEY, String(next)); } catch {}
+  };
+  // 拖动中锁住光标和选中，免得把正文文字一起选中
+  useEffect(() => {
+    if (!dragging) return;
+    document.body.classList.add("sidebar-resizing");
+    return () => document.body.classList.remove("sidebar-resizing");
+  }, [dragging]);
+  // 窗口变窄后旧宽度可能超过新上限：跟着收一下
+  useEffect(() => {
+    const onResize = () => { if ((navRef.current?.offsetWidth ?? width) > maxWidth()) commitWidth(maxWidth()); };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [width]);
+
+  /** 分隔条：鼠标 / 触屏拖宽度，←→ 键盘微调，双击回到默认 */
+  const resizer = drawer ? null : (
+    <div
+      className={`sidebar-resizer${dragging ? " dragging" : ""}`}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="调整会话列表宽度"
+      aria-valuenow={width}
+      aria-valuemin={MIN_W}
+      aria-valuemax={maxWidth()}
+      tabIndex={0}
+      title="拖动调整宽度，双击恢复默认"
+      onPointerDown={(e) => {
+        if (e.pointerType === "mouse" && e.button !== 0) return;
+        e.preventDefault();
+        const start = navRef.current?.offsetWidth ?? width;
+        dragRef.current = { x: e.clientX, start, last: start };
+        setDragging(true);
+        e.currentTarget.setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        const d = dragRef.current;
+        if (!d) return;
+        d.last = clampWidth(d.start + (e.clientX - d.x));
+        applyWidth(d.last);
+      }}
+      onPointerUp={(e) => {
+        const d = dragRef.current;
+        if (!d) return;
+        dragRef.current = null;
+        setDragging(false);
+        commitWidth(d.last);
+        e.currentTarget.releasePointerCapture?.(e.pointerId);
+      }}
+      onPointerCancel={() => {
+        const d = dragRef.current;
+        dragRef.current = null;
+        setDragging(false);
+        if (d) commitWidth(d.last);
+      }}
+      onDoubleClick={() => commitWidth(DEFAULT_W)}
+      onKeyDown={(e) => {
+        if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+        e.preventDefault();
+        const step = e.shiftKey ? 48 : 16;
+        const base = navRef.current?.offsetWidth ?? width;
+        commitWidth(base + (e.key === "ArrowRight" ? step : -step));
+      }}
+    />
+  );
+
   return (
-    <nav className={`sidebar${drawer ? " sidebar-drawer" : ""}`} aria-label="会话列表" aria-modal={drawer || undefined} role={drawer ? "dialog" : undefined}>
+    <>
+      <nav
+        ref={navRef}
+        className={`sidebar${drawer ? " sidebar-drawer" : ""}`}
+        style={drawer ? undefined : { width }}
+        aria-label="会话列表"
+        aria-modal={drawer || undefined}
+        role={drawer ? "dialog" : undefined}
+      >
       <div className="sidebar-head">
         <span>会话 <span className="count dim">{sessions.length}</span></span>
         <button className="icon-button sidebar-toggle" aria-label={drawer ? "关闭会话列表" : "收起会话列表"} title={drawer ? "关闭会话列表" : "收起会话列表"} onClick={onCollapse}>
@@ -132,6 +234,8 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
           </section>
         );
       })}
-    </nav>
+      </nav>
+      {resizer}
+    </>
   );
 }
