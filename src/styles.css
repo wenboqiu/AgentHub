@@ -857,9 +857,12 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 .pg-bubble.tone-wait::after { content: ""; position: absolute; inset: -5px; border-radius: 50%; border: 2px solid color-mix(in srgb, var(--alert) 55%, transparent); animation: pg-halo 1.9s ease-out infinite; }
 
 .pg-count { font-size: 26px; font-weight: 650; line-height: 1; color: color-mix(in srgb, var(--tone) 72%, var(--fg)); }
-.pg-name { max-width: 86%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--dim); }
-.pg-session .pg-state { font-size: 12.5px; font-weight: 600; color: color-mix(in srgb, var(--tone) 78%, var(--fg)); }
-.pg-session .pg-agent { font-size: 11px; color: var(--dim); }
+.pg-name { max-width: 88%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 550; line-height: 1.3; color: var(--fg); }
+.pg-bubble.pg-idle .pg-name { color: var(--dim); font-weight: 500; }
+.pg-session { gap: 1px; padding: 0 8%; }
+.pg-session .pg-state { font-size: 10.5px; font-weight: 600; line-height: 1.25; color: color-mix(in srgb, var(--tone) 78%, var(--fg)); }
+.pg-session .pg-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 100%; font-size: 11px; line-height: 1.22; text-align: center; color: var(--fg); word-break: break-word; }
+.pg-session .pg-agent { font-size: 9.5px; line-height: 1.2; color: var(--dim); }
 
 .pg-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px 18px; margin: 10px 0 0; font-size: 12px; color: var(--dim); }
 .pg-legend .pg-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }

@@ -268,6 +268,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
                   <span className={`pg-bubble pg-session ${tone}${e.run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 50}ms` }}>
                     {e.run && <span className="pg-run-arc" />}
                     <span className="pg-state">{label}</span>
+                    <span className="pg-title">{e.s.title || e.s.summary || "未命名会话"}</span>
                     <span className="pg-agent">{AGENT_LABEL[e.s.agent]}</span>
                   </span>
                 </span>
@@ -306,10 +307,10 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
               onClick={() => setExpanded(g.project)}
             >
               <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
-                <span className={`pg-bubble ${urgent ? "tone-wait" : hashTone(g.project)}`} style={{ animationDelay: `${i * 60}ms` }}>
+                <span className={`pg-bubble ${urgent ? "tone-wait" : hashTone(g.project)}${g.pending.length === 0 ? " pg-idle" : ""}`} style={{ animationDelay: `${i * 60}ms` }}>
                   {g.running.length > 0 && <span className="pg-run-ring" />}
                   <span className={`pg-count${g.pending.length === 0 ? " pg-zero" : ""}`}>{g.pending.length}</span>
-                  <span className="pg-name">{g.pending.length ? "待处理" : "无待处理"}</span>
+                  <span className="pg-name" title={g.project}>{g.project}</span>
                   {g.running.length > 0 && <span className="pg-pill">{g.running.length} 运行中</span>}
                 </span>
               </span>
