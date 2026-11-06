@@ -351,14 +351,23 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 /* 顶部栏恒为一行：极窄时用 nowrap + 逐级减负，避免标签换到第二行 */
 .app > header { flex-wrap: nowrap; }
 header h1 { white-space: nowrap; }
-/* 宽窗口下按视口真正居中（flex 居中会被左侧更宽的标题区推偏），窄窗口回到流内紧凑排列 */
-@media (min-width: 901px) {
+/* 宽窗口下按视口真正居中（flex 居中会被左侧更宽的标题区推偏），窄窗口回到流内紧凑排列。
+   断点取 1200：低于它时居中胶囊的最左边界会压住左侧状态文字（折叠屏展开约 914px 就在重叠区） */
+@media (min-width: 1200px) {
   .tabs { position: absolute; left: 50%; transform: translateX(-50%); }
 }
-@media (max-width: 900px) {
-  /* 窄窗口不再按视口比例撑宽，改为按内容紧凑排列，避免挤掉标题 */
-  .tabs { width: auto; }
+@media (max-width: 1199px) {
+  /* 窄窗口按内容紧凑排列；空间不够时在胶囊内横向滚动，绝不把右侧设置按钮挤出屏幕 */
+  .tabs { width: auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
   .tabs button { flex: 0 0 auto; gap: 6px; padding: 7px 12px; font-size: 14px; }
+}
+/* 中等宽度（折叠屏展开、平板竖屏）：先收装饰性的版本号，再藏 tab 图标只留文字，尽量避免出现内滚动 */
+@media (max-width: 1000px) {
+  .version { display: none; }
+}
+@media (max-width: 820px) {
+  .tabs button .icon { display: none; }
 }
 @media (max-width: 600px) {
   :root { font-size: 16px; }
