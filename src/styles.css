@@ -782,6 +782,16 @@ header h1 { white-space: nowrap; }
 }
 
 /* 任务单：会话跑完后项目经理排的活。比消息重、比任务详情轻，确认前就能改 */
+/* 对话页只留一个入口：卡片正文很长，点进详情页再看，聊天流不被挤满 */
+.proposal-entry { margin: 18px 0 8px; }
+.proposal-open { width: 100%; display: flex; align-items: center; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); box-shadow: var(--shadow); text-align: left; }
+.proposal-open:hover { border-color: var(--accent); }
+.proposal-open .icon { flex: none; color: var(--accent); }
+.proposal-open .icon:last-child { margin-left: auto; color: var(--dim); }
+.proposal-open-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.proposal-open-main strong { font-size: 14px; }
+.proposal-count { white-space: nowrap; }
+.proposal-source { margin: 0 0 14px; overflow-wrap: anywhere; }
 .proposal-list { display: flex; flex-direction: column; gap: 14px; margin: 18px 0 8px; }
 .proposal-card { padding: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); box-shadow: var(--shadow); }
 .proposal-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }

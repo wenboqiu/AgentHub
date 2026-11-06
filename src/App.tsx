@@ -10,6 +10,7 @@ import Settings from "./Settings";
 import TasksPanel from "./TasksPanel";
 import GoalsPanel from "./GoalsPanel";
 import TaskView from "./TaskView";
+import ProposalView from "./ProposalView";
 import GoalView from "./GoalView";
 import CalendarView from "./CalendarView";
 import PendingGraph from "./PendingGraph";
@@ -17,7 +18,8 @@ import BoardPanel from "./BoardPanel";
 import Icon from "./Icon";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
-type Detail = {kind:"session";id:string} | {kind:"task"|"goal";id:number} | null;
+// proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
+type Detail = {kind:"session";id:string} | {kind:"proposal";id:string} | {kind:"task"|"goal";id:number} | null;
 type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar";
 const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历" } as const;
 
@@ -383,6 +385,8 @@ export default function App() {
     setDetail(next);
   };
   const openSession = (id:string)=>navigate({kind:"session",id});
+  // 对话页的「任务单」入口：正文太长，不在聊天流里展开，点进详情页才看
+  const openProposals = (id:string)=>navigate({kind:"proposal",id});
   const openTask = (id:number)=>navigate({kind:"task",id});
   const openGoal = (id:number)=>navigate({kind:"goal",id});
   // 从详情页跳到另一个会话（新开会话）：替换当前历史项，返回键仍然回到列表
@@ -476,14 +480,18 @@ export default function App() {
         onTask={openTask}
         onTaskSaved={saveTask}
         proposals={proposalList.filter(p => p.sessionId === openId)}
-        roles={roles}
-        projects={projects}
-        autoDispatch={!!manager?.enabled}
-        onProposal={saveProposal}
+        onProposals={openProposals}
       />
     );
   }
   if (detail && api) {
+    if(detail.kind === "proposal") {
+      return <ProposalView key={detail.id} sessionId={detail.id} session={sessions.get(detail.id)}
+        proposals={proposalList.filter(p => p.sessionId === detail.id)}
+        api={api} roles={roles} projects={projects} autoDispatch={!!manager?.enabled}
+        onChanged={saveProposal} onTask={saveTask}
+        onBack={closeSession} onSession={openSession} />;
+    }
     if(detail.kind === "task") {
       const task=tasks.get(detail.id);
       return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;

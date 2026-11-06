@@ -1,11 +1,10 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Project, type Proposal, type Role, type Run, type RunActivity, type Session, type Task } from "./lib/api";
+import { isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
 import { desktop, isAndroid, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
 import MessageActions from "./MessageActions";
-import ProposalCard from "./ProposalCard";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import SessionSidebar from "./SessionSidebar";
@@ -49,13 +48,10 @@ type Props = {
   tasks: Task[];
   onTask(id:number):void;
   onTaskSaved(task:Task):void;
-  /** 这条会话的处理意见（含已处理过的，用来显示「已生成任务」） */
+  /** 这条会话的处理意见（含已处理过的，用来判断要不要显示入口、有几份待确认） */
   proposals: Proposal[];
-  roles: Role[];
-  projects: Project[];
-  /** 项目经理开了自动派发：卡片上多一个「生成并派发」 */
-  autoDispatch: boolean;
-  onProposal(p: Proposal): void;
+  /** 打开任务单详情页（正文放在那边展开，聊天流里只留一个入口） */
+  onProposals(sessionId: string): void;
 };
 
 /** 不能发消息的原因与各种阻塞判定，见 lib/sendBlock（纯逻辑，单独测试） */
@@ -84,15 +80,16 @@ const parseQuestions = (detail: string): UserQuestion[] | null => {
   }
 };
 
-export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, roles, projects, autoDispatch, onProposal }: Props) {
+export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   /** 运行中：执行器刚上报的「正在做什么」（agent 自己的话），不是本地编的状态 */
   const [activity, setActivity] = useState<RunActivity | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
-  // 任务单一次只处理一张，避免连点生成两个任务
-  const [proposalBusy, setProposalBusy] = useState(false);
+  // 任务单入口上的数量：待确认优先说，处理过的只给个总数
+  const proposalCount = proposals.length;
+  const pendingProposals = proposals.filter((p) => p.status === "pending").length;
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
@@ -506,14 +503,19 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         {/* 跑完：这一轮花了多久、烧了多少 token */}
         {run && !active && <p className="run-meta">{runSummary(run, now)}</p>}
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
-        {/* 任务单：会话跑完后由项目经理排好「做什么、谁来做、在哪做」，等人确认 */}
-        {proposals.length > 0 && (
-          <section className="proposal-list" aria-label="项目经理的任务单">
-            {proposals.map(p => (
-              <ProposalCard key={p.id} api={api} proposal={p} roles={roles} projects={projects}
-                autoDispatch={autoDispatch} busy={proposalBusy} onBusy={setProposalBusy}
-                onError={setErr} onChanged={onProposal} onTask={onTaskSaved} />
-            ))}
+        {/* 任务单：会话跑完后由项目经理排好「做什么、谁来做、在哪做」。
+            正文很长，这里只留一个入口，点进去才展开全文，聊天流不被卡片挤满 */}
+        {proposalCount > 0 && (
+          <section className="proposal-entry">
+            <button className="proposal-open" onClick={() => onProposals(sessionId)} aria-label={`查看任务单（${proposalCount} 份）`}>
+              <Icon name="tasks" />
+              <span className="proposal-open-main">
+                <strong>任务单</strong>
+                <span className="dim">{pendingProposals > 0 ? `${pendingProposals} 份待确认` : "都已处理"}</span>
+              </span>
+              {proposalCount > pendingProposals && <span className="proposal-count dim">共 {proposalCount} 份</span>}
+              <Icon name="chevron" />
+            </button>
           </section>
         )}
       </main>
