@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
+import { isPending, isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
 import { desktop, isAndroid, isDesktop } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
@@ -54,6 +54,8 @@ type Props = {
   proposals: Proposal[];
   /** 打开任务单详情页（正文放在那边展开，聊天流里只留一个入口） */
   onProposals(sessionId: string): void;
+  /** 把这条会话标记为已处理：会话页头部的「处理」按钮，点完它就不再挂在待处理区 */
+  onAck(): void;
 };
 
 /** 不能发消息的原因与各种阻塞判定，见 lib/sendBlock（纯逻辑，单独测试） */
@@ -82,7 +84,7 @@ const parseQuestions = (detail: string): UserQuestion[] | null => {
   }
 };
 
-export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals }: Props) {
+export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals, onAck }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [run, setRun] = useState<Run | null>(null);
   /** 运行中：执行器刚上报的「正在做什么」（agent 自己的话），不是本地编的状态 */
@@ -393,6 +395,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       window.setTimeout(() => setNote(""), 3500);
     });
   const stop = () => run && guard("stop", () => api.stop(run.id));
+  // 会话页的「处理」：看完这轮就标记已处理，回列表它就不在待处理区了
+  const ackThis = () => {
+    onAck();
+    setNote("已标记为已处理");
+    window.setTimeout(() => setNote(""), 3500);
+  };
   // 手动同步电脑上的记录；失败要提示（自动同步失败才静默保留旧记录）
   const loadHistory = () => {
     if (syncing || !online) return;
@@ -448,6 +456,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <span className={`tag ${session.agent}`}>{AGENT_LABEL[session.agent]}</span>
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
+        {isPending(session) && (
+          <button type="button" className="session-ack" onClick={ackThis} title="标记为已处理，不再挂在待处理区">
+            <Icon name="check" />
+            处理
+          </button>
+        )}
         <span className="machine">
           <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
           {!pendingSession && (

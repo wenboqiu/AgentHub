@@ -130,7 +130,7 @@ function Row({
           )}
           {isPending(s) && (
             <button className="link" onClick={stop(onAck)}>
-              已处理
+              标为已处理
             </button>
           )}
         </span>
@@ -493,6 +493,7 @@ export default function App() {
         onTaskSaved={saveTask}
         proposals={proposalList.filter(p => p.sessionId === openId)}
         onProposals={openProposals}
+        onAck={() => void ack(openId)}
       />
     );
   }
@@ -557,7 +558,7 @@ export default function App() {
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
         <div hidden={tab!=="sessions"}>
-        <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部已处理</button>}</div>
+        <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部标为已处理</button>}</div>
         {cfg.graphMode ? (
           <section>
             <h2>
@@ -565,7 +566,7 @@ export default function App() {
               {running.length > 0 && <span className="count dim">{running.length} 运行中</span>}
             </h2>
             {pending.length + running.length > 0 ? (
-              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} onOpen={openSession} onAck={ack} />
+              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} onOpen={openSession} />
             ) : (
               <p className="empty">没有待处理或运行中的会话</p>
             )}
