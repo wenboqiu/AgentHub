@@ -182,7 +182,7 @@ export default function Roles({ api, onEdit }: { api: Api; onEdit(role: Role | n
       <p className="hint">
         把「谁来干、什么职责、用什么模型、按什么准则、记得什么」存成一个名字——像一名员工。角色绑执行工具和模型，但不绑电脑：派活时只在「装了该工具的电脑」里挑，具体在哪台、哪个目录由任务定。建任务或派活时选角色，工具、模型、准则和这个项目的经验一起下发。
       </p>
-      {assist && <Assistant api={api} onCreated={load} onClose={() => setAssist(false)} />}
+      {assist && <Assistant api={api} onCreated={r => { load(); onEdit(r); }} onClose={() => setAssist(false)} />}
       {list === null ? (
         <p className="hint">加载中…</p>
       ) : (

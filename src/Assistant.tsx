@@ -7,6 +7,7 @@ import type {
   AssistantState,
   Machine,
   Project,
+  Role,
 } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import RoleFields, { BLANK_ROLE, formToInput, roleReady, type RoleForm } from "./RoleFields";
@@ -59,7 +60,8 @@ function DraftCard({
   projects: Project[];
   busy: boolean;
   onBusy(v: boolean): void;
-  onCreated(): void;
+  /** 创建成功后回传新角色：外层拿着它跳进角色详情页 */
+  onCreated(r: Role): void;
   onError(msg: string): void;
 }) {
   const [form, setForm] = useState<RoleForm>(() => toForm(draft.draft));
@@ -76,7 +78,7 @@ function DraftCard({
   };
 
   if (done === "created") {
-    return <p className="assistant-verdict">已创建角色「{form.name}」，可以在下面继续改。</p>;
+    return <p className="assistant-verdict">已创建角色「{form.name}」，正在打开它的详情页。</p>;
   }
   if (done === "discarded") return <p className="assistant-verdict dim">这张草稿不用了。</p>;
 
@@ -109,7 +111,11 @@ function DraftCard({
       <RoleFields form={form} projects={projects} busy={busy} onChange={set} />
       <div className="btns">
         <button className="primary" disabled={busy || !roleReady(form)}
-          onClick={() => void act(async () => { await api.confirmDraft(draft.id, formToInput(form)); setHandled("created"); onCreated(); })}>
+          onClick={() => void act(async () => {
+            const r = await api.confirmDraft(draft.id, formToInput(form));
+            setHandled("created");
+            onCreated(r.role);
+          })}>
           创建角色
         </button>
         <button className="ghost" disabled={busy}
@@ -126,7 +132,8 @@ export default function Assistant({
   onClose,
 }: {
   api: Api;
-  onCreated(): void;
+  /** 草稿卡确认后回传新角色：列表页刷新并跳进它的详情页 */
+  onCreated(r: Role): void;
   onClose(): void;
 }) {
   const [state, setState] = useState<AssistantState | null>(null);
@@ -233,7 +240,7 @@ export default function Assistant({
         </div>
       </div>
       <p className="hint">
-        用一句话说清要什么人，电脑端的 agent 会整理成一份草稿（名字、职责、执行工具、模型、准则、项目经理）；草稿的字段和「＋ 新建角色」完全一样，点「创建角色」才真正写进角色列表。
+        用一句话说清要什么人，电脑端的 agent 会整理成一份草稿（名字、职责、执行工具、模型、准则、项目经理）；草稿的字段和「＋ 新建角色」完全一样，点「创建角色」才真正写进角色列表，并直接打开这个角色的详情页。
         这条通道借的是派活：电脑得开着 AgentHub，一次大概十几秒，进程在那个电脑的「文档/AgentHub」里启动，不读写你的项目文件
         {state?.roles ? `；现有 ${state.roles} 个角色，助手会避开重名` : ""}。
       </p>
