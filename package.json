@@ -11,7 +11,12 @@
     "tauri": "tauri",
     "release": "tauri build && node scripts/publish-release.mjs --latest",
     "release:check": "node scripts/publish-release.mjs --check",
-    "publish:artifact": "node scripts/publish-release.mjs"
+    "publish:artifact": "node scripts/publish-release.mjs",
+    "watch:tasks": "node scripts/watch-tasks.mjs",
+    "notify:tasks": "node scripts/notify-tasks.mjs",
+    "daemon": "node scripts/task-daemon.mjs",
+    "task:run": "node scripts/task-run.mjs",
+    "task:next": "node scripts/task-run.mjs --next"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
