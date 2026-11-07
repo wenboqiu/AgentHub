@@ -15,6 +15,8 @@ mod doubao;
 #[cfg(desktop)]
 mod workbuddy;
 #[cfg(desktop)]
+mod workbuddy_read;
+#[cfg(desktop)]
 mod zcode;
 #[cfg(desktop)]
 mod zcode_exec;

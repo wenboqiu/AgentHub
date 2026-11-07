@@ -61,6 +61,9 @@ export type Session = {
 
 const ALERT_STATES: State[] = ['waiting', 'done', 'aborted']
 
+// 能在本机读到「已读」证据的 agent：Codex Desktop 的已读存储、WorkBuddy 的 sessions.unread
+const READ_RECEIPT_AGENTS: Agent[] = ['codex', 'workbuddy']
+
 export function createPool(url: string) {
   return new pg.Pool({ connectionString: url, max: 10 })
 }
@@ -283,8 +286,9 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
 
   // Native read receipts acknowledge one exact completed turn only. Never clear an
   // approval or overwrite a newer completion that arrived during the local read.
+  // 只有能读到本机已读存储的 agent（Codex Desktop / WorkBuddy）才有资格发回执。
   if (ev.readAt !== undefined) {
-    if (!cur || ev.agent !== 'codex' || !ev.quiet || ev.expectedAt === undefined ||
+    if (!cur || !READ_RECEIPT_AGENTS.some(a => a === ev.agent) || !ev.quiet || ev.expectedAt === undefined ||
         cur.machine !== ev.machine || cur.state !== ev.state || !['done', 'aborted'].includes(cur.state) ||
         at.getTime() !== cur.event_at.getTime() || !Number.isFinite(Date.parse(ev.readAt)) || Date.parse(ev.readAt) < at.getTime()) return null
   }
