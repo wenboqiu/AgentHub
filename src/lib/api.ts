@@ -351,6 +351,8 @@ export class Api {
   sessions = async () => (await this.call<{ sessions: Session[] }>("GET", "/sessions")).sessions;
   /** 全量会话（含已结束）：快照只推活跃会话，日历要把当天已结束的对话也画出来 */
   sessionsAll = async () => (await this.call<{ sessions: Session[] }>("GET", "/sessions?all=1")).sessions;
+  /** 单个会话：快照里没有的（已结束 / 超过 24 小时）按 id 补查，找不到说明记录真没了 */
+  session = async (id: string) => (await this.call<{ session: Session }>("GET", `/sessions/${encodeURIComponent(id)}`)).session;
   goals = async () => (await this.call<{goals: Goal[]}>("GET", "/goals")).goals;
   tasks = async () => (await this.call<{tasks: Task[]}>("GET", "/tasks")).tasks;
   createGoal = async (input: {title: string; notes?: string; priority?: Goal["priority"]} & Partial<Schedule>) => (await this.call<{goal: Goal}>("POST", "/goals", input)).goal;

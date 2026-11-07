@@ -897,6 +897,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { sessions: await listSessions(pool, req.userId, q.all === '1') }
   })
 
+  // 单查一个会话：快照只推「24 小时内且没结束」的会话，任务/日历里引用的旧会话
+  // 不在前端列表里，按 id 补一次才能判断是「已结束」还是「真的删了」。
+  app.get('/sessions/:id', async (req, reply) => {
+    const session = await getSession(pool, req.userId, (req.params as { id: string }).id)
+    if (!session) return reply.code(404).send({ error: '会话不存在' })
+    return { session }
+  })
+
   // ---------- 目标与任务（所有变更与执行器事件串行） ----------
   app.get('/goals', async req => serial(async () => ({goals:await listGoals(pool,req.userId)})))
   app.get('/tasks', async req => serial(async () => ({tasks:await listTasks(pool,req.userId)})))

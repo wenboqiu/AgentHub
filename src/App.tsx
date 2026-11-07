@@ -165,6 +165,8 @@ export default function App() {
   const openId = detail?.kind === "session" ? detail.id : null;
   const [approvals, setApprovals] = useState<Map<string, Approval>>(new Map());
   const [agents, setAgents] = useState<string[]>([]);
+  // 历史会话：快照只推「24 小时内且没结束」的，更早的要单独拉一次。点开才拉，不拖慢启动。
+  const [archive, setArchive] = useState<Session[] | null>(null);
   const [notice, setNotice] = useState("");
   const bus = useMemo(() => makeBus(), []);
   const [now, setNow] = useState(Date.now());
@@ -385,7 +387,16 @@ export default function App() {
     else window.history.pushState(state,"");
     setDetail(next);
   };
-  const openSession = (id:string)=>navigate({kind:"session",id});
+  const openSession = (id:string)=>{
+    // 快照只推活跃会话：已结束 / 超过 24 小时的会话不在列表里，按 id 补一次，
+    // 详情页才拿得到机器、项目这些信息（否则正文和历史同步都没有入口）。
+    if (api && !sessions.has(id)) {
+      void api.session(id)
+        .then(s => setSessions(m => m.has(s.id) ? m : new Map(m).set(s.id, s)))
+        .catch(() => {});
+    }
+    navigate({kind:"session",id});
+  };
   // 对话页的「任务单」入口：正文太长，不在聊天流里展开，点进详情页才看
   const openProposals = (id:string)=>navigate({kind:"proposal",id});
   const openTask = (id:number)=>navigate({kind:"task",id});
@@ -575,6 +586,17 @@ export default function App() {
             </details>
           </>
         )}
+        <details onToggle={(e) => {
+          const open = (e.currentTarget as HTMLDetailsElement).open;
+          if (open && archive === null && api) void api.sessionsAll().then(setArchive).catch(() => setArchive([]));
+        }}>
+          <summary>历史会话{archive ? `（${archive.filter(s => !sessions.has(s.id)).length}）` : ""}</summary>
+          <p className="hint">已结束或超过 24 小时的会话；库里保留最近 30 天，点开就能看对话正文。</p>
+          {archive === null ? <p className="dim">展开后读取…</p> : (() => {
+            const old = archive.filter(s => !sessions.has(s.id));
+            return old.length ? renderList(old) : <p className="empty">没有更早的会话</p>;
+          })()}
+        </details>
         </div>
       </main>
     </div>

@@ -42,6 +42,17 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   // 附件：图片带 data URL 可直接内联渲染，文件点下载时再取内容
   const [attachments, setAttachments] = useState<Attachment[]>([]), [preview, setPreview] = useState<string | null>(null);
   const [failing, setFailing] = useState<number | null>(null), [note, setNote] = useState(""), [newItem, setNewItem] = useState("");
+  // 关联会话不在快照里时（已结束 / 超过 24 小时）按 id 补查一次：
+  // 拿到就照常打开，404 才是真的删了。undefined = 还在查，null = 查过但没有。
+  const [extra, setExtra] = useState<Record<string, Session | null>>({});
+  useEffect(() => {
+    let alive = true;
+    const missing = task.sessionIds.filter(id => !sessions.some(s => s.id === id) && extra[id] === undefined);
+    if (!missing.length) return;
+    void Promise.all(missing.map(id => api.session(id).then(s => [id, s] as const).catch(() => [id, null] as const)))
+      .then(rows => { if (alive) setExtra(m => { const n = { ...m }; for (const [id, s] of rows) n[id] = s; return n; }); });
+    return () => { alive = false; };
+  }, [api, task.sessionIds, sessions, extra]);
   const flashTimer = useRef<number | undefined>(undefined);
   const attachPicker = useRef<HTMLInputElement | null>(null);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
@@ -468,7 +479,19 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     <section className="detail-section">
       <h3>关联会话（{task.sessionIds.length}）</h3>
       {task.sessionIds.length > 0
-        ? <ul className="list">{task.sessionIds.map(id => { const s = sessions.find(s => s.id === id); return <li className="linked-row" key={id}><button className="entity-row" disabled={!s} onClick={() => onSession(id)}><span className="entity-main"><strong>{s ? `${AGENT_LABEL[s.agent] ?? s.agent} · ${s.project || "未知项目"}` : "会话已清理"}</strong><span className="dim">{s ? `${s.title} · ${STATE_LABEL[s.state] ?? s.state} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span></span></button><button className="icon-ghost" aria-label="取消挂接" title="取消挂接" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unlinkSession(task.id, id)))}><Icon name="close" /></button></li>; })}</ul>
+        ? <ul className="list">{task.sessionIds.map(id => {
+          const s = sessions.find(s => s.id === id) ?? extra[id] ?? undefined;
+          const looked = id in extra; // 补查过：为 null 说明记录真没了
+          return <li className="linked-row" key={id}>
+            <button className="entity-row" disabled={!s} onClick={() => onSession(id)}>
+              <span className="entity-main">
+                <strong>{s ? `${AGENT_LABEL[s.agent] ?? s.agent} · ${s.project || "未知项目"}` : looked ? "会话记录已删除" : "读取中…"}</strong>
+                <span className="dim">{s ? `${s.title} · ${STATE_LABEL[s.state] ?? s.state} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span>
+              </span>
+            </button>
+            <button className="icon-ghost" aria-label="取消挂接" title="取消挂接" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unlinkSession(task.id, id)))}><Icon name="close" /></button>
+          </li>;
+        })}</ul>
         : <p className="dim">还没有关联会话。开始执行后会自动挂接。</p>}
       <button className="link" disabled={busy} onClick={() => setLinking(!linking)}>关联已有会话</button>
       {linking && <div className="selection-panel"><p>选择会话（最近 30 条）</p>{sessions.filter(s => !task.sessionIds.includes(s.id)).slice(0, 30).map(s => <button className="entity-row" key={s.id} disabled={busy} onClick={() => void guard(async () => { onSaved(await api.linkSession(task.id, s.id)); setLinking(false); })}><span>{AGENT_LABEL[s.agent] ?? s.agent} · {s.project} · {s.title}</span></button>)}</div>}

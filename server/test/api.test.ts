@@ -175,12 +175,18 @@ describe('AgentHub 服务端', () => {
     assert.equal(await get(`claude:${a}`), undefined)
   })
 
-  it('默认列表隐藏 ended，all=1 才显示', async () => {
+  it('默认列表隐藏 ended，all=1 才显示，单查接口还能拿到', async () => {
     const s = sid()
     await send([ev(s, 'ended')])
     const normal = await call('GET', '/sessions')
     assert.ok(!(normal.body.sessions as any[]).some(x => x.id === `claude:${s}`))
     assert.ok(await get(`claude:${s}`))
+    // 快照里没有的会话（已结束 / 超过 24 小时）可以按 id 补查：任务详情靠这个才点得开
+    const one = await call('GET', `/sessions/${encodeURIComponent(`claude:${s}`)}`)
+    assert.equal(one.status, 200)
+    assert.equal(one.body.session.state, 'ended')
+    assert.equal((await call('GET', '/sessions/claude:nope')).status, 404)
+    assert.equal((await call('GET', `/sessions/${encodeURIComponent(`claude:${s}`)}`, undefined, null)).status, 401)
   })
 
   it('豆包事件支持状态、标题更新与提醒，拒绝远程执行和历史读取', async () => {
