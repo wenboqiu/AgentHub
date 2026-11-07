@@ -422,10 +422,10 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
               <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
                 <span className={`pg-bubble ${tone}`} style={{ animationDelay: `${i * 60}ms` }}>
                   {runningCount > 0 && <span className="pg-run-ring" />}
-                  {/* 待处理 / 运行中两个数字同时显示，颜色区分：待处理用气泡暖色调，运行中统一蓝色 */}
+                  {/* 待处理 / 运行中两个数字同时显示，颜色区分：待处理统一暖色（有待授权改警示红），运行中统一蓝色 */}
                   <span className="pg-nums">
                     {hasPending && (
-                      <span className="pg-num pg-num-pending">
+                      <span className={`pg-num pg-num-pending${urgent ? " pg-num-urgent" : ""}`}>
                         <b>{pendingCount}</b>
                         <i>待处理</i>
                       </span>
