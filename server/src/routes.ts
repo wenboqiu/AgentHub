@@ -428,7 +428,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
   // prompt 用来把「实际发给 agent 的内容」和「记录里显示的内容」分开（助手在消息前面拼了输出格式契约）。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }, prompt?: string) {
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: Delivery, sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }, prompt?: string) {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
@@ -457,6 +457,21 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       throw new TaskError('电脑端不在线',409)
     }
     return {runId,sessionId:pendingId,...(task ? {task} : {})}
+  }
+
+  /**
+   * 这个任务上次派发落在哪个会话上。只认「本任务自己的 run 产生的真实会话」：
+   * 手动关联进来的来源会话不算——那不是这个任务跑出来的对话。第一次派发返回 null。
+   */
+  async function lastDispatchSession(userId: number, taskId: number): Promise<Pick<Session, 'id' | 'agent' | 'machine' | 'cwd' | 'state'> | null> {
+    const r = await pool.query(
+      `SELECT s.id, s.agent, s.machine, s.cwd, s.state
+         FROM runs r JOIN sessions s ON s.user_id = r.user_id AND s.id = r.session_id
+        WHERE r.user_id = $1 AND r.task_id = $2 AND r.session_id IS NOT NULL AND r.session_id NOT LIKE $3
+        ORDER BY r.created_at DESC LIMIT 1`,
+      [userId, taskId, `%${PENDING}%`],
+    )
+    return r.rows[0] ?? null
   }
 
   // 派活编排：手动「开始」与项目经理自动派发共用这一条路径。
@@ -496,6 +511,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       // 会话键是 agent 自己那半截 id（claude:xxx → xxx）；拼不出来就别假装能续
       if (mode === 'fork' && src) sessionKey = sessionKeyOf(src.id)
       if (!sessionKey) mode = 'fresh'
+    }
+    // 同一任务被反复派发（失败重试、自动派发、人工再点开始）默认接着上次派发出来的会话继续：
+    // 每次都 fresh 会在本机多开一个同名对话，时间轴上看就像同一件事重复了好几遍。
+    // 只在本该从零开跑时考虑；人明确要求新会话（delivery=fresh）就照办。
+    // 没有目录就不续：执行器会落到 AgentHub 默认工作目录，claude 按目录存会话，肯定找不到原对话。
+    if (mode === 'fresh' && b.delivery !== 'fresh' && cwd) {
+      const prev = await lastDispatchSession(userId, task.id)
+      if (prev) {
+        const plan = planDelivery('resume', forkInfo(prev), { agent: agent ?? '', machine, cwd })
+        mode = plan.mode
+        deliveryReason = plan.reason
+        if (mode === 'resume') sessionKey = sessionKeyOf(prev.id)
+        if (!sessionKey) mode = 'fresh'
+      }
     }
     // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
     const memories = role ? await pickMemories(pool, userId, role.id, task.projectId) : []
@@ -558,10 +587,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!executors.has(execKey(userId, machine))) return
       // 入队时定的「接着原会话」到真投递可能隔了几小时：原会话可能又在跑或被删了，投递前重新判定
       let mode = item.mode as Delivery, sessionKey = item.sessionKey as string
-      if (mode === 'fork') {
+      if (mode === 'fork' || mode === 'resume') {
+        const want = mode
         const src = sessionKey ? await getSession(pool, userId, `${item.agent}:${sessionKey}`).catch(() => null) : null
-        const plan = planDelivery('fork', src ? forkInfo(src) : NO_FORK, { agent: item.agent as string, machine, cwd: item.cwd as string })
-        if (plan.mode !== 'fork') {
+        const plan = planDelivery(want, src ? forkInfo(src) : NO_FORK, { agent: item.agent as string, machine, cwd: item.cwd as string })
+        if (plan.mode !== want) {
           mode = 'fresh'; sessionKey = ''
           app.log.warn({ taskId: item.taskId, reason: plan.reason }, '排队投递复核：续不上原会话，退回新会话')
           await logAuto(pool, userId, item.taskId, 'dispatched', null, `排队复核退回新会话：${plan.reason}`)
@@ -705,25 +735,30 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
             : false
           pushSession(req.userId,r.session,notify)
           await syncTask(req.userId,r.session.id,r.session.state)
-          // 会话跑完：攒一条处理意见等人确认。补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，
-          // 否则「问角色」也会产出一条待办，细化还会无限套娃。
-          // WorkBuddy 的正文只在电脑上：先把这一轮的回复同步进库，再按最新回复攒任务单。
+          // 会话跑完：只有挂了未完成任务的会话才攒处理意见（generateProposal 里把关），不挂任务的不产单。
+          // 补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，否则「问角色」也会产出一条待办，
+          // 细化还会无限套娃。WorkBuddy 的正文只在电脑上：先把这一轮的回复同步进库，再按最新回复攒任务单。
           // 顺序反了就是「任务单先冒出来、最新回复还停在上一轮」，标题也会从旧回复里摘。
           if (r.session.state === 'done' && !ev.quiet &&
               !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
             const done = r.session
+            // 攒出底稿后立刻让项目经理用模型重写（与发单同一条自动细化通道）；
+            // 规则稿只是底稿，人看到的那份应是模型写的。电脑不在线/没配经理时底稿先顶上，人可手动点细化。
+            const draft = async () => {
+              const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
+                .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
+              if (!proposal) return
+              broadcast(req.userId, { type: 'proposal', proposal })
+              await startRefine(req.userId, proposal, {}).catch(e => app.log.warn(e, '自动细化处理意见失败，保留规则底稿'))
+            }
             if (done.agent === 'workbuddy') {
               // 同步要等电脑端回话（最多 10s），放后台跑，别把这次事件上报的响应拖住
               void inBackground(async () => {
                 await syncNativeHistory(req.userId, done).catch(e => app.log.error(e, '同步会话正文失败'))
-                const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
-                  .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
-                if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+                await draft()
               })
             } else {
-              const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
-                .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
-              if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+              void inBackground(draft)
             }
           }
           // Watchdog：反复失败达到阈值时提醒一次（running 清零计数）

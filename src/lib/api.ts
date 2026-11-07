@@ -119,8 +119,11 @@ export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: str
 /** ticket = 人直接发的粗单：没有会话，项目经理细化后由人确认才派发 */
 export type ProposalKind = "continue" | "followup" | "fix" | "ticket";
 /** 项目经理排好的执行人：角色是人，配置是地方（执行工具 + 电脑 + 目录） */
-/** 开跑方式：fork = 接着原会话的上下文，fresh = 新建会话从这个任务开始 */
-export type Delivery = "fork" | "fresh";
+/**
+ * 开跑方式：fork = 接着原会话的上下文另起一个会话，fresh = 新建会话从这个任务开始，
+ * resume = 接着这个任务上次派发的会话继续（同一个对话，派发侧自动算出来，界面不用选）
+ */
+export type Delivery = "fork" | "fresh" | "resume";
 
 /** 原会话这一侧能不能续：工具支不支持、是不是还在跑（能不能对上执行人由界面再判一次） */
 export type ForkInfo = { agent: string; machine: string; cwd: string; ok: boolean; reason: string };

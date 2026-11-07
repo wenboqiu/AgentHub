@@ -114,6 +114,22 @@ test('planDelivery：工具 / 电脑 / 目录任一不同就退回新会话', ()
   assert.deepEqual(planDelivery('fresh', fork, target), { mode: 'fresh', reason: '新建会话，从这个任务开始' })
 })
 
+test('planDelivery：同一任务重复派发续用上次的会话，不再新开一个同名对话', () => {
+  const prev = forkInfo({ agent: 'claude', machine: 'pc-home', cwd: 'D:/Work2/AgentHub', state: 'done' })
+  const target = { agent: 'claude', machine: 'pc-home', cwd: 'D:/Work2/AgentHub' }
+
+  const ok = planDelivery('resume', prev, target)
+  assert.equal(ok.mode, 'resume')
+  assert.match(ok.reason, /接着上次派发的会话继续/)
+
+  // 和 fork 用同一套条件：换了工具 / 电脑 / 目录，或者上一轮还在跑，就只能新开
+  assert.equal(planDelivery('resume', prev, { ...target, agent: 'codex' }).mode, 'fresh')
+  assert.equal(planDelivery('resume', prev, { ...target, machine: 'mac' }).mode, 'fresh')
+  assert.equal(planDelivery('resume', prev, { ...target, cwd: 'D:/Work2/别的目录' }).mode, 'fresh')
+  const running = forkInfo({ agent: 'claude', machine: 'pc-home', cwd: 'D:/Work2/AgentHub', state: 'running' })
+  assert.equal(planDelivery('resume', running, target).mode, 'fresh')
+})
+
 test('原会话能不能续：只做状态监听的和在跑的都不行', () => {
   const base = { machine: 'pc', cwd: 'D:/x', state: 'done' as const }
   assert.equal(forkInfo({ ...base, agent: 'claude' }).ok, true)

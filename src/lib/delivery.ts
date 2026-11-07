@@ -25,7 +25,7 @@ export function normalizeCwd(p: string): string {
 }
 
 export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: string; machine: string; cwd: string }): DeliveryPlan {
-  if (want !== "fork") return { mode: "fresh", reason: "新建会话，从这个任务本身开始", blocked: false };
+  if (want === "fresh") return { mode: "fresh", reason: "新建会话，从这个任务本身开始", blocked: false };
   if (!fork.ok) return { mode: "fresh", reason: fork.reason, blocked: true };
   if (target.agent && target.agent !== fork.agent) {
     return { mode: "fresh", reason: `执行人是 ${agentName(target.agent)}，原会话是 ${agentName(fork.agent)}，续不上`, blocked: true };
@@ -35,6 +35,9 @@ export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: st
   }
   if (target.cwd && normalizeCwd(target.cwd) !== normalizeCwd(fork.cwd)) {
     return { mode: "fresh", reason: "任务目录和原会话不同，续不上上下文", blocked: true };
+  }
+  if (want === "resume") {
+    return { mode: "resume", reason: `接着上次派发的会话继续（${agentName(fork.agent)} · ${fork.machine}）`, blocked: false };
   }
   return { mode: "fork", reason: `接着原会话的上下文（${agentName(fork.agent)} · ${fork.machine}）`, blocked: false };
 }

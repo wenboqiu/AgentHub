@@ -16,8 +16,9 @@ export type QueuedDispatch = {
   /** 角色带来的模型与上下文：入队时一并存下，否则电脑上线时角色可能已经被改掉 */
   model: string | null
   instructions: string
-  /** 开跑方式也要存：人在确认任务单时选了「接着原会话」，排队不该把这件事吞掉 */
-  mode: 'fork' | 'fresh'
+  /** 开跑方式也要存：人在确认任务单时选了「接着原会话」，排队不该把这件事吞掉；
+   *  resume = 接着这个任务上次派发的会话继续，投递前要再复核一次还能不能续 */
+  mode: 'fork' | 'fresh' | 'resume'
   sessionKey: string
   attempts: number
   createdAt: string
@@ -58,14 +59,14 @@ const toQueued = (r: any): QueuedDispatch => ({
   text: r.text,
   model: r.model ?? null,
   instructions: r.instructions ?? '',
-  mode: r.mode === 'fork' ? 'fork' : 'fresh',
+  mode: r.mode === 'fork' || r.mode === 'resume' ? r.mode : 'fresh',
   sessionKey: r.session_key ?? '',
   attempts: Number(r.attempts),
   createdAt: new Date(r.created_at).toISOString(),
 })
 
 // 同一任务重复排队时覆盖旧的那次（用户改了第一条消息或换了电脑，以最新为准）
-export async function enqueueDispatch(db: DB, userId: number, taskId: number, d: { machine: string; agent: string; cwd: string; text: string; model?: string | null; instructions?: string; mode?: 'fork' | 'fresh'; sessionKey?: string }) {
+export async function enqueueDispatch(db: DB, userId: number, taskId: number, d: { machine: string; agent: string; cwd: string; text: string; model?: string | null; instructions?: string; mode?: 'fork' | 'fresh' | 'resume'; sessionKey?: string }) {
   await db.query(
     `INSERT INTO task_dispatch_queue(user_id,task_id,machine,agent,cwd,text,model,instructions,mode,session_key)
      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)

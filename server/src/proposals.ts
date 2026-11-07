@@ -11,10 +11,11 @@ import type { ProjectDir } from './projects.ts'
 // 和角色助手（assistant.ts）的分工——助手是「从一句话造一个角色」，这里是「从一段刚结束的工作
 // 攒出下一件事」。两者共用同一套范式：先出结构化草稿、人在界面上改、确认了才落库。
 //
-// 两档生成，默认第一档：
-//   ① 规则档（零成本、同步）：从最后一条助手回复、证据链、未完成清单里拼出草稿，几十毫秒；
-//   ② 细化档（一次 run、要电脑在线）：把会话尾部交给项目经理角色重写，质量高但慢。
-// 规则档先生成，人觉得不够好再点「让项目经理细化」——不让人为每次会话完成付一次模型的账。
+// 两档生成，缺一不可：
+//   ① 规则档（零成本、同步）：从最后一条助手回复、证据链、未完成清单里拼出底稿，几十毫秒；
+//   ② 细化档（一次 run、要电脑在线）：把会话尾部交给项目经理角色用模型重写，这才是任务单的最终内容。
+// 只有挂了未完成任务的会话才攒意见（没挂任务的闲聊不产单），而且底稿攒出来后立刻自动走细化档——
+// 规则稿只是给项目经理参考的底稿，人看到的那份是模型写的；电脑不在线时底稿先顶上，人可以手动点细化。
 //
 // 一条会话可以有多次完成（多段任务），用 (session, event_at) 做唯一键：同一时刻只出一条，
 // 新一轮完成（event_at 变了）才会再出一条。
@@ -24,8 +25,14 @@ type DB = Pick<pg.Pool, 'query'>
 /** ticket = 人直接发的一张粗单：没有会话，先让人写一句话，项目经理细化后再由人确认派发 */
 export type ProposalKind = 'continue' | 'followup' | 'fix' | 'ticket'
 export type ProposalOrigin = 'heuristic' | 'agent'
-/** 开跑方式：fork = 接着原会话那条线（带上下文），fresh = 新建会话从这个任务开始 */
-export type Delivery = 'fork' | 'fresh'
+/**
+ * 开跑方式：
+ * - fork = 接着原会话那条线（复制上下文，另起一个新会话）
+ * - fresh = 新建会话，从这个任务开始
+ * - resume = 接着上次派发出来的那个会话继续写（同一个对话，不新开）——
+ *   只在派发侧按「同一任务重复派发」算出来，不接受人手工指定
+ */
+export type Delivery = 'fork' | 'fresh' | 'resume'
 export type ProposalStatus = 'pending' | 'accepted' | 'discarded'
 export type Priority = 'high' | 'medium' | 'low'
 
@@ -159,9 +166,12 @@ export function normalizeCwd(p: string): string {
 /**
  * 真的开跑时用什么方式。想续但条件不满足就退回 fresh —— 不悄悄按自己的想法做，
  * 退回的理由要能说清楚，否则人只会觉得「我明明选了接着做」。
+ *
+ * resume 与 fork 共用同一套「工具 / 电脑 / 目录必须一致」的判定，区别只在落到哪个会话：
+ * fork 复制一份新会话，resume 直接续写原来的那条（时间轴上还是同一个对话）。
  */
 export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: string; machine: string; cwd: string }): { mode: Delivery; reason: string } {
-  if (want !== 'fork') return { mode: 'fresh', reason: '新建会话，从这个任务开始' }
+  if (want === 'fresh') return { mode: 'fresh', reason: '新建会话，从这个任务开始' }
   if (!fork.ok) return { mode: 'fresh', reason: fork.reason }
   if (target.agent !== fork.agent) {
     return { mode: 'fresh', reason: `执行人是 ${agentName(target.agent)}，原会话是 ${agentName(fork.agent)}，续不上` }
@@ -171,6 +181,9 @@ export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: st
   }
   if (target.cwd && normalizeCwd(target.cwd) !== normalizeCwd(fork.cwd)) {
     return { mode: 'fresh', reason: '任务目录和原会话不同，续不上上下文' }
+  }
+  if (want === 'resume') {
+    return { mode: 'resume', reason: `接着上次派发的会话继续（${agentName(fork.agent)} · ${fork.machine}）` }
   }
   return { mode: 'fork', reason: `接着原会话的上下文（${agentName(fork.agent)} · ${fork.machine}）` }
 }
@@ -217,6 +230,10 @@ export async function migrateProposals(db: DB) {
     CHECK (kind IN ('continue','followup','fix','ticket'))`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'fresh'`)
+  // 老库清理：历史上给没挂任务的会话也攒过意见，按新规矩它们不该存在——
+  // 待确认的一律作废（人发的单 kind=ticket 例外，它本来就没有会话可挂）
+  await db.query(`UPDATE session_proposals SET status='discarded', updated_at=now()
+    WHERE status='pending' AND task_id IS NULL AND kind <> 'ticket'`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_pending ON session_proposals(user_id,status,created_at DESC)')
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_session ON session_proposals(user_id,session_id)')
 }
@@ -496,7 +513,7 @@ export function heuristicDraft(input: {
 
 /**
  * 会话完成时调用：取最后回复、证据、未完成任务，攒一条待确认的意见。
- * 同一 (会话, 完成时刻) 只留一条；已有则返回 null。
+ * 只对挂了未完成任务的会话生成（没挂任务的会话不产单）；同一 (会话, 完成时刻) 只留一条，已有则返回 null。
  */
 export async function generateProposal(pool: pg.Pool, userId: number, session: Session, eventAt: string): Promise<Proposal | null> {
   const task = (
@@ -507,6 +524,8 @@ export async function generateProposal(pool: pg.Pool, userId: number, session: S
       [userId, session.id],
     )
   ).rows[0] ?? null
+  // 没挂任务（或挂着的任务已完结）就不攒意见：任务单只跟着派过的事走，闲聊不产单
+  if (!task) return null
   const msgs = await listMessages(pool, userId, session.id, 40)
   let lastReply = ''
   for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === 'assistant' && msgs[i].text.trim()) { lastReply = msgs[i].text; break }

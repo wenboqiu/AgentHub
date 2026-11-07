@@ -316,7 +316,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {roles.length > 0 && <label className="role-pick">角色
           <select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">不指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select>
         </label>}
-        <button className="primary" disabled={busy || !!reason} onClick={() => { setMessage(task.notes || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "再开一个会话" : "开始执行"}</button>
+        <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(task.notes || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
         {reason ? <span className="dim">{reason}</span> : offline ? <span className="dim">{machine} 离线，开始后会在它上线时自动派发</span> : null}
       </div>
       {task.queuedAt && <p className="hint queue-hint" role="status">
@@ -326,8 +326,9 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
       {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task);
               if (r.roleDegraded) setErr("电脑端版本较旧：角色里的模型与上下文没有生效，升级电脑端后重新派发即可");
               if (r.sessionId) onSession(r.sessionId); else setStarting(false); }); }}>
-        <label>第一条消息<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
+        <label>{task.sessionIds.length ? "这次要做什么" : "第一条消息"}<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
         <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
+        {task.sessionIds.length > 0 && <p className="hint">接着上次派发的会话继续：没换工具 / 电脑 / 目录的话，不会再新开一个对话。</p>}
       </form>}
       <details className="exec-settings" open={!task.agent || !task.cwd}>
         <summary>执行设置（角色 / 项目 / 工具 / 电脑 / 目录）</summary>
