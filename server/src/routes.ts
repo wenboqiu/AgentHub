@@ -222,8 +222,10 @@ const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
-/** 能远程派活的工具；执行器上报的 agents 只认这几个（豆包只做监听，不进派活候选） */
-const DISPATCH_AGENTS = ['claude', 'codex', 'workbuddy', 'zcode', 'codebuddy'] as const
+/** 能远程派活的工具；执行器上报的 agents 只认这几个。
+ *  豆包只做监听；WorkBuddy 也只做监听——桌面端内置的 lite bundle 没有独立登录态（实测派活必报
+ *  `Authentication required`），而能自己 `/login` 的那份就是 npm 完整版，也就是 codebuddy。 */
+const DISPATCH_AGENTS = ['claude', 'codex', 'zcode', 'codebuddy'] as const
 type DispatchAgent = (typeof DISPATCH_AGENTS)[number]
 /** 派活校验同时也是类型收窄：后面拿 agent 当强类型用 */
 const isDispatchAgent = (a: unknown): a is DispatchAgent =>
@@ -583,9 +585,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!machine && dir?.machine) machine = dir.machine
     // 项目目录登记成「哪台都行」而又有多台在线：随便挑一台。否则会排进空机器名，永远等不到上线
     if (!machine && online.length) machine = online[0]
-    const agent = b.agent ?? role?.agent ?? task.agent
+    // WorkBuddy 只做会话监听，不进派活：老角色 / 老任务里存着 workbuddy 的落到 CodeBuddy
+    // （同一份 CLI，能自己 /login 的那份），免得历史数据一编辑就报「请选择有效的执行工具」。
+    const requested = b.agent ?? role?.agent ?? task.agent
+    const agent = requested === 'workbuddy' ? 'codebuddy' : requested
     if (agent === 'doubao') throw new TaskError('豆包只做状态监听，请在客户端里执行后把会话关联到任务')
-    if (!isDispatchAgent(agent)) throw new TaskError('请选择 Claude、Codex、WorkBuddy、ZCode 或 CodeBuddy')
+    if (!isDispatchAgent(agent)) throw new TaskError('请选择 Claude、Codex、ZCode 或 CodeBuddy')
     // 这台电脑上报过装了哪些工具：明确没装就别往里派，排到天亮也跑不起来。
     // 没上报过（老客户端）不拦，交给执行器自己报错。
     const caps = machine ? capsByMachine.get(execKey(userId, machine)) : undefined

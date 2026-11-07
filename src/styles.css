@@ -756,6 +756,8 @@ header h1 { white-space: nowrap; }
 
 /* 角色记忆：一条条经验，带来源与用量，可手写可删 */
 .memory-block { margin-top: 4px; padding-top: 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+/* 角色详情页里记忆独占一张卡，卡片本身已经框住了，不用再画一条分隔线 */
+.role-memories .memory-block { margin-top: 0; padding-top: 0; border-top: 0; }
 .memory-head { display: flex; align-items: baseline; gap: 10px; }
 .memory-head strong { font-size: 13px; }
 .memory-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0; border-bottom: 1px dashed var(--line); }

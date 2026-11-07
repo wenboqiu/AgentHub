@@ -10,6 +10,8 @@ const DISPATCHABLE = DISPATCHABLE_AGENTS;
 // 角色管理：像员工一样——有职责、执行工具、模型、准则、可用工具声明，
 // 还有一份按项目分区的记忆（手写的须知 + 验收打回自动沉淀的经验）。
 // 角色只管「人」；「在哪台电脑、哪个目录」是项目的事（项目里的目录列表，按当前电脑自动挑）。
+// 列表页只管浏览和入口：点一条进详情页改，新建也走同一个详情页——
+// 表单长、还有记忆一大块，摊在列表里会把别的角色挤出屏幕。
 
 type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string; manager: boolean; managerProjects: number[] };
 const BLANK: Form = { name: "", title: "", agent: "claude", model: "", context: "", tools: "", manager: false, managerProjects: [] };
@@ -136,31 +138,108 @@ function Memories({ api, roleId, projects, onError }: { api: Api; roleId: number
   );
 }
 
-export default function Roles({ api }: { api: Api }) {
-  const [list, setList] = useState<Role[] | null>(null);
+/**
+ * 角色详情：独立一页，字段就地编辑 + 记忆 + 删除。
+ * 新建也走这里（role = null）：建完不跳走，直接变成这个角色的详情页，接着补记忆。
+ */
+export function RoleEditor({ api, role: initial, onBack, onSaved, onDeleted }: {
+  api: Api;
+  /** null = 新建 */
+  role: Role | null;
+  onBack(): void;
+  /** 建好 / 保存后回传最新角色（外层用它的名字做页标题） */
+  onSaved(r: Role): void;
+  onDeleted(): void;
+}) {
+  const [role, setRole] = useState<Role | null>(initial);
+  const [form, setForm] = useState<Form>(initial ? toForm(initial) : BLANK);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [forms, setForms] = useState<Record<string, Form>>({});
-  const [adding, setAdding] = useState(false), [draft, setDraft] = useState<Form>(BLANK);
-  const [openMem, setOpenMem] = useState<number | null>(null);
-  const [open, setOpen] = useState<Record<number, boolean>>({});
-  const [assist, setAssist] = useState(false);
   const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [err, setErr] = useState("");
 
+  // 经理管辖范围的下拉选项
+  useEffect(() => { api.projects().then(setProjects, () => setProjects([])); }, [api]);
+
+  // 与上次保存下来的那份比，才判断得出有没有改动
+  const dirty = JSON.stringify(form) !== JSON.stringify(role ? toForm(role) : BLANK);
+
+  const save = async () => {
+    setBusy(true); setErr(""); setMsg("");
+    const creating = !role;
+    try {
+      const r = creating
+        ? await api.createRole(toInput(form) as RoleInput & { name: string })
+        : await api.updateRole(role.id, toInput(form));
+      setRole(r);
+      setForm(toForm(r));
+      onSaved(r);
+      setMsg(creating ? "角色已创建，接着补记忆或直接返回" : "角色已保存");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!role) return;
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      await api.deleteRole(role.id);
+      onDeleted();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <section className="box">
+        <div className="box-head">
+          <h2>基本信息</h2>
+          {dirty && <span className="badge">未保存</span>}
+        </div>
+        <Fields form={form} projects={projects} busy={busy} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} />
+        <div className="btns">
+          <button className="primary" disabled={busy || !dirty || !form.name.trim()} onClick={() => void save()}>
+            {role ? "保存" : "创建角色"}
+          </button>
+          <button className="ghost" disabled={busy} onClick={onBack}>返回列表</button>
+          {!role && <span className="dim">只有角色名是必填的，其余可以之后慢慢补。</span>}
+        </div>
+        {msg && <p className="msg">{msg}</p>}
+        {err && <p className="form-error" role="alert">{err}</p>}
+      </section>
+
+      {role && (
+        <section className="box role-memories">
+          <Memories api={api} roleId={role.id} projects={projects} onError={setErr} />
+        </section>
+      )}
+
+      {role && (
+        <section className="box">
+          <div className="btns">
+            <button className="ghost" disabled={busy} onClick={() => void remove()}>删除角色</button>
+            <span className="dim">已经派出去的任务不会被删掉，只是不再带这个角色；当前有 {role.tasks} 个任务用过它。</span>
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
+/** 角色列表：一条一行，点进去才是编辑页 */
+export default function Roles({ api, onEdit }: { api: Api; onEdit(role: Role | null): void }) {
+  const [list, setList] = useState<Role[] | null>(null);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [assist, setAssist] = useState(false);
+
   const load = useCallback(() => {
-    api.roles().then(
-      (rs) => { setList(rs); setForms(Object.fromEntries(rs.map((r) => [String(r.id), toForm(r)]))); },
-      () => setList([]),
-    );
+    api.roles().then(setList, () => setList([]));
     api.projects().then(setProjects, () => setProjects([]));
   }, [api]);
   useEffect(() => { load(); }, [load]);
-
-  const run = async (fn: () => Promise<unknown>, done: string) => {
-    setBusy(true); setErr(""); setMsg("");
-    try { await fn(); setMsg(done); load(); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  };
 
   return (
     <section className="box">
@@ -178,59 +257,26 @@ export default function Roles({ api }: { api: Api }) {
         <p className="hint">加载中…</p>
       ) : (
         <>
-          {list.length === 0 && !adding && <p className="hint">还没有角色。建一个之后，派活时选名字就行，不用每次挑工具填模型。</p>}
-          {list.map((r) => {
-            const form = forms[String(r.id)] ?? toForm(r);
-            const dirty = JSON.stringify(form) !== JSON.stringify(toForm(r));
-            const expanded = !!open[r.id];
-            return (
-              <div key={r.id} className="profile-card">
-                <button type="button" className="role-head" aria-expanded={expanded}
-                  onClick={() => setOpen((o) => ({ ...o, [r.id]: !o[r.id] }))}>
-                  <strong>{r.name}</strong>
-                  {r.agent && <span className={`tag ${r.agent}`}>{AGENT_LABEL[r.agent] ?? r.agent}</span>}
-                  {r.manager && <span className="tag manager">项目经理</span>}
-                  <span className="dim role-title">{r.title || "职责未写"}</span>
-                  <span className="role-meta">
-                    {r.manager && <span>{r.managerProjects.length === 0 ? "管所有项目" : `管 ${r.managerProjects.map(id => projects.find(p => p.id === id)?.name ?? `项目 ${id}`).join("、")}`}</span>}
-                    {r.model && <code>{r.model}</code>}
-                    <span>{r.tasks} 个任务</span>
-                  </span>
-                  {dirty && <span className="badge">未保存</span>}
-                  <span className="role-toggle">{expanded ? "收起" : "编辑"}</span>
-                </button>
-                {expanded && (
-                  <>
-                    <Fields form={form} projects={projects} busy={busy} onChange={(patch) => setForms((m) => ({ ...m, [String(r.id)]: { ...(m[String(r.id)] ?? toForm(r)), ...patch } }))} />
-                    <div className="btns">
-                      <button className="primary" disabled={busy || !dirty} onClick={() => void run(() => api.updateRole(r.id, toInput(form)), "角色已保存")}>保存</button>
-                      <button className="ghost" disabled={busy} onClick={() => void run(() => api.deleteRole(r.id), "角色已删除")}>删除</button>
-                      <button className="ghost" aria-expanded={openMem === r.id} onClick={() => setOpenMem(openMem === r.id ? null : r.id)}>
-                        {openMem === r.id ? "收起记忆" : "记忆"}
-                      </button>
-                    </div>
-                    {openMem === r.id && <Memories api={api} roleId={r.id} projects={projects} onError={setErr} />}
-                  </>
-                )}
-              </div>
-            );
-          })}
-          {adding ? (
-            <div className="profile-card">
-              <div className="profile-head"><strong>新建角色</strong></div>
-              <Fields form={draft} projects={projects} busy={busy} onChange={(patch) => setDraft((f) => ({ ...f, ...patch }))} />
-              <div className="btns">
-                <button className="primary" disabled={busy || !draft.name.trim()} onClick={() => void run(async () => { await api.createRole(toInput(draft) as RoleInput & { name: string }); setDraft(BLANK); setAdding(false); }, "角色已创建")}>创建</button>
-                <button className="ghost" onClick={() => { setAdding(false); setDraft(BLANK); }}>取消</button>
-              </div>
+          {list.length === 0 && <p className="hint">还没有角色。建一个之后，派活时选名字就行，不用每次挑工具填模型。</p>}
+          {list.map((r) => (
+            <div key={r.id} className="profile-card">
+              <button type="button" className="role-head" onClick={() => onEdit(r)}>
+                <strong>{r.name}</strong>
+                {r.agent && <span className={`tag ${r.agent}`}>{AGENT_LABEL[r.agent] ?? r.agent}</span>}
+                {r.manager && <span className="tag manager">项目经理</span>}
+                <span className="dim role-title">{r.title || "职责未写"}</span>
+                <span className="role-meta">
+                  {r.manager && <span>{r.managerProjects.length === 0 ? "管所有项目" : `管 ${r.managerProjects.map(id => projects.find(p => p.id === id)?.name ?? `项目 ${id}`).join("、")}`}</span>}
+                  {r.model && <code>{r.model}</code>}
+                  <span>{r.tasks} 个任务</span>
+                </span>
+                <span className="role-toggle">编辑</span>
+              </button>
             </div>
-          ) : (
-            <button className="ghost" onClick={() => setAdding(true)}>＋ 新建角色</button>
-          )}
+          ))}
+          <button className="ghost" onClick={() => onEdit(null)}>＋ 新建角色</button>
         </>
       )}
-      {err && <p className="form-error" role="alert">{err}</p>}
-      {msg && <p className="msg">{msg}</p>}
     </section>
   );
 }
