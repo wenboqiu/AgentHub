@@ -9,7 +9,7 @@ import Checklist from "./Checklist";
 import InlineField from "./InlineField";
 import Markdown from "./Markdown";
 import TaskNotes from "./TaskNotes";
-import { fileKind, formatSize, notesForAgent, readForUpload, refOf, saveBase64 } from "./lib/attachments";
+import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
@@ -39,8 +39,10 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const [roles, setRoles] = useState<Role[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [machines, setMachines] = useState<Machine[]>([]);
-  // 附件：图片带 data URL 可直接内联渲染，文件点下载时再取内容
-  const [attachments, setAttachments] = useState<Attachment[]>([]), [preview, setPreview] = useState<string | null>(null);
+  // 附件：列表只有元信息，图片的 data URL 按 id 单取（缓存起来，切回来不重下）
+  const [attachments, setAttachments] = useState<Attachment[] | null>(null), [preview, setPreview] = useState<string | null>(null);
+  // 备注正在编辑时不许「插入备注」：那个按钮走 PATCH，会把编辑器里的草稿冲掉
+  const [notesEditing, setNotesEditing] = useState(false);
   const [failing, setFailing] = useState<number | null>(null), [note, setNote] = useState(""), [newItem, setNewItem] = useState("");
   // 关联会话不在快照里时（已结束 / 超过 24 小时）按 id 补查一次：
   // 拿到就照常打开，404 才是真的删了。undefined = 还在查，null = 查过但没有。
@@ -66,10 +68,25 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     api.thread(task.id).then(r => { if (alive) setTimeline(r.events); }).catch(() => { if (alive) setTimeline([]); });
     // 验收：检查项 + 证据 + 打回沉淀的标准
     api.review(task.id).then(r => { if (alive) setReview(r); }).catch(() => { if (alive) setReview(null); });
-    // 附件：备注里的 attachment:ID 引用靠它解析
-    api.attachments(task.id).then(r => { if (alive) setAttachments(r); }).catch(() => { if (alive) setAttachments([]); });
     return () => { alive = false; };
   }, [api, task.id, task.updatedAt]);
+  // 附件只跟任务 id 走：任务每保存一次都重拉一遍 20 张图的 base64，太亏。
+  // 增删改都在各自的接口返回里就地更新本地状态（见 uploadAttachment / removeAttachment）。
+  useEffect(() => {
+    let alive = true;
+    api.attachments(task.id).then(list => {
+      if (!alive) return;
+      // 缓存里有的图直接填上，剩下的按 id 单取（并发 3），取到一张刷一张
+      const filled = list.map(a => a.url || a.kind !== "image" ? a : { ...a, url: cachedImage(task.id, a.id) ?? null });
+      setAttachments(filled);
+      const need = filled.filter(a => a.kind === "image" && !a.url).map(a => a.id);
+      if (need.length) void loadImages(task.id, need, id => api.downloadAttachment(task.id, id), (id, url) => {
+        if (!alive) return;
+        setAttachments(cur => cur ? cur.map(a => (a.id === id ? { ...a, url } : a)) : cur);
+      });
+    }).catch(() => { if (alive) setAttachments([]); });
+    return () => { alive = false; };
+  }, [api, task.id]);
   // 角色与项目只在打开详情时拉一次（改动不频繁）
   useEffect(() => {
     let alive = true;
@@ -121,12 +138,19 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   // 附件：备注里只存 attachment:ID 引用，本体在这几个接口里进出
   const uploadAttachment = async (input: AttachmentInput): Promise<Attachment> => {
     const a = await api.uploadAttachment(task.id, input);
-    setAttachments(cur => (cur.some(x => x.id === a.id) ? cur : [...cur, a]));
+    // 上传响应本身就带图（data URL），顺手进缓存，缩略图和备注里的引用都不用再取一次
+    if (a.url) rememberImage(task.id, a.id, a.url);
+    setAttachments(cur => (cur?.some(x => x.id === a.id) ? cur : [...(cur ?? []), a]));
     return a;
   };
   const openAttachment = (id: number) => {
-    const a = attachments.find(x => x.id === id);
+    const a = attachments?.find(x => x.id === id);
     if (a?.kind === "image" && a.url) { setPreview(a.url); return; }
+    // 图还没取回来（或列表里只有元信息）：先取再预览
+    if (a?.kind === "image") {
+      void guard(async () => setPreview(await loadImage(task.id, id, i => api.downloadAttachment(task.id, i))));
+      return;
+    }
     void guard(async () => {
       const r = await api.downloadAttachment(task.id, id);
       saveBase64(r.name, r.mime, r.data);
@@ -136,7 +160,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     if (!window.confirm(`删除附件「${a.name}」？备注里引用它的地方会一起摘掉。`)) return;
     void guard(async () => {
       const r = await api.deleteAttachment(task.id, a.id);
-      setAttachments(r.attachments);
+      // 返回的列表只有元信息：把缓存过的图补回去，别让剩下的缩略图集体消失
+      setAttachments(r.attachments.map(x => (x.kind === "image" ? { ...x, url: cachedImage(task.id, x.id) ?? null } : x)));
       onSaved(r.task);
     });
   };
@@ -146,10 +171,15 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     try { onSaved(await api.updateTask(task.id, { notes })); flash(); }
     finally { setBusy(false); }
   };
-  const attachToNotes = (a: Attachment) => void guard(async () => {
-    const base = task.notes.trimEnd();
-    onSaved(await api.updateTask(task.id, { notes: base ? `${base}\n\n${refOf(a)}` : refOf(a) }));
-  });
+  // 「插入备注」走 PATCH 直接改服务端的备注：备注正在编辑时这么做，保存草稿会把这条引用冲掉，
+  // 附件就成了孤儿。所以编辑态下这个按钮禁用（要用就先保存或取消）。
+  const attachToNotes = (a: Attachment) => {
+    if (notesEditing) return;
+    void guard(async () => {
+      const base = task.notes.trimEnd();
+      onSaved(await api.updateTask(task.id, { notes: base ? `${base}\n\n${refOf(a)}` : refOf(a) }));
+    });
+  };
   // 附件区直接上传：不经过备注编辑器，传完再决定要不要往备注里插引用
   const pickAttachments = (files: File[]) => void guard(async () => {
     for (const f of files) {
@@ -237,7 +267,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {task.doneAt && <div className="prop"><span className="prop-label">完成时间</span><span className="prop-value">{fmt(task.doneAt)}</span></div>}
       </div>
 
-      <TaskNotes notes={task.notes} attachments={attachments} disabled={busy} onSave={saveNotes} upload={uploadAttachment} onOpen={openAttachment} onImage={setPreview} />
+      <TaskNotes notes={task.notes} attachments={attachments} disabled={busy} onEditingChange={setNotesEditing} onSave={saveNotes} upload={uploadAttachment} onOpen={openAttachment} onImage={setPreview} />
 
       <Checklist items={items} disabled={busy} onChange={checklist => patch({ checklist })} />
     </section>
@@ -371,7 +401,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     <section className="detail-section">
       <h3>
         附件
-        {attachments.length ? <span className="dim"> · {attachments.length}</span> : null}
+        {attachments?.length ? <span className="dim"> · {attachments.length}</span> : null}
         <button className="link" disabled={busy} onClick={() => attachPicker.current?.click()}>上传</button>
         <input ref={attachPicker} type="file" multiple hidden onChange={e => {
           const files = Array.from(e.target.files ?? []);
@@ -379,20 +409,22 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
           if (files.length) pickAttachments(files);
         }} />
       </h3>
-      {attachments.length === 0
+      {!attachments
+        ? <p className="dim">正在读取附件…</p>
+        : attachments.length === 0
         ? <p className="dim">还没有附件。在备注里粘贴截图或拖文件进来，也可以点上面的「上传」。</p>
         : <ul className="attachment-list">
           {attachments.map(a => (
             <li key={a.id} className={`attachment-item ${a.kind}`}>
               {a.kind === "image" && a.url
                 ? <img className="attachment-thumb" src={a.url} alt={a.name} onClick={() => setPreview(a.url!)} />
-                : <span className="attachment-kind">{fileKind(a.name, a.mime)}</span>}
+                : <span className="attachment-kind">{a.kind === "image" ? "图" : fileKind(a.name, a.mime)}</span>}
               <span className="attachment-meta">
                 <strong>{a.name}</strong>
                 <span className="dim">{a.kind === "image" ? "图片" : "文件"} · {formatSize(a.size)}</span>
               </span>
               <span className="attachment-actions">
-                <button className="link" disabled={busy} onClick={() => attachToNotes(a)}>插入备注</button>
+                <button className="link" disabled={busy || notesEditing} title={notesEditing ? "先把备注保存或取消，再插入引用" : undefined} onClick={() => attachToNotes(a)}>插入备注</button>
                 <button className="link" disabled={busy} onClick={() => openAttachment(a.id)}>下载</button>
                 <button className="link danger" disabled={busy} onClick={() => removeAttachment(a)}>删除</button>
               </span>
@@ -436,7 +468,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {roles.length > 0 && <label className="role-pick">角色
           <select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">不指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select>
         </label>}
-        <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(notesForAgent(task.notes, attachments) || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
+        <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(notesForAgent(task.notes, attachments ?? []) || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
         {reason ? <span className="dim">{reason}</span> : offline ? <span className="dim">{machine} 离线，开始后会在它上线时自动派发</span> : null}
       </div>
       {task.queuedAt && <p className="hint queue-hint" role="status">

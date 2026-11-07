@@ -27,25 +27,77 @@ export function formatSize(bytes: number): string {
   return `${bytes} B`;
 }
 
-/** 备注里引用了、但附件已经没了的 id：渲染成「附件已删除」，不装成坏图 */
-export function danglingRefs(notes: string, attachments: Attachment[]): number[] {
-  const have = new Set(attachments.map(a => a.id));
-  const out = new Set<number>();
-  for (const m of notes.matchAll(REF_RE)) {
-    const id = Number(m[2]);
-    if (!have.has(id)) out.add(id);
-  }
-  return [...out];
+/** 备注里引用了哪些附件（去重）：只认完整引用语法，裸写的 attachment:12 当普通文字 */
+export function refsInNotes(notes: string): number[] {
+  return [...new Set([...notes.matchAll(REF_RE)].map(m => Number(m[2])))];
 }
 
-/** 派活时发给执行者的正文：引用换成附件名，attachment:12 对 agent 没有意义 */
+/**
+ * 派活时发给执行者的正文：引用换成附件名。
+ * 附件本体不随任务下发（run.start 协议里没有附图字段），所以文案不能写「见截图」——
+ * 那等于让 agent 去看一个它看不到的东西。
+ */
 export function notesForAgent(notes: string, attachments: Attachment[]): string {
   const byId = new Map(attachments.map(a => [a.id, a]));
   return notes.replace(REF_RE, (_all, label: string, raw: string) => {
-    const a = byId.get(Number(raw));
-    const name = a?.name || label || "附件";
-    return a?.kind === "file" ? `「${name}」` : `（见截图「${name}」）`;
+    const name = byId.get(Number(raw))?.name || label || "附件";
+    return `「${name}」（附件未随任务发送）`;
   });
+}
+
+/**
+ * 图片的 data URL 缓存：列表只给元信息，图片按 id 单取。
+ * 按任务分开存，切回同一个任务不用重下；同一张图并发请求只发一次。
+ */
+const imageCache = new Map<string, string>();
+const imageInflight = new Map<string, Promise<string>>();
+const cacheKey = (taskId: number, id: number) => `${taskId}:${id}`;
+
+export function cachedImage(taskId: number, id: number): string | undefined {
+  return imageCache.get(cacheKey(taskId, id));
+}
+
+/** 上传响应里已经带 data URL，直接进缓存，省一次下载 */
+export function rememberImage(taskId: number, id: number, url: string) {
+  imageCache.set(cacheKey(taskId, id), url);
+}
+
+/** 取一张图（带并发去重）：拿回来拼成 data URL，顺带进缓存 */
+export function loadImage(taskId: number, id: number, fetchOne: (id: number) => Promise<{ mime: string; data: string }>): Promise<string> {
+  const key = cacheKey(taskId, id);
+  const hit = imageCache.get(key);
+  if (hit) return Promise.resolve(hit);
+  const running = imageInflight.get(key);
+  if (running) return running;
+  const p = fetchOne(id)
+    .then(r => {
+      const url = `data:${r.mime || "application/octet-stream"};base64,${r.data}`;
+      imageCache.set(key, url);
+      return url;
+    })
+    .finally(() => { imageInflight.delete(key); });
+  imageInflight.set(key, p);
+  return p;
+}
+
+/**
+ * 批量取图，一次最多几张并发：一次全发会把连接池和带宽一起占满，
+ * 串行又太慢（20 张图要排队等）。取到一张就回调一张，界面边下边出。
+ */
+export async function loadImages(
+  taskId: number, ids: number[],
+  fetchOne: (id: number) => Promise<{ mime: string; data: string }>,
+  onOne: (id: number, url: string) => void,
+  concurrency = 3,
+): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < ids.length) {
+      const id = ids[next++];
+      try { onOne(id, await loadImage(taskId, id, fetchOne)); } catch { /* 单张失败就留着占位，别拖垮其他图 */ }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, ids.length) }, worker));
 }
 
 /** 文件后缀：附件区给文件画个小标签用，没有后缀就退回 MIME 的尾部 */

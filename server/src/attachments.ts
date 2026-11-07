@@ -48,24 +48,23 @@ export async function migrateAttachments(db: DB) {
   await db.query('CREATE INDEX IF NOT EXISTS idx_task_attachments ON task_attachments(user_id,task_id,id)')
 }
 
+/** 列表里不带本体：图片的 data URL 由前端按需单独取，别让一次列表把几十 MB 塞进响应 */
 const row = (r: any): Attachment => ({
   id: Number(r.id), taskId: Number(r.task_id), kind: r.kind, name: r.name, mime: r.mime,
-  size: Number(r.size), createdAt: new Date(r.created_at).toISOString(), url: r.kind === 'image' ? r.data : null,
+  size: Number(r.size), createdAt: new Date(r.created_at).toISOString(),
+  url: typeof r.data === 'string' && r.kind === 'image' ? r.data : null,
 })
 
-/** 备注里的附件引用：![名称](attachment:12) 或 [名称](attachment:12)，取出去重后的 id */
-export function refsIn(notes: string): number[] {
-  return [...new Set([...notes.matchAll(/attachment:(\d+)/g)].map(m => Number(m[1])))]
-}
+/**
+ * 备注里的附件引用：![名称](attachment:12) 或 [名称](attachment:12)。
+ * 只认完整引用——备注里写一句「attachment:99 这个语法」是讨论，不是引用，不该被校验拦下。
+ * 带 /g：只能配 matchAll / replace 用，别拿来 .test()（lastIndex 会串）。
+ */
+const REF_RE = /!?\[([^\]]*)\]\(attachment:(\d+)\)/g
 
-/** 引用 → 纯文本（发给执行者时用：attachment:12 对 agent 没有意义，换成附件名） */
-export function notesForAgent(notes: string, attachments: Attachment[]): string {
-  const byId = new Map(attachments.map(a => [a.id, a]))
-  return notes.replace(/!?\[([^\]]*)\]\(attachment:(\d+)\)/g, (_all, label: string, raw: string) => {
-    const a = byId.get(Number(raw))
-    const name = a?.name || label
-    return a?.kind === 'file' ? `「${name}」` : `（见截图「${name}」）`
-  })
+/** 取出去重后的引用 id */
+export function refsIn(notes: string): number[] {
+  return [...new Set([...notes.matchAll(REF_RE)].map(m => Number(m[2])))]
 }
 
 /** 删掉某个附件的引用，顺手收拾掉它留下的空行 */
@@ -76,12 +75,15 @@ export function stripRef(notes: string, attachmentId: number): string {
 
 /** 只留引用里的文字：拼提示给项目经理 / 执行端时用，不用查库也不会把 attachment:12 递过去 */
 export function readableNotes(notes: string): string {
-  return notes.replace(/!?\[([^\]]*)\]\(attachment:\d+\)/g, (_all, label: string) => label || '附件')
+  return notes.replace(REF_RE, (_all, label: string) => label || '附件')
 }
 
+/**
+ * 列表只要元信息：图片的 data URL 单独按 id 取（GET .../attachments/:id），
+ * 一次打开任务不再把最坏 20 × 2.5MB 的 base64 全塞进一个响应里。
+ */
 export async function listAttachments(db: DB, user: number, taskId: number): Promise<Attachment[]> {
-  const r = await db.query(`SELECT id,task_id,kind,name,mime,size,created_at,
-      CASE WHEN kind='image' THEN data END data
+  const r = await db.query(`SELECT id,task_id,kind,name,mime,size,created_at
     FROM task_attachments WHERE user_id=$1 AND task_id=$2 ORDER BY id`, [user, taskId])
   return r.rows.map(row)
 }
@@ -96,11 +98,14 @@ export async function assertRefs(db: DB, user: number, taskId: number, notes: st
   if (missing.length) throw new TaskError(`备注里引用了不存在的附件（${missing.join('、')}），请删掉对应引用后重试`)
 }
 
+/** 校验并解出来的上传入参：大小按解码后的字节算，不信客户端报的 size */
+export type PreparedAttachment = { kind: AttachmentKind; name: string; mime: string; size: number; data: string }
+
 /**
- * 上传：图片收 data URL，文件收 base64。大小由服务端按解码后的字节数算，不信客户端报的 size。
+ * 校验与解码是纯计算：16MB body 的 base64 解码放这儿，不进全局串行队列，
+ * 免得一次上传把别的请求（含执行端事件上报）堵在后面。
  */
-export async function addAttachment(db: DB, user: number, taskId: number, raw: unknown): Promise<Attachment> {
-  await getTask(db, user, taskId)
+export function prepareAttachment(raw: unknown): PreparedAttachment {
   const b = object(raw)
   if (b.kind !== 'image' && b.kind !== 'file') throw new TaskError('附件类型不合法')
   const kind = b.kind as AttachmentKind
@@ -114,7 +119,11 @@ export async function addAttachment(db: DB, user: number, taskId: number, raw: u
     const prefix = `data:${mime};base64,`
     if (!data.startsWith(prefix)) throw new TaskError('图片内容与格式不匹配')
     if (data.length > IMAGE_MAX_CHARS) throw new TaskError('单张图片太大了，请压缩后再上传')
-    size = Buffer.from(data.slice(prefix.length), 'base64').length
+    // 图片和文件用同一套字符集校验：只认前缀的话，截断的 base64 也能存进去
+    const body = data.slice(prefix.length)
+    if (!BASE64.test(body) || body.length % 4 !== 0) throw new TaskError('图片内容不是有效的 base64')
+    size = Buffer.from(body, 'base64').length
+    if (!size) throw new TaskError('附件内容是空的')
   } else {
     const body = data.startsWith('base64,') ? data.slice(7) : data
     if (!BASE64.test(body) || body.length % 4 !== 0) throw new TaskError('文件内容不是有效的 base64')
@@ -123,6 +132,13 @@ export async function addAttachment(db: DB, user: number, taskId: number, raw: u
     if (size > FILE_MAX_BYTES) throw new TaskError(`单个文件不能超过 ${FILE_MAX_BYTES / 1024 / 1024} MB`)
     if (!mime) throw new TaskError('缺少文件类型')
   }
+  return { kind, name, mime, size, data }
+}
+
+/** 落库：只有这一步需要进串行队列（数量上限 + INSERT） */
+export async function addAttachment(db: DB, user: number, taskId: number, input: PreparedAttachment): Promise<Attachment> {
+  await getTask(db, user, taskId)
+  const { kind, name, mime, size, data } = input
   const count = await db.query('SELECT count(*)::int AS n FROM task_attachments WHERE user_id=$1 AND task_id=$2', [user, taskId])
   if (Number(count.rows[0].n) >= MAX_ATTACHMENTS) throw new TaskError(`每个任务最多 ${MAX_ATTACHMENTS} 个附件，先删掉不用的再传`, 409)
   const r = await db.query(`INSERT INTO task_attachments(user_id,task_id,kind,name,mime,size,data)

@@ -18,15 +18,18 @@ import { attachmentId, formatSize } from "./lib/attachments";
 type Props = {
   text: string;
   compact?: boolean;
-  attachments?: Attachment[];
+  /** undefined = 附件还没读回来（引用按纯文本渲染）；给了数组就认 attachment: 协议 */
+  attachments?: Attachment[] | null;
   /** 点文件附件（下载 / 打开）；图片点击走 onImage 预览 */
   onAttachment?: (id: number) => void;
   onImage?: (url: string) => void;
 };
 
 const Markdown = memo(function Markdown({ text, compact = false, attachments, onAttachment, onImage }: Props) {
+  const loaded = Array.isArray(attachments);
   const byId = new Map((attachments ?? []).map(a => [a.id, a]));
-  const urlTransform = attachments?.length
+  // 附件还没读回来时不放行：react-markdown 会把 href 过滤成空，这里正好渲染成纯文本
+  const urlTransform = loaded
     ? (url: string) => (url.startsWith("attachment:") ? url : defaultUrlTransform(url))
     : defaultUrlTransform;
   return (
@@ -56,7 +59,9 @@ const Markdown = memo(function Markdown({ text, compact = false, attachments, on
             const id = attachmentId(typeof src === "string" ? src : "");
             if (id === null) return src ? <img src={src} alt={alt ?? ""} loading="lazy" /> : null;
             const a = byId.get(id);
-            if (!a?.url) return <span className="attachment-chip missing">附件已删除{alt ? `（${alt}）` : ""}</span>;
+            if (!a) return <span className="attachment-chip missing">附件已删除{alt ? `（${alt}）` : ""}</span>;
+            // 图还在、data URL 还没取回来：给个占位，别谎报「已删除」
+            if (!a.url) return <span className="attachment-chip">{a.name}<span className="dim"> · 图片加载中…</span></span>;
             return <img className="md-image" src={a.url} alt={alt || a.name} onClick={e => { e.stopPropagation(); onImage?.(a.url!); }} />;
           },
         }}

@@ -105,7 +105,7 @@ import {
 import { composeTicket, getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
-import { ATTACHMENT_BODY_LIMIT, addAttachment, assertRefs, attachmentData, deleteAttachment, listAttachments, readableNotes, stripRef } from './attachments.ts'
+import { ATTACHMENT_BODY_LIMIT, addAttachment, assertRefs, attachmentData, deleteAttachment, listAttachments, prepareAttachment, readableNotes, stripRef } from './attachments.ts'
 
 type Sock = {
   send(data: string): void
@@ -1210,20 +1210,24 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { ok: true }
   }))
   // ---------- 任务附件：图片 / 文件独立存放，备注里只写 attachment:ID 引用 ----------
-  // 列表里图片带 data URL（详情页要直接内联渲染），文件只给元信息，点下载时再取内容
-  app.get('/tasks/:id/attachments', async req => serial(async () => {
+  // 列表只给元信息（图片的 data URL 按 id 单独取）：读接口不进 serial，否则一次列表会把
+  // 全局队列占住，连执行端的事件上报都得排队等它。
+  app.get('/tasks/:id/attachments', async req => {
     const id = entityId((req.params as {id:string}).id)
     await getTask(pool,req.userId,id)
     return { attachments: await listAttachments(pool,req.userId,id) }
-  }))
-  // 收 base64：图片是 data URL，文件是裸 base64；body 上限按最大文件放宽
-  app.post('/tasks/:id/attachments', { bodyLimit: ATTACHMENT_BODY_LIMIT }, async req => serial(async () => ({
-    attachment: await addAttachment(pool,req.userId,entityId((req.params as {id:string}).id),req.body),
-  })))
-  app.get('/tasks/:id/attachments/:attachmentId', async req => serial(async () => {
+  })
+  // 收 base64：图片是 data URL，文件是裸 base64；body 上限按最大文件放宽。
+  // 校验 + 解码在队列外做（16MB 的活），只有「数量上限 + INSERT」进队列。
+  app.post('/tasks/:id/attachments', { bodyLimit: ATTACHMENT_BODY_LIMIT }, async req => {
+    const id = entityId((req.params as {id:string}).id)
+    const input = prepareAttachment(req.body)
+    return { attachment: await serial(() => addAttachment(pool,req.userId,id,input)) }
+  })
+  app.get('/tasks/:id/attachments/:attachmentId', async req => {
     const p = req.params as {id:string;attachmentId:string}
     return attachmentData(pool,req.userId,entityId(p.id),entityId(p.attachmentId))
-  }))
+  })
   // 删除附件：顺手把备注里指向它的引用摘掉，免得留下坏图
   app.delete('/tasks/:id/attachments/:attachmentId', async req => serial(async () => {
     const p = req.params as {id:string;attachmentId:string}

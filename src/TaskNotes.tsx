@@ -5,8 +5,11 @@ import Markdown from "./Markdown";
 
 type Props = {
   notes: string;
-  attachments: Attachment[];
+  /** null = 附件还没读回来：这时引用先按纯文本渲染，别急着说「附件已删除」 */
+  attachments: Attachment[] | null;
   disabled?: boolean;
+  /** 进出编辑态要报上去：「插入备注」得在编辑时禁用，否则草稿保存会把引用冲掉 */
+  onEditingChange?(editing: boolean): void;
   /** 保存失败要抛出来：抛了就留在编辑态，别让人白写一段 */
   onSave(notes: string): Promise<void>;
   /** 上传一个附件（图片或文件），返回落库后的实体，id 用来写引用 */
@@ -22,7 +25,7 @@ type Props = {
  * 编辑时可以直接粘贴截图或把文件拖进来 —— 上传完在光标处插一行 `attachment:ID` 引用，
  * 备注本身只存文字，所以 4000 字上限、PATCH 整条重写、WS 广播都不会被 base64 拖垮。
  */
-export default function TaskNotes({ notes, attachments, disabled = false, onSave, upload, onOpen, onImage }: Props) {
+export default function TaskNotes({ notes, attachments, disabled = false, onEditingChange, onSave, upload, onOpen, onImage }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(notes);
   const [busy, setBusy] = useState(false);
@@ -33,6 +36,7 @@ export default function TaskNotes({ notes, attachments, disabled = false, onSave
   const picker = useRef<HTMLInputElement | null>(null);
   // 别处改过备注（别的设备、项目经理）就跟着刷新，但正在写的时候不打断
   useEffect(() => { if (!editing) setDraft(notes); }, [notes, editing]);
+  useEffect(() => { onEditingChange?.(editing); }, [editing, onEditingChange]);
   useEffect(() => {
     if (!editing) return;
     const el = area.current;
