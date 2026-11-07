@@ -229,6 +229,13 @@ type Props = {
   handled: Session[];
   /** 等待授权（手机/桌面确认）的会话 id，按最高优先级标色 */
   approvals: Set<string>;
+  /**
+   * 当前展开的项目（第二级）；null = 总览。
+   * 归上层持有：点会话进详情页时本组件会卸载，放在内部 state 会丢，
+   * 返回列表就掉回总览了。
+   */
+  expanded: string | null;
+  onExpand(project: string | null): void;
   onOpen(id: string): void;
 };
 
@@ -238,11 +245,15 @@ type Props = {
  * 展开：会话气泡同样随机散布（最急的靠中间），点击打开会话，项目名与计数移到顶部工具条；
  * 已处理：不进图，主图下方一个可折叠的纯列表。
  */
-export default function PendingGraph({ sessions, handled, approvals, onOpen }: Props) {
-  const [expanded, setExpanded] = useState<string | null>(null);
+export default function PendingGraph({ sessions, handled, approvals, expanded, onExpand, onOpen }: Props) {
   const [handledOpen, setHandledOpen] = useState(false);
 
   const groups = useMemo(() => groupByProject(sessions, approvals), [sessions, approvals]);
+
+  // 展开的项目已经没会话了（都处理完 / 跑完了）：退回总览，免得下次进来停在一个空项目上
+  useEffect(() => {
+    if (expanded && !groups.some((g) => g.project === expanded)) onExpand(null);
+  }, [expanded, groups, onExpand]);
 
   // 已处理只做列表：按更新时间倒序（App 传来的已是这个顺序，这里再稳一道）
   const handledList = useMemo(
@@ -334,7 +345,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
     return (
       <div className="pg-wrap" ref={wrapRef}>
         <div className="pg-toolbar">
-          <button type="button" className="link" onClick={() => setExpanded(null)}>‹ 返回总览</button>
+          <button type="button" className="link" onClick={() => onExpand(null)}>‹ 返回总览</button>
           <span className="pg-toolbar-name">{current.project}</span>
           <span className="pg-toolbar-chips">
             {pending.length > 0 && <span className="pg-chip tone-wait">{pending.length} 待处理</span>}
@@ -422,7 +433,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
               style={{ width: size, height: size, left: x, top: y, marginLeft: -size / 2, marginTop: -size / 2 }}
               title={`展开 ${g.project}：${breakdown}`}
               aria-label={`项目 ${g.project}，${breakdown}`}
-              onClick={() => setExpanded(g.project)}
+              onClick={() => onExpand(g.project)}
             >
               <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
                 <span className={`pg-bubble ${tone}`} style={{ animationDelay: `${i * 60}ms` }}>
