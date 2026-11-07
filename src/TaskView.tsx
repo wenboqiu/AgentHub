@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import type { Api, Attachment, AttachmentInput, EvidenceKind, Goal, Machine, Project, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskConstraints, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import type { Api, Attachment, AttachmentInput, EvidenceKind, Goal, Machine, Project, ProjectDir, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskConstraints, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { NO_CONSTRAINTS } from "./lib/api";
 import { BOUND_PRESETS, applyPreset, presetHint, presetOf, type PresetId } from "./lib/boundsPresets";
 import { TASK_LABEL } from "./TasksPanel";
@@ -23,6 +23,8 @@ const STATUSES = Object.keys(TASK_LABEL) as Task["status"][];
 /** 执行工具下拉：只列能远程派活的 agent；豆包 / WorkBuddy 只做状态监听，不放进下拉 */
 const AGENT_OPTIONS = DISPATCHABLE_AGENTS.map(value => ({ value, label: AGENT_LABEL[value] }));
 const toIso = (v: string) => v ? new Date(v).toISOString() : null;
+/** 一条项目配置（电脑 + 目录）的唯一标识：电脑可能为空（哪台都行），拼上目录才不重 */
+const dirKey = (d: ProjectDir) => `${d.machine ?? ""}\u0000${d.cwd}`;
 
 /**
  * 任务详情：所有字段就地编辑、改动即时保存（参考 Linear / Todoist 的详情页），
@@ -210,6 +212,13 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
 
   const currentRole = task.roleId === null ? null : roles.find(r => r.id === task.roleId) ?? null;
   const currentProject = task.projectId === null ? null : projects.find(p => p.id === task.projectId) ?? null;
+  // 目录不再手填：只从所选项目登记的配置（电脑 + 目录）里挑一条；不选则开始执行时由服务端按电脑自动挑
+  const dirs = currentProject?.dirs ?? [];
+  // 当前任务目录落在哪条配置上：路径对上即可；绑了机器的还要机器一致才算同一条
+  const chosenDir = dirs.find(d => d.cwd === task.cwd && (!d.machine || d.machine === task.machine))
+    ?? dirs.find(d => d.cwd === task.cwd) ?? null;
+  // 任务上留着一条不在登记里的目录（老数据 / 项目换过）：照实显示，换选即被覆盖
+  const cwdOffList = !!task.cwd && !chosenDir;
   const done = task.status === "done";
   // 执行工具跟着角色走：角色绑了工具就以它为准（服务端派活也是这个顺序），
   // 任务上的 agent 只在没挂角色 / 角色没指定工具时兜底——否则会出现「角色写 Claude、任务写 Codex」的冲突
@@ -217,12 +226,25 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const listenOnly = isListenOnly(tool);
   // 候选电脑：上报过能跑这个工具的，或者压根没上报过（老电脑端，当「不知道」放行）；
   // 明确报过没装的直接不列——列出来也派不过去，服务端会拒。规则见 lib/machines.ts
-  const { usable, options, machine, offline, machineLacks } = pickMachine({ machines, online: agents, stored: task.machine, tool });
+  const { candidates, usable, options, machine, offline, machineLacks } = pickMachine({ machines, online: agents, stored: task.machine, tool });
+  // 一条项目配置能不能跑当前工具：绑了电脑的看那台上报的清单；「任意电脑」的看有没有一台能跑。
+  // 电脑没上报过清单（老电脑端）当「不知道」放行，与电脑下拉同一套规则（见 lib/machines.ts）
+  const fitsTool = (d: ProjectDir): boolean => {
+    if (!tool) return true;
+    if (d.machine) {
+      const c = candidates.find(x => x.name === d.machine);
+      return !c || c.agents.length === 0 || c.agents.includes(tool);
+    }
+    return candidates.length === 0 || candidates.some(c => c.agents.length === 0 || c.agents.includes(tool));
+  };
+  // 项目可用性：至少有一条登记的配置能跑当前工具；一条都没有就明说「不可用」，别选完才发现派不出去
+  const projectUsable = !dirs.length || dirs.some(fitsTool);
   const reason = !tool ? "请选择执行工具"
     : listenOnly ? `${agentName(tool)} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上`
-      : !task.cwd ? "请填写项目目录"
-        : !machine ? (usable.length ? "请选择电脑" : `没有能跑 ${agentName(tool)} 的电脑：先在装了这个工具的电脑上打开 AgentHub`)
-          : machineLacks ? `${machine} 没装 ${agentName(tool)}：换一台电脑，或给这个角色换个工具` : "";
+      : !task.cwd && !dirs.length ? "请选择项目，并在项目里挑一条配置（电脑 + 目录）"
+        : !task.cwd && !projectUsable ? `项目「${currentProject?.name ?? ""}」登记的配置都装不了 ${agentName(tool)}：这个项目当前不可用，换个角色 / 工具，或在对应电脑上装好再选`
+          : !machine ? (usable.length ? "请选择电脑" : `没有能跑 ${agentName(tool)} 的电脑：先在装了这个工具的电脑上打开 AgentHub`)
+            : machineLacks ? `${machine} 没装 ${agentName(tool)}：换一台电脑，或给这个角色换个工具` : "";
   const items = task.checklist ?? [];
   const goalTitle = goals.find(g => g.id === task.goalId)?.title;
 
@@ -474,8 +496,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
         {task.sessionIds.length > 0 && <p className="hint">接着上次派发的会话继续：没换工具 / 电脑 / 目录的话，不会再新开一个对话。</p>}
       </form>}
-      <details className="exec-settings" open={!tool || !task.cwd}>
-        <summary>执行设置（角色 / 项目 / 工具 / 电脑 / 目录）</summary>
+      <details className="exec-settings" open={!tool || (!task.cwd && !dirs.length)}>
+        <summary>执行设置（角色 / 项目 / 配置 / 工具 / 电脑）</summary>
         <div className="form-grid">
           <label>角色<select value={task.roleId ?? ""} disabled={busy} onChange={e => {
             const id = e.target.value ? Number(e.target.value) : null;
@@ -483,20 +505,46 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
             // 角色绑着执行工具：选它的同时把任务上的工具对齐，免得两个字段互相打架
             patch({ roleId: id, ...(r?.agent ? { agent: r.agent } : {}) });
           }}><option value="">未指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select></label>
-          <label>项目<select value={task.projectId ?? ""} disabled={busy} onChange={e => patch({ projectId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+          <label>项目<select value={task.projectId ?? ""} disabled={busy} onChange={e => patch({ projectId: e.target.value ? Number(e.target.value) : null, cwd: null })}><option value="">未指定</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+          <label>项目配置
+            <select
+              value={chosenDir ? dirKey(chosenDir) : cwdOffList ? "custom" : ""}
+              disabled={busy || !currentProject}
+              aria-label="项目配置"
+              onChange={e => {
+                const v = e.target.value;
+                if (v === "custom") return; // 老数据的目录不在登记里：保持原样，选了别的会被覆盖
+                if (!v) return void patch({ cwd: null });
+                const d = dirs.find(x => dirKey(x) === v);
+                // 选一条配置 = 同时定下目录和它绑的电脑（不绑电脑的只定目录）
+                if (d) patch({ cwd: d.cwd, ...(d.machine ? { machine: d.machine } : {}) });
+              }}>
+              <option value="">{!currentProject ? "先选项目"
+                : dirs.length ? (projectUsable ? "不选（开始执行时按电脑自动挑）" : `登记的配置都装不了 ${agentName(tool ?? "")}，项目暂不可用`)
+                : "这个项目还没登记配置"}</option>
+              {dirs.map(d => <option key={dirKey(d)} value={dirKey(d)} disabled={!fitsTool(d)}>{`${d.machine ?? "任意电脑"} · ${d.cwd}${fitsTool(d) ? "" : `（没装 ${agentName(tool ?? "")}）`}`}</option>)}
+              {cwdOffList && <option value="custom">{task.cwd}（不在登记里）</option>}
+            </select>
+          </label>
           <label>执行工具
             {currentRole?.agent
               ? <input value={`${AGENT_LABEL[currentRole.agent] ?? currentRole.agent}（由角色决定）`} readOnly disabled aria-label="执行工具" />
               : <select value={task.agent ?? ""} disabled={busy} onChange={e => patch({ agent: (e.target.value || null) as Task["agent"] })}><option value="">无（普通待办）</option>{task.agent && !isDispatchable(task.agent) && <option value={task.agent}>{AGENT_LABEL[task.agent] ?? task.agent}（只做监听，不能派活）</option>}{AGENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>}
           </label>
-          <label>电脑<select value={task.machine ?? ""} disabled={busy} onChange={e => patch({ machine: e.target.value || null })}><option value="">开始时自动选择</option>{options.map(c => <option key={c.name} value={c.name}>{c.name}{c.online ? "" : "（离线）"}{tool && c.agents.length > 0 && !c.agents.includes(tool) ? `（没装 ${agentName(tool)}）` : tool && c.agents.length === 0 ? "（未上报工具）" : ""}</option>)}</select></label>
+          <label>电脑<select value={task.machine ?? ""} disabled={busy} onChange={e => {
+            const m = e.target.value || null;
+            // 当前目录来自某条绑了电脑的配置，而这次换到了别的电脑：目录跟着失效，交回服务端按新电脑挑
+            const mismatch = chosenDir?.machine && chosenDir.machine !== m;
+            patch({ machine: m, ...(mismatch ? { cwd: null } : {}) });
+          }}><option value="">开始时自动选择</option>{options.map(c => <option key={c.name} value={c.name}>{c.name}{c.online ? "" : "（离线）"}{tool && c.agents.length > 0 && !c.agents.includes(tool) ? `（没装 ${agentName(tool)}）` : tool && c.agents.length === 0 ? "（未上报工具）" : ""}</option>)}</select></label>
         </div>
-        <label className="cwd-field">项目目录<InlineField value={task.cwd ?? ""} ariaLabel="项目目录" placeholder={"例如 D:\\Work2\\项目"} maxLength={4000} required={false} disabled={busy} onSave={cwd => patch({ cwd: cwd || null })} /></label>
         {currentRole?.agent && <p className="hint">执行工具由角色「{currentRole.name}」决定，要换工具去角色页改它；角色不绑电脑，在哪台干活由这个任务挑——下面只列装了这个工具的电脑。</p>}
+        {currentProject && dirs.length > 0 && !projectUsable && <p className="form-error" role="alert">项目「{currentProject.name}」登记的配置所在电脑都装不了 {agentName(tool ?? "")}：这个项目当前不可用。换个角色 / 工具，或在对应电脑上装好再选。</p>}
         {machineLacks && <p className="form-error" role="alert">{machine} 没装 {agentName(tool ?? "")}：换一台装了它的电脑，或者给这个角色换工具。</p>}
         {currentProject && <p className="hint">项目「{currentProject.name}」{currentProject.brief ? `：${currentProject.brief.slice(0, 80)}${currentProject.brief.length > 80 ? "…" : ""}` : "（还没写项目说明）"}；派活时项目说明和该角色在这个项目上的记忆会一起下发。</p>}
         {currentRole && <p className="hint">角色「{currentRole.name}」：{currentRole.agent ? AGENT_LABEL[currentRole.agent] ?? currentRole.agent : "执行工具未定"}{currentRole.model ? ` · 模型 ${currentRole.model}` : autoModelRange(currentRole.agent).length ? ` · 模型未指定：派活时由项目经理按复杂度在 ${autoModelRange(currentRole.agent).join(" / ")} 里挑` : " · 用执行端默认模型"}{currentRole.context ? ` · 上下文 ${currentRole.context.length} 字` : " · 没有上下文"}；派活时随第一条消息一起下发。</p>}
-        {currentProject && currentProject.dirs.length > 0 && <p className="hint">项目登记了 {currentProject.dirs.length} 条目录（{currentProject.dirs.map(d => d.machine ?? "任意电脑").join("、")}）；开始执行时按当前那台电脑自动挑对应目录，目录留空就会被自动补上。</p>}
+        {currentProject && currentProject.dirs.length > 0 && <p className="hint">项目「{currentProject.name}」登记了 {dirs.length} 条配置（电脑 + 目录）；选一条就同时定下电脑和目录，不选则开始执行时按所选电脑自动挑。</p>}
+        {!currentProject && <p className="hint">还没选项目：目录不再手动填，去「设置 → 项目」登记电脑和目录，回来选项目再挑一条配置。</p>}
       </details>
     </section>
 
