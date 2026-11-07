@@ -1267,18 +1267,113 @@ fn report(run: &Run, f: Finish) {
     }
 }
 
+/// 与 claude 同协议（stream-json）的执行端：claude 直接跑 `claude`；
+/// WorkBuddy 是应用自带 Electron 以 node 模式跑内置 CLI 脚本
+pub struct ClaudeLikeCli {
+    program: PathBuf,
+    /// 插在真正参数前面的（如 CLI 脚本路径）
+    prefix: Vec<String>,
+    envs: Vec<(String, String)>,
+}
+
+/// WorkBuddy 内置 CLI 定位：默认按各平台安装布局找，env `WORKBUDDY_CLI` 可覆盖（指向 cli/bin/codebuddy）
+pub fn workbuddy_cli() -> Option<ClaudeLikeCli> {
+    let script = match std::env::var_os("WORKBUDDY_CLI") {
+        Some(p) => PathBuf::from(p),
+        None => workbuddy_script_default()?,
+    };
+    if !script.is_file() {
+        return None;
+    }
+    let electron = workbuddy_electron(&script)?;
+    Some(ClaudeLikeCli {
+        program: electron,
+        prefix: vec![script.to_string_lossy().into_owned()],
+        envs: vec![
+            ("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string()),
+            // 应用只打包了 lite-wb 一份 bundle，不设这个会去 require 不存在的 dist/codebuddy
+            ("CODEBUDDY_FORCE_LITE_WB_BUNDLE".to_string(), "1".to_string()),
+        ],
+    })
+}
+
+fn workbuddy_script_default() -> Option<PathBuf> {
+    if cfg!(target_os = "macos") {
+        let p = PathBuf::from("/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy");
+        return p.is_file().then_some(p);
+    }
+    if cfg!(windows) {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Some(l) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(PathBuf::from(l).join("Programs").join("WorkBuddy"));
+        }
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(pf).join("WorkBuddy"));
+        }
+        roots.push(PathBuf::from("C:\\Program Files\\WorkBuddy"));
+        return roots
+            .into_iter()
+            .map(|r| r.join("resources").join("app.asar.unpacked").join("cli").join("bin").join("codebuddy"))
+            .find(|p| p.is_file());
+    }
+    None
+}
+
+/// 从 CLI 脚本反推宿主 Electron：
+/// macOS `<…>/Contents/Resources/app.asar.unpacked/…` 往上 5 级到 Contents，旁边 MacOS/Electron；
+/// Windows `<安装根>/resources/app.asar.unpacked/…` 往上 5 级到安装根，旁边 WorkBuddy.exe
+fn workbuddy_electron(script: &Path) -> Option<PathBuf> {
+    let exe = if cfg!(target_os = "macos") {
+        "MacOS/Electron"
+    } else if cfg!(windows) {
+        "WorkBuddy.exe"
+    } else {
+        return None;
+    };
+    script.ancestors().nth(5).map(|c| c.join(exe)).filter(|p| p.is_file())
+}
+
+/// CLI 默认绑 127.0.0.1 端口，桌面端开着会撞；env `WORKBUDDY_CLI_PORT` 可覆盖
+fn workbuddy_cli_port() -> String {
+    std::env::var("WORKBUDDY_CLI_PORT").unwrap_or_else(|_| "50991".into())
+}
+
 fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
-    let mut cmd = Command::new("claude");
-    let mut args = claude_branch_args(mode, key, branch_point);
+    run_claude_like(run, &ClaudeLikeCli { program: PathBuf::from("claude"), prefix: Vec::new(), envs: Vec::new() }, "claude", mode, key, cwd, text, images, branch_point, model, instructions, &[])
+}
+
+/// WorkBuddy 派活：协议与 claude 同构，仅两处退化——不支持 `--resume-session-at`
+/// （分叉退化为从末尾分叉），模型目录不同（角色里的模型 id 需配 WorkBuddy 的）。
+/// 独立跑需要 CLI 自己的登录态（桌面端的解密密钥只通过 sidecar 通道给子进程）：
+/// 终端里 `codebuddy` 进 TUI 执行一次 /login 即可。
+fn run_workbuddy(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], _branch_point: &str, model: &str, instructions: &str) {
+    match workbuddy_cli() {
+        Some(cli) => {
+            let extra = ["--port".to_string(), workbuddy_cli_port()];
+            // branch_point 置空：codebuddy 不支持 --resume-session-at，分叉只能从末尾分
+            run_claude_like(run, &cli, "workbuddy", mode, key, cwd, text, images, "", model, instructions, &extra)
+        }
+        None => run.fail("没找到 WorkBuddy 自带 CLI：请安装 WorkBuddy 桌面端，或设置环境变量 WORKBUDDY_CLI 指向其 cli/bin/codebuddy"),
+    }
+}
+
+fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str, extra_args: &[String]) {
+    let mut cmd = Command::new(&cli.program);
+    let mut args = cli.prefix.clone();
+    args.extend(claude_branch_args(mode, key, branch_point));
     claude_role_args(&mut args, model, instructions);
+    args.extend_from_slice(extra_args);
     cmd.args(args)
     .current_dir(cwd)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    for (k, v) in &cli.envs {
+        cmd.env(k, v);
+    }
     let mut child = match no_window(&mut cmd).spawn() {
         Ok(c) => c,
-        Err(e) => return run.fail(&format!("启动 claude 失败：{e}")),
+        Err(e) => return run.fail(&format!("启动 {label} 失败：{e}")),
     };
     let mut stdin = child.stdin.take();
     let tail = spawn_readers(&mut child, &run.tx);
@@ -1348,7 +1443,7 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
             }
             Ok(RunMsg::Eof) => {
                 let code = child.wait().ok().and_then(|s| s.code());
-                finish = Some(Finish::Failed(format!("claude 进程异常退出（{}）：{}", code.map_or("未知".into(), |c| c.to_string()), stderr_tail(&tail))));
+                finish = Some(Finish::Failed(format!("{label} 进程异常退出（{}）：{}", code.map_or("未知".into(), |c| c.to_string()), stderr_tail(&tail))));
             }
             Ok(RunMsg::Stop) => finish = Some(Finish::Stopped),
             Ok(RunMsg::Shutdown) => finish = Some(Finish::Silent),
@@ -1373,7 +1468,7 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
         }
     }
     let f = finish.unwrap();
-    let exited = matches!(&f, Finish::Failed(m) if m.starts_with("claude 进程异常退出"));
+    let exited = matches!(&f, Finish::Failed(m) if m.starts_with(&format!("{label} 进程异常退出")));
     let kill_now = matches!(f, Finish::Stopped | Finish::Silent);
     if kill_now {
         drop(stdin.take());
@@ -2206,6 +2301,7 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
             }
             run_zcode(run, mode, key, cwd, text, model, instructions)
         }
+        "workbuddy" => run_workbuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
         other => run.fail(&format!("不认识的 agent：{other}")),
     }
 }
@@ -2369,6 +2465,18 @@ mod tests {
         let mut fresh = vec!["-p"];
         fresh.extend(tail);
         assert_eq!(claude_args(Mode::Fresh, "k1"), fresh);
+    }
+
+    #[test]
+    fn workbuddy_cli_layout() {
+        // 本机装了 WorkBuddy 才有意义：从 CLI 脚本反推宿主 Electron，并带上 node 模式与 lite 包环境
+        let script = PathBuf::from("/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy");
+        if !script.is_file() { return; }
+        let cli = workbuddy_cli().expect("装了 WorkBuddy 就应能定位内置 CLI");
+        assert_eq!(cli.program, PathBuf::from("/Applications/WorkBuddy.app/Contents/MacOS/Electron"));
+        assert!(cli.prefix.iter().any(|a| a.ends_with("cli/bin/codebuddy")));
+        assert!(cli.envs.iter().any(|(k, v)| k == "ELECTRON_RUN_AS_NODE" && v == "1"));
+        assert!(cli.envs.iter().any(|(k, v)| k == "CODEBUDDY_FORCE_LITE_WB_BUNDLE" && v == "1"));
     }
 
     #[test]

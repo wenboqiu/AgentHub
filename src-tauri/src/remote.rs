@@ -65,7 +65,12 @@ pub fn installed_agents() -> Vec<&'static str> {
     if dirs.is_empty() {
         return Vec::new();
     }
-    NAMES.iter().copied().filter(|n| dirs.iter().any(|d| has_exe(d, n))).collect()
+    let mut out: Vec<&'static str> = NAMES.iter().copied().filter(|n| dirs.iter().any(|d| has_exe(d, n))).collect();
+    // WorkBuddy 不在 PATH 上：装了桌面端（应用内自带 CLI）就算数
+    if crate::runner::workbuddy_cli().is_some() {
+        out.push("workbuddy");
+    }
+    out
 }
 
 #[cfg(windows)]

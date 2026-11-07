@@ -7,8 +7,8 @@ export const AGENT_LABEL: Record<string, string> = {
   zcode: "ZCode",
 };
 
-/** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent */
-const LISTEN_ONLY = new Set(["doubao", "workbuddy"]);
+/** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent（WorkBuddy 已支持派活，见 runner.rs 的 run_workbuddy） */
+const LISTEN_ONLY = new Set(["doubao"]);
 
 export const isListenOnly = (agent: string | null | undefined): boolean => !!agent && LISTEN_ONLY.has(agent);
 

@@ -222,8 +222,8 @@ const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
-/** 能远程派活的工具；执行器上报的 agents 只认这几个（豆包 / WorkBuddy 只做监听，不进派活候选） */
-const DISPATCH_AGENTS = ['claude', 'codex', 'zcode']
+/** 能远程派活的工具；执行器上报的 agents 只认这几个（豆包只做监听，不进派活候选） */
+const DISPATCH_AGENTS = ['claude', 'codex', 'workbuddy', 'zcode']
 /** 解析执行器上报的 agents 参数（逗号分隔）：只留认识的、去重，空 = 不知道 */
 function parseAgents(raw: string | null): string[] {
   const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => DISPATCH_AGENTS.includes(s))
@@ -580,8 +580,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 项目目录登记成「哪台都行」而又有多台在线：随便挑一台。否则会排进空机器名，永远等不到上线
     if (!machine && online.length) machine = online[0]
     const agent = b.agent ?? role?.agent ?? task.agent
-    if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
-    if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
+    if (agent === 'doubao') throw new TaskError('豆包只做状态监听，请在客户端里执行后把会话关联到任务')
+    if (agent !== 'claude' && agent !== 'codex' && agent !== 'workbuddy' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex、WorkBuddy 或 ZCode')
     // 这台电脑上报过装了哪些工具：明确没装就别往里派，排到天亮也跑不起来。
     // 没上报过（老客户端）不拦，交给执行器自己报错。
     const caps = machine ? capsByMachine.get(execKey(userId, machine)) : undefined
@@ -1530,7 +1530,6 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       const session = await getSession(pool, userId, id)
       if (!session) return { code: 404, error: '会话不存在' } as const
       if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，请在豆包客户端中继续对话' } as const
-      if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，请在 WorkBuddy 中继续对话' } as const
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running' && !stuckRunning(session)) return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
@@ -1593,7 +1592,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!session) return { code: 404, error: '会话不存在' } as const
       let point:string|undefined
       if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，暂不支持新开或分支会话' } as const
-      if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，暂不支持新开或分支会话' } as const
+      // WorkBuddy 的 CLI 不支持 --resume-session-at：分叉退化为从末尾分，这里直接拒绝指定回复分支
+      if (session.agent === 'workbuddy' && mode === 'fork') return { code: 409, error: 'WorkBuddy 暂不支持按回复分叉：可以从末尾分叉或直接续聊' } as const
       if (session.agent === 'zcode' && mode === 'fork') return { code: 409, error: 'ZCode 暂不支持按回复分叉：可以同目录新开，或直接在会话里继续聊' } as const
       if(messageId!==undefined) {
         const message=await getMessage(pool,userId,id,messageId as number)

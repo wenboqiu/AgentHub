@@ -3,13 +3,14 @@
 //! 路径：`%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`，每行一个 JSON 事件
 //! （`session-meta` / `message` / `function_call` / `function_call_result` / `ai-title` / `custom-title`）。
 //!
-//! WorkBuddy 不提供 hook，也没有可调用的 CLI/IPC，因此只能读 transcript：
+//! 派活走 `runner.rs::run_workbuddy`（应用内置 CLI，stream-json 协议与 claude 同构）；
+//! 本模块只负责 transcript 监听：
 //! - 正文、标题、目录都能拿到（比豆包日志完整）；
 //! - **没有会话结束事件**。完成判定同时要求「尾部是已完成回复或已归的工具结果」
 //!   「没有未归的工具调用」「文件静默超过确认窗口」；静默只作确认窗口，不单独作为依据。
 //!   未归调用按 callId 集合配对；注入的 user 行（system-reminder / task-notification 等）
 //!   不清零未归调用，避免后台工具还在飞时被提前判完成；
-//! - 因此本模块只做状态与消息监听，不参与远程执行。
+//! - 因此本模块只做状态与消息监听；远程执行由 runner.rs 的 run_workbuddy 承担。
 
 use crate::{
     activity::buckets_of,
