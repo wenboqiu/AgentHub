@@ -30,23 +30,44 @@ pub struct Install {
 }
 
 fn is_install(root: &Path) -> Option<Install> {
-    let cjs = root.join("resources").join("glm").join("zcode.cjs");
-    let provider_config = root.join("resources").join("config").join("provider").join("zcode-builtin.json");
-    (cjs.is_file() && provider_config.is_file()).then(|| Install { root: root.to_path_buf(), cjs, provider_config })
+    // Windows 安装目录下是小写 resources，macOS 的应用包是 Contents/Resources
+    for res in ["resources", "Resources"] {
+        let cjs = root.join(res).join("glm").join("zcode.cjs");
+        let provider_config = root.join(res).join("config").join("provider").join("zcode-builtin.json");
+        if cjs.is_file() && provider_config.is_file() {
+            return Some(Install { root: root.to_path_buf(), cjs, provider_config });
+        }
+    }
+    None
 }
 
-/// 找 ZCode 安装目录：先看默认安装位置，再看 ProgramFiles 环境变量
+/// 找 ZCode 安装目录，按平台各自的默认位置：
+/// - Windows：`C:\Program Files\ZCode`（`ProgramFiles` / `ProgramFiles(x86)` / `LOCALAPPDATA\Programs`）
+/// - macOS：`/Applications/ZCode.app/Contents`（应用包内才有 resources）
+/// - Linux：`/opt/ZCode`、`/usr/lib/zcode`（官方只发 AppImage / deb / rpm，装法不唯一，尽力找）
 pub fn find_install() -> Option<Install> {
     let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        roots.push(PathBuf::from(pf).join("ZCode"));
-    }
-    roots.push(PathBuf::from(r"C:\Program Files\ZCode"));
-    if let Some(pf86) = std::env::var_os("ProgramFiles(x86)") {
-        roots.push(PathBuf::from(pf86).join("ZCode"));
-    }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        roots.push(PathBuf::from(local).join("Programs").join("ZCode"));
+    if cfg!(target_os = "macos") {
+        roots.push(PathBuf::from("/Applications/ZCode.app/Contents"));
+        if let Some(home) = home_dir() {
+            roots.push(home.join("Applications").join("ZCode.app").join("Contents"));
+        }
+    } else if cfg!(windows) {
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            roots.push(PathBuf::from(pf).join("ZCode"));
+        }
+        roots.push(PathBuf::from(r"C:\Program Files\ZCode"));
+        if let Some(pf86) = std::env::var_os("ProgramFiles(x86)") {
+            roots.push(PathBuf::from(pf86).join("ZCode"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(PathBuf::from(local).join("Programs").join("ZCode"));
+        }
+    } else {
+        roots.push(PathBuf::from("/opt/ZCode"));
+        roots.push(PathBuf::from("/opt/zcode"));
+        roots.push(PathBuf::from("/usr/lib/zcode"));
+        roots.push(PathBuf::from("/usr/share/zcode"));
     }
     roots.into_iter().find_map(|r| is_install(&r))
 }
@@ -59,22 +80,14 @@ pub enum Runtime {
 }
 
 pub fn runtime(install: &Install) -> Runtime {
-    let exe = install.root.join("ZCode.exe");
-    if exe.is_file() {
-        return Runtime::Electron(exe);
-    }
-    for cand in [
-        std::env::var_os("ProgramFiles").map(|p| PathBuf::from(p).join("nodejs").join("node.exe")),
-        Some(PathBuf::from(r"C:\Program Files\nodejs\node.exe")),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if cand.is_file() {
-            return Runtime::Node(cand);
+    // Windows 是安装目录下的 ZCode.exe，macOS 是应用包里的 Contents/MacOS/ZCode
+    for exe in [install.root.join("ZCode.exe"), install.root.join("MacOS").join("ZCode")] {
+        if exe.is_file() {
+            return Runtime::Electron(exe);
         }
     }
-    Runtime::Node(PathBuf::from("node"))
+    // 没有自带 Electron：用系统 node（GUI 进程的 PATH 常常不含 homebrew / nvm，交给统一探测）
+    Runtime::Node(crate::runner::node_exe().unwrap_or_else(|| PathBuf::from("node")))
 }
 
 /// 给 `Command` 挂上运行 ZCode CLI 需要的环境
@@ -390,6 +403,30 @@ fn url_decode(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_layout_is_found_with_either_resources_casing() {
+        // Windows 安装目录是小写 resources，macOS 应用包里是 Contents/Resources
+        let base = std::env::temp_dir().join(format!("zc-install-{}", std::process::id()));
+        for (root, res) in [(base.join("win").join("ZCode"), "resources"), (base.join("mac").join("ZCode.app").join("Contents"), "Resources")] {
+            let _ = std::fs::create_dir_all(root.join(res).join("glm"));
+            let _ = std::fs::create_dir_all(root.join(res).join("config").join("provider"));
+            std::fs::write(root.join(res).join("glm").join("zcode.cjs"), "").unwrap();
+            std::fs::write(root.join(res).join("config").join("provider").join("zcode-builtin.json"), "{}").unwrap();
+            let found = is_install(&root).expect("两种大小写都要认");
+            assert_eq!(found.root, root);
+            // Windows 文件系统大小写不敏感，保留的路径大小写可能和传进来的一致，这里只比内容
+            assert!(found.cjs.is_file(), "cjs 要指到真实文件：{:?}", found.cjs);
+            assert_eq!(found.cjs.file_stem().and_then(|s| s.to_str()), Some("zcode"));
+            assert!(found.provider_config.is_file(), "provider 配置要指到真实文件");
+        }
+        // 只有一半文件不算安装
+        let broken = base.join("broken");
+        let _ = std::fs::create_dir_all(broken.join("resources").join("glm"));
+        std::fs::write(broken.join("resources").join("glm").join("zcode.cjs"), "").unwrap();
+        assert!(is_install(&broken).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn model_text_parses_provider_and_model() {

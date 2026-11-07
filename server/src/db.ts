@@ -17,7 +17,7 @@ import { migrateDispatchManager } from './dispatch-manager.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
-export const AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode'] as const
+export const AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
 export type Agent = (typeof AGENTS)[number]
 
 export type EventIn = {
@@ -310,7 +310,7 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const notify = alert && !quiet && !duplicate
   const stateSince = !cur || cur.state !== ev.state || notify ? at : cur.state_since
   const cwd = ev.cwd || cur?.cwd || ''
-  const title = (['codex', 'doubao', 'workbuddy', 'zcode'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
+  const title = (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
   const row = (

@@ -18,7 +18,7 @@ export type Role = {
   createdAt: string; updatedAt: string
 }
 
-const AGENTS: Agent[] = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode']
+const AGENTS: Agent[] = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy']
 const MAX_MODEL = 120
 const MAX_CONTEXT = 4000
 const MAX_TITLE = 120
@@ -33,7 +33,7 @@ export async function migrateRoles(db: DB) {
     user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name text NOT NULL,
     title text NOT NULL DEFAULT '',
-    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode')),
+    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode','codebuddy')),
     model text,
     context text NOT NULL DEFAULT '',
     tools jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -43,18 +43,18 @@ export async function migrateRoles(db: DB) {
     UNIQUE(user_id, id))`)
   // profiles 实体已废弃：角色的「默认配置」随之取消，列连带外键一起清掉（必须在建表之后）
   await db.query('ALTER TABLE roles DROP COLUMN IF EXISTS profile_id CASCADE')
-  // 执行工具扩到 zcode：老库里的列级 CHECK 要换掉
+  // 执行工具扩到 zcode / codebuddy：老库里的列级 CHECK 要换掉
   await db.query(`DO $$
   DECLARE def text;
   BEGIN
     SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
       WHERE c.conrelid = 'roles'::regclass AND c.contype = 'c' AND c.conname = 'roles_agent_check';
-    IF def IS NOT NULL AND def NOT LIKE '%zcode%' THEN
+    IF def IS NOT NULL AND def NOT LIKE '%codebuddy%' THEN
       ALTER TABLE roles DROP CONSTRAINT roles_agent_check;
       def := NULL;
     END IF;
     IF def IS NULL THEN
-      ALTER TABLE roles ADD CONSTRAINT roles_agent_check CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode'));
+      ALTER TABLE roles ADD CONSTRAINT roles_agent_check CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode','codebuddy'));
     END IF;
   END $$`)
   // 老库补列：职责一句话、可用工具清单（只做声明，不改变执行端实际权限）

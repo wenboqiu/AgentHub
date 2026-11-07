@@ -14,6 +14,7 @@ const AGENT_LABELS: { key: keyof NotifySettings["agents"]; label: string }[] = [
   { key: "doubao", label: "豆包" },
   { key: "workbuddy", label: "WorkBuddy" },
   { key: "zcode", label: "ZCode" },
+  { key: "codebuddy", label: "CodeBuddy" },
 ];
 const KIND_LABELS: { key: NotifyKind; label: string }[] = [
   { key: "done", label: "会话完成" },
@@ -665,6 +666,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               <h2>采集说明</h2>
               <p className="hint">豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。</p>
               <p className="hint">WorkBuddy 会话监听随 AgentHub 自动启动。只读 <code>%USERPROFILE%\.workbuddy\projects</code> 下的会话记录，每 2 秒检查一次，可显示对话标题、目录、运行中与完成状态；完成状态在「回复结束 + 无未完成工具调用 + 静默确认」后判定。打开会话详情时会把本地对话记录同步过来（只读），授权与远程续聊仍不支持。</p>
+              <p className="hint">CodeBuddy 命令行版（npm 全局包 <code>@tencent-ai/codebuddy-code</code>）与 WorkBuddy 是同一份 CLI，记录落在 <code>%USERPROFILE%\.codebuddy\projects</code>，用同一套规则监听；派活时用本机 node 跑它自己的登录态，装了它才会出现在角色的候选电脑里。</p>
             </section>
           </>
         )}

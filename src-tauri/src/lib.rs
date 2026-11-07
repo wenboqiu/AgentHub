@@ -204,6 +204,9 @@ mod desktop {
     }
 
     pub fn run() {
+        // 第一件事：补齐 PATH。GUI 启动的 PATH 很窄（mac 尤其），
+        // claude / codex 既探测不到也 exec 不起来，晚一步漏的就是「没装这个工具」。
+        crate::runner::widen_path();
         let silent = std::env::args().any(|a| a == "--silent");
         tauri::Builder::default()
             .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))

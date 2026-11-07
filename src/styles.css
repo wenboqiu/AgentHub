@@ -125,6 +125,7 @@ progress::-moz-progress-bar { background: var(--ok); border-radius: 99px; }
 .tag.doubao { background: var(--ok-bg); color: var(--codex); }
 .tag.workbuddy { background: var(--ok-bg); color: var(--codex); }
 .tag.zcode { background: var(--ok-bg); color: var(--codex); }
+.tag.codebuddy { background: var(--alert-bg); color: var(--claude); }
 /* 项目经理：角色卡上的身份标记，用强调色跟执行工具区分开 */
 .tag.manager { background: var(--accent-soft); color: var(--accent); }
 .machine { color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }

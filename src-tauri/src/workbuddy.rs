@@ -1,6 +1,7 @@
-//! Read-only adapter for WorkBuddy Desktop session transcripts.
+//! Read-only adapter for WorkBuddy / CodeBuddy session transcripts.
 //!
-//! 路径：`%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`，每行一个 JSON 事件
+//! 路径：`%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`（CodeBuddy CLI 同一格式，
+//! 落在 `~\.codebuddy\projects`），每行一个 JSON 事件
 //! （`session-meta` / `message` / `function_call` / `function_call_result` / `ai-title` / `custom-title`）。
 //!
 //! 派活走 `runner.rs::run_workbuddy`（应用内置 CLI，stream-json 协议与 claude 同构）；
@@ -66,6 +67,8 @@ enum Tail {
 #[derive(Default)]
 pub struct FileState {
     pub offset: u64,
+    /// 这份 transcript 属于哪个 agent（workbuddy / codebuddy）：两者格式一致，只是目录不同
+    agent: &'static str,
     session_id: Option<String>,
     cwd: String,
     title: Option<String>,
@@ -350,7 +353,7 @@ impl FileState {
         self.pending.clear();
         let messages = std::mem::take(&mut self.msgs);
         Event {
-            agent: "workbuddy".into(),
+            agent: if self.agent.is_empty() { "workbuddy".into() } else { self.agent.into() },
             session_id: self.session_id.clone().unwrap_or_default(),
             machine: String::new(),
             cwd: self.cwd.clone(),
@@ -391,8 +394,13 @@ fn transcript_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn new_state(path: &Path) -> FileState {
+    new_state_for(path, "workbuddy")
+}
+
+fn new_state_for(path: &Path, agent: &'static str) -> FileState {
     // 没有 session-meta 时用文件名兜底（{sessionId}.jsonl）
     FileState {
+        agent,
         session_id: path.file_stem().and_then(|n| n.to_str()).map(str::to_owned),
         ..Default::default()
     }
@@ -466,17 +474,26 @@ fn scan_buckets(path: &Path, since_ms: i64) -> Vec<i64> {
 /// 启动登记时补一份历史正文：这些老会话早先没同步过（那台电脑没开远程执行，拉不到），
 /// 服务端库里是空的；正文只在本机 transcript 里，只能趁这一刻顺路带上去。
 /// 服务端按 (role, 时间, 正文) 去重，重复带上不会变成重复消息。
-fn tail_messages(path: &Path, limit: usize) -> Vec<EventMessage> {
+fn tail_messages(path: &Path, limit: usize, agent: &str) -> Vec<EventMessage> {
     let Ok(text) = crate::runner::read_tail(path, 512 * 1024) else { return Vec::new() };
-    crate::message_history::parse("workbuddy", &text, limit)
+    crate::message_history::parse(agent, &text, limit)
         .into_iter()
         .map(|m| EventMessage { role: m.role, text: truncate_chars(&m.text, MSG_TEXT_MAX), at: m.at })
         .collect()
 }
 
+/// WorkBuddy 桌面端与独立的 CodeBuddy CLI 是同一份 CLI，transcript 布局也一样
+/// （`~\.<工具>\projects\<工作区>\<sessionId>.jsonl`），只是目录名不同：
+/// 同一个监听器跑两遍，事件里带上各自的 agent 名。
 pub fn spawn(fwd: Forwarder) {
+    for (agent, dir) in [("workbuddy", ".workbuddy"), ("codebuddy", ".codebuddy")] {
+        spawn_dir(fwd.clone(), agent, dir);
+    }
+}
+
+fn spawn_dir(fwd: Forwarder, agent: &'static str, dir: &'static str) {
     std::thread::spawn(move || {
-        let Some(root) = home_dir().map(|h| h.join(".workbuddy").join("projects")) else { return };
+        let Some(root) = home_dir().map(|h| h.join(dir).join("projects")) else { return };
         let mut states = HashMap::<PathBuf, FileState>::new();
         let mut initial = true;
         loop {
@@ -485,7 +502,7 @@ pub fn spawn(fwd: Forwarder) {
             states.retain(|p, _| files.contains(p));
             for path in files {
                 let fresh = !states.contains_key(&path);
-                let st = states.entry(path.clone()).or_insert_with(|| new_state(&path));
+                let st = states.entry(path.clone()).or_insert_with(|| new_state_for(&path, agent));
                 if fresh {
                     seed_head(&path, st);
                     if !initial {
@@ -532,7 +549,7 @@ pub fn spawn(fwd: Forwarder) {
                     // feed 阶段的事件被丢弃但 pending 已被清空：登记前重新补齐历史活动桶
                     st.pending.extend(scan_buckets(path, now_ms - BACKFILL_MS));
                     // 老会话的正文从没进过库：登记这一枪顺路带上最近几条，之后就能在详情页看到
-                    st.msgs = tail_messages(path, REGISTER_MSGS);
+                    st.msgs = tail_messages(path, REGISTER_MSGS, agent);
                     if let Some(ev) = st.register(now_ms) {
                         fwd.push(ev);
                     } else {
@@ -624,6 +641,18 @@ mod tests {
         assert_eq!(done.messages[0].text, "好的，先补麦田。");
         // 上报过的不再重复带
         assert!(s.msgs.is_empty());
+    }
+
+    #[test]
+    fn events_carry_the_transcript_owner_agent() {
+        // 同一套状态机也给 CodeBuddy 用：事件里的 agent 不能还写死成 workbuddy
+        let mut s = new_state_for(Path::new("C:/x/.codebuddy/projects/ws/abc.jsonl"), "codebuddy");
+        assert_eq!(s.session_id.as_deref(), Some("abc"));
+        let evs = s.feed(&[&msg("user", "completed", "查目录", T0)], T0);
+        assert_eq!(evs[0].agent, "codebuddy");
+        // 没有显式指定时退回 workbuddy（老调用点 / 直接 Default 构造）
+        let mut w = live();
+        assert_eq!(w.feed(&[&msg("user", "completed", "查目录", T0)], T0)[0].agent, "workbuddy");
     }
 
     #[test]

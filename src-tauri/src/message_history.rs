@@ -36,7 +36,8 @@ fn text(v: &Value) -> String {
 }
 
 pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
-    if agent == "workbuddy" {
+    // CodeBuddy 与 WorkBuddy 是同一份 CLI，transcript 格式一致
+    if agent == "workbuddy" || agent == "codebuddy" {
         return parse_workbuddy(data, limit);
     }
     let mut messages: Vec<HistoryMessage> = Vec::new();

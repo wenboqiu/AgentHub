@@ -4,7 +4,7 @@ export type ChecklistItem = { id: string; text: string; done: boolean };
 export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string; /** 服务端通知过滤后的结果：false 表示按账号规则静音（照常入列，不弹通知） */ notify?: boolean };
 export type NotifyKind = "done" | "aborted" | "reminder";
 export type NotifySettings = {
-  agents: Record<"claude" | "codex" | "doubao" | "workbuddy" | "zcode", boolean>;
+  agents: Record<"claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy", boolean>;
   minPriority: "high" | "medium" | "low";
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
@@ -36,7 +36,7 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
     c.note,
   ].filter(Boolean);
 }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | "autoDispatch" | keyof Schedule>>;
 /** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */
 export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; manager: boolean; managerProjects: number[]; createdAt: string; updatedAt: string };
@@ -232,7 +232,7 @@ export type Board = { entries: BoardEntry[]; agents: string[]; generatedAt: stri
 
 export type Session = {
   id: string;
-  agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode";
+  agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy";
   machine: string;
   cwd: string;
   project: string;
@@ -253,7 +253,7 @@ export type Run = { id: string; sessionId: string | null; taskId: number | null;
 /** 执行器实时上报的「正在做什么」：文字是 agent 自己的（思考原文 / 工具调用 / 正在写的正文） */
 export type RunActivity = { runId: string; sessionId: string; kind: "thinking" | "tool" | "text" | "idle"; text: string; at: string };
 /** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
-export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
+export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
 export type ActivityBucket = { sessionId: string; at: string; count: number };
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";

@@ -8,7 +8,7 @@ import { TaskError } from './tasks.ts'
 // 硬性规则：审批（approval）与等待授权（waiting）永远放行——审批 30 分钟无人处理会按
 // 拒绝处理，会话会卡住，任何规则都不允许把它们静音。
 
-export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode'] as const
+export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
 export type AgentKey = (typeof AGENT_KEYS)[number]
 export type Priority = 'high' | 'medium' | 'low'
 export type NotifyKind = 'done' | 'aborted' | 'reminder'
@@ -26,7 +26,7 @@ type DB = Pick<pg.Pool, 'query'>
 export const PRIORITY_RANK: Record<Priority, number> = { low: 0, medium: 1, high: 2 }
 
 export const DEFAULT_SETTINGS: NotifySettings = {
-  agents: { claude: true, codex: true, doubao: true, workbuddy: true, zcode: true },
+  agents: { claude: true, codex: true, doubao: true, workbuddy: true, zcode: true, codebuddy: true },
   minPriority: 'low',
   quiet: { enabled: false, start: '22:00', end: '08:00', tzOffsetMinutes: 480, muteKinds: ['done'] },
 }

@@ -139,7 +139,7 @@ const EMPTY_ASSIGNEE: Assignee = {
  */
 const FORK_AGENTS = new Set(['claude', 'codex'])
 
-const AGENT_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', doubao: '豆包', workbuddy: 'WorkBuddy' }
+const AGENT_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', doubao: '豆包', workbuddy: 'WorkBuddy', codebuddy: 'CodeBuddy' }
 const agentName = (a: string): string => AGENT_NAME[a] ?? (a || '未知工具')
 
 export const NO_FORK: ForkInfo = { agent: '', machine: '', cwd: '', ok: false, reason: '找不到原会话' }

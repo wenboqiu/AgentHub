@@ -181,7 +181,7 @@ export async function pickProjectDir(
 
 /**
  * 一台候选电脑：online = 此刻有执行器连着；at = 最近一次在这台上干活的时间；
- * agents = 这台电脑上报过能跑的工具（claude / codex / zcode）。空 = 不知道（老客户端从没上报过），
+ * agents = 这台电脑上报过能跑的工具（claude / codex / zcode / workbuddy / codebuddy）。空 = 不知道（老客户端从没上报过），
  * 界面按「不确定」处理，别把没上报的机器一律判成不支持。
  */
 export type Machine = { name: string; online: boolean; at: string | null; agents: string[] }

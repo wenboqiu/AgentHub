@@ -940,6 +940,12 @@ pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<crate::mess
             let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
             Ok(crate::message_history::parse("workbuddy", &text, HISTORY_COUNT))
         }
+        // CodeBuddy 是同族 CLI，transcript 格式一样，只是落在自己的 .codebuddy 目录
+        "codebuddy" => {
+            let p = find_workbuddy_transcript(&home.join(".codebuddy").join("projects"), key).ok_or("没找到这个会话的本地记录")?;
+            let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
+            Ok(crate::message_history::parse("codebuddy", &text, HISTORY_COUNT))
+        }
         _ => Err("不认识的 agent".into()),
     }
 }
@@ -1418,6 +1424,195 @@ fn run_workbuddy(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images
     }
 }
 
+/// CodeBuddy CLI 入口（`@tencent-ai/codebuddy-code/bin/codebuddy`，node 脚本）。
+/// 三种装法都认：env 覆盖 > npm 全局包 > PATH 上各 prefix（含 WorkBuddy 自带的 node 分发）里的包。
+fn codebuddy_script() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CODEBUDDY_CLI") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(p) = npm_codebuddy_script() {
+        return Some(p);
+    }
+    // PATH 上的 `codebuddy` 只是 shim（sh / .cmd），跑不了 `node shim`，
+    // 所以按 prefix 反查真实入口：<dir>\node_modules\@tencent-ai\codebuddy-code\bin\codebuddy
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin").join("codebuddy"))
+        .find(|p| p.is_file())
+}
+
+/// CodeBuddy CLI 是否装了：给执行器上报能力用，装了才会出现在角色的候选电脑里
+pub fn codebuddy_installed() -> bool {
+    codebuddy_script().is_some()
+}
+
+/// CodeBuddy CLI 定位：与 WorkBuddy 是同一份 CLI，只差装法——
+/// CodeBuddy 走 npm 全局包（自带独立登录态），不依赖 WorkBuddy 桌面端，所以用系统 node 直接跑脚本。
+/// 没有 node 时退回 WorkBuddy 自带 Electron 当 node（装了桌面端的机器总有）。
+fn codebuddy_cli() -> Option<ClaudeLikeCli> {
+    let script = codebuddy_script()?;
+    let script_arg = script.to_string_lossy().into_owned();
+    if let Some(node) = node_exe() {
+        return Some(ClaudeLikeCli { program: node, prefix: vec![script_arg], envs: Vec::new() });
+    }
+    // 没有 node：WorkBuddy 的 Electron 也能当 node 用（只在其安装目录下有）
+    let electron = workbuddy_electron(&script)?;
+    Some(ClaudeLikeCli {
+        program: electron,
+        prefix: vec![script_arg],
+        envs: vec![("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string())],
+    })
+}
+
+/// 找 node 可执行文件：GUI 进程（从 Finder / 开始菜单启动）的 PATH 往往只有系统默认项，
+/// 既没有 nvm / volta，也没有 homebrew 的 bin，所以 PATH 扫完还要看各平台默认安装位置。
+pub(crate) fn node_exe() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("CODEBUDDY_NODE") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            for name in ["node.exe", "node"] {
+                let p = dir.join(name);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+        for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node", "/opt/local/bin/node"] {
+            cands.push(PathBuf::from(p));
+        }
+        if let Some(home) = crate::claude::home_dir() {
+            // nvm / volta / fnm 的默认位置
+            cands.extend(nvm_node_bins(&home));
+            cands.push(home.join(".volta").join("bin").join("node"));
+            cands.push(home.join(".local").join("bin").join("node"));
+        }
+    }
+    if cfg!(windows) {
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            cands.push(PathBuf::from(pf).join("nodejs").join("node.exe"));
+        }
+        cands.push(PathBuf::from(r"C:\Program Files\nodejs\node.exe"));
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            cands.push(PathBuf::from(local).join("Programs").join("nodejs").join("node.exe"));
+        }
+    }
+    cands.into_iter().find(|p| p.is_file())
+}
+
+/// GUI 启动（Finder / 开始菜单 / LaunchAgent / 开机自启）拿到的 PATH 往往只有系统默认目录：
+/// mac 上常见 `/usr/bin:/bin:/usr/sbin:/sbin`，既没有 homebrew，也没有 nvm、volta、`~/.local/bin`。
+/// 光靠 `node_exe()` 兜底只能救 CodeBuddy / ZCode；claude、codex 是直接按名字 exec 的，
+/// PATH 里没有就既探测不到（`installed_agents`）也起不来（派活）。
+/// 所以启动时把这些常见安装目录**追加**到 PATH 末尾：只补缺的、不插队，用户自己配的顺序不受影响。
+pub fn widen_path() {
+    let Some(current) = std::env::var_os("PATH") else { return };
+    let extra = extra_path_dirs();
+    if let Some(merged) = merge_path(&current, &extra) {
+        std::env::set_var("PATH", merged);
+    }
+}
+
+/// PATH 末尾要补的目录：只留真实存在的，免得往 PATH 里塞一堆不存在的路径
+fn extra_path_dirs() -> Vec<PathBuf> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+        for p in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/local/sbin", "/opt/local/bin", "/home/linuxbrew/.linuxbrew/bin"] {
+            cands.push(PathBuf::from(p));
+        }
+        if let Some(home) = crate::claude::home_dir() {
+            for rel in [".local/bin", ".volta/bin", ".asdf/shims", ".bun/bin", ".cargo/bin", ".npm-global/bin", ".deno/bin"] {
+                cands.push(home.join(rel));
+            }
+            // nvm 不生成 shim，只能按版本目录补（新→旧，先命中的在 PATH 里更靠前）
+            cands.extend(nvm_bin_dirs(&home));
+        }
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            cands.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            cands.push(PathBuf::from(local).join("Programs").join("nodejs"));
+        }
+        if let Some(pf) = std::env::var_os("ProgramFiles") {
+            cands.push(PathBuf::from(pf).join("nodejs"));
+        }
+        if let Some(home) = crate::claude::home_dir() {
+            // WorkBuddy 的 npm 完整版默认就装在这下面（`--prefix ~/.local`）
+            cands.push(home.join(".local").join("bin"));
+            cands.push(home.join(".bun").join("bin"));
+        }
+    }
+    cands.into_iter().filter(|d| d.is_dir()).collect()
+}
+
+/// 把 extra 追加到 current 末尾；已经在里面的跳过。一个都没加上就返回 None（别白改环境变量）。
+fn merge_path(current: &std::ffi::OsStr, extra: &[PathBuf]) -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(current).collect();
+    let before = dirs.len();
+    for e in extra {
+        if !dirs.iter().any(|d| same_dir(d, e)) {
+            dirs.push(e.clone());
+        }
+    }
+    if dirs.len() == before {
+        return None;
+    }
+    std::env::join_paths(&dirs).ok()
+}
+
+/// 路径相同判定：Windows 大小写不敏感、结尾的斜杠不算数
+fn same_dir(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| {
+        let s = p.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    norm(a) == norm(b)
+}
+
+/// nvm 各版本的 bin 目录（新→旧），补 PATH 用
+fn nvm_bin_dirs(home: &Path) -> Vec<PathBuf> {
+    nvm_node_bins(home).into_iter().filter_map(|p| p.parent().map(Path::to_path_buf)).filter(|d| d.is_dir()).collect()
+}
+
+/// nvm 的 node 按版本号排目录：取最新装的那一版（`~/.nvm/versions/node/v22.x/bin/node`）
+fn nvm_node_bins(home: &Path) -> Vec<PathBuf> {
+    let root = home.join(".nvm").join("versions").join("node");
+    let Ok(entries) = std::fs::read_dir(&root) else { return Vec::new() };
+    let mut vers: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+    vers.sort();
+    vers.reverse();
+    vers.into_iter().map(|v| v.join("bin").join("node")).collect()
+}
+
+/// CodeBuddy 派活：协议与 claude 同构（同一份 codebuddy CLI 的 stream-json），
+/// 退化点与 WorkBuddy 一致——不支持 `--resume-session-at`，分叉从末尾分。
+fn run_codebuddy(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], _branch_point: &str, model: &str, instructions: &str) {
+    match codebuddy_cli() {
+        Some(cli) => {
+            let extra = ["--port".to_string(), codebuddy_cli_port()];
+            run_claude_like(run, &cli, "codebuddy", mode, key, cwd, text, images, "", model, instructions, &extra)
+        }
+        None => run.fail("没找到 CodeBuddy CLI：请先 npm i -g @tencent-ai/codebuddy-code，或设置 CODEBUDDY_CLI 指向其 bin/codebuddy"),
+    }
+}
+
+/// CodeBuddy CLI 也绑本机端口：默认避开 WorkBuddy 用的 50991，env `CODEBUDDY_CLI_PORT` 可覆盖
+fn codebuddy_cli_port() -> String {
+    std::env::var("CODEBUDDY_CLI_PORT").unwrap_or_else(|_| "50992".into())
+}
+
 fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str, extra_args: &[String]) {
     let mut cmd = Command::new(&cli.program);
     let mut args = cli.prefix.clone();
@@ -1850,7 +2045,11 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
         return run.fail("ZCode 暂不支持按回复分叉：可以同目录新开会话，或直接在会话里继续聊");
     }
     let Some(install) = crate::zcode_exec::find_install() else {
-        return run.fail("没找到 ZCode 安装目录（默认 C:\\Program Files\\ZCode）");
+        return run.fail(if cfg!(target_os = "macos") {
+            "没找到 ZCode 安装目录（默认 /Applications/ZCode.app）"
+        } else {
+            "没找到 ZCode 安装目录（默认 C:\\Program Files\\ZCode）"
+        });
     };
     let log_dir = std::env::temp_dir().join("agenthub-zcode").join(&run.run_id);
     let mut cmd = match crate::zcode_exec::runtime(&install) {
@@ -2363,6 +2562,7 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
             run_zcode(run, mode, key, cwd, text, model, instructions)
         }
         "workbuddy" => run_workbuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
+        "codebuddy" => run_codebuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
         other => run.fail(&format!("不认识的 agent：{other}")),
     }
 }
@@ -2540,6 +2740,48 @@ mod tests {
         assert!(cli.envs.iter().any(|(k, v)| k == "ELECTRON_RUN_AS_NODE" && v == "1"));
         let is_app_builtin = cli.prefix.iter().any(|a| a.ends_with("cli/bin/codebuddy") && !a.ends_with("codebuddy.real"));
         assert_eq!(is_app_builtin, cli.envs.iter().any(|(k, v)| k == "CODEBUDDY_FORCE_LITE_WB_BUNDLE" && v == "1"));
+    }
+
+    #[test]
+    fn codebuddy_cli_points_at_the_node_script() {
+        // 本机装了 CodeBuddy CLI 才有意义
+        let Some(script) = codebuddy_script() else { return };
+        assert!(codebuddy_installed(), "找得到入口就算装了");
+        assert!(script.ends_with(Path::new("bin").join("codebuddy")), "入口应该是包里的 node 脚本：{script:?}");
+        let cli = codebuddy_cli().expect("有入口就该能拼出命令");
+        // 脚本作为第一个参数；进程本身是 node，没有 node 时才退回 Electron（要带 node 模式开关）
+        assert_eq!(cli.prefix, vec![script.to_string_lossy().into_owned()]);
+        let uses_node = cli.envs.is_empty();
+        assert!(uses_node || cli.envs.iter().any(|(k, v)| k == "ELECTRON_RUN_AS_NODE" && v == "1"));
+    }
+
+    #[test]
+    fn widen_path_appends_without_reordering() {
+        // 已有目录保持原顺序，缺的追加到末尾，重复的不再加一遍
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        let base = format!("/usr/bin{sep}/bin");
+        let extra = vec![PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/bin"), PathBuf::from("/usr/bin")];
+        let merged = merge_path(std::ffi::OsStr::new(&base), &extra).expect("有新增就该返回新值");
+        let got: Vec<String> = std::env::split_paths(&merged).map(|p| p.to_string_lossy().into_owned()).collect();
+        assert_eq!(got, vec!["/usr/bin".to_string(), "/bin".to_string(), "/opt/homebrew/bin".to_string()]);
+        // 都在里面了就不用改（返回 None，调用方不会白 set_var）
+        let again = merge_path(&merged, &[PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/bin")]);
+        assert!(again.is_none(), "没有新增时不该产生新 PATH");
+        // Windows 上大小写不同的同一个目录算重复
+        let dup = merge_path(std::ffi::OsStr::new(&base), &[PathBuf::from("/USR/BIN")]);
+        if cfg!(windows) {
+            assert!(dup.is_none(), "Windows 大小写不敏感，/USR/BIN 与 /usr/bin 应视为同一目录");
+        }
+    }
+
+    #[test]
+    fn widen_path_leaves_path_usable() {
+        // 真实跑一遍：结果里原目录一个不少，且补进来的目录都真实存在
+        let before: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        widen_path();
+        let after: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        assert!(after.starts_with(&before), "原有条目必须原样保留在最前面：{before:?} -> {after:?}");
+        assert!(after.iter().skip(before.len()).all(|d| d.is_dir()), "只补真实存在的目录");
     }
 
     #[test]

@@ -55,20 +55,29 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
-/// 本机装了哪几个工具：扫一遍 PATH，找得到 claude / codex / zcode 的可执行文件就算支持。
-/// 服务端拿它给角色挑电脑——没装这个工具的机器不该出现在候选里。
+/// 本机装了哪几个工具，服务端拿它给角色挑电脑——没装这个工具的机器不该出现在候选里。
+/// 探测口径按安装形态分开：
+/// - claude / codex 是命令行工具，扫 PATH（启动时 `runner::widen_path` 已经把 homebrew / nvm 等补进来了，
+///   否则从访达启动的 app 扫不到这两个）；
+/// - ZCode 是桌面安装（`Program Files\ZCode`），根本不在 PATH 上，得用执行器同一套安装定位；
+/// - WorkBuddy 桌面端自带 CLI、CodeBuddy 的 CLI 是 npm 包 `@tencent-ai/codebuddy-code`，各自用 runner 的定位函数。
 /// 一个都没探到就不上报（服务端当作「不知道」，别把老电脑全判成不支持）。
 pub fn installed_agents() -> Vec<&'static str> {
-    const NAMES: [&str; 3] = ["claude", "codex", "zcode"];
-    let Some(path) = std::env::var_os("PATH") else { return Vec::new() };
-    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
-    if dirs.is_empty() {
-        return Vec::new();
-    }
+    const NAMES: [&str; 2] = ["claude", "codex"];
+    let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     let mut out: Vec<&'static str> = NAMES.iter().copied().filter(|n| dirs.iter().any(|d| has_exe(d, n))).collect();
+    // 曾经这里连 zcode 一起扫 PATH：桌面端装完也不会往 PATH 里放 zcode.exe，
+    // 结果「装了 ZCode 的电脑」在角色派活里被标成「没装 ZCode」。按安装目录探才对。
+    if crate::zcode_exec::find_install().is_some() {
+        out.push("zcode");
+    }
     // WorkBuddy 不在 PATH 上：装了桌面端（应用内自带 CLI）就算数
     if crate::runner::workbuddy_cli().is_some() {
         out.push("workbuddy");
+    }
+    // CodeBuddy CLI 是 npm 全局包 @tencent-ai/codebuddy-code：只认这一份安装
+    if crate::runner::codebuddy_installed() {
+        out.push("codebuddy");
     }
     out
 }

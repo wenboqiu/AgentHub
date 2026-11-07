@@ -33,6 +33,7 @@
 - 豆包 Windows 客户端（实验性，已对照 2.32.6 本机日志）：只读 `%USERPROFILE%\AppData\Local\Doubao\User Data\sdk_storage\log\saman_YYYY.MMDD.N.log` 中的结构化生命周期事件，每 2 秒增量检查。按会话 ID 展示标题、回复中、完成和中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到豆包窗口，不能定位到指定聊天。没有该目录时自动等待，不需要 API Key。
 - WorkBuddy：只读 `%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`（`message` / `function_call` / `ai-title` / `custom-title`），每 2 秒增量检查。展示标题、项目目录、运行中／完成／中断状态，复用桌面／手机提醒和已处理操作；0.9.8 起会话详情支持只读历史同步；「跳转」切到 WorkBuddy 窗口，不能定位到指定会话。
 - ZCode：只读 `%USERPROFILE%\.zcode\v2\sessions\<工作区哈希>\sess_<uuid>.json`（`meta.status` 直接给出 running / completed / error，不用猜），每 2 秒检查文件改动。展示标题、项目目录、运行中／完成／失败状态，也支持派活、续聊、停止和读历史（走 CLI 的 app-server，见下面「ZCode 会话监听与派活」）；「跳转」切到 ZCode 窗口，不能定位到指定会话。
+- CodeBuddy（命令行版）：和 WorkBuddy 是同一份 CLI（npm 全局包 `@tencent-ai/codebuddy-code`），会话记录在 `%USERPROFILE%\.codebuddy\projects\<工作区>\<sessionId>.jsonl`，用同一套监听规则；同样支持派活／续聊／读历史（用本机 node 跑它的脚本，走它自己的登录态）。只有装了它的电脑才会出现在角色派活的候选里。
 
 豆包接入仅提供**会话状态监听**，暂不提供完整对话正文、等待授权、远程发消息、新建或分支。完成状态必须有会话结束成功事件，不通过日志停止增长猜测；初次加载今天和昨天每个日志末尾最多 8 MiB，静默登记已有状态，历史中未结束的运行显示为未知。日志轮换后继续读取新文件。豆包升级改变日志格式时可能无法采集，需要重新适配；此功能需同时更新服务端、桌面端与手机端。
 
@@ -50,7 +51,7 @@ WorkBuddy 没有 hook，也没有可调用的 CLI/IPC 通道，因此做**状态
 
 ## ZCode 会话监听与派活
 
-ZCode（Z.ai 的编程工作台）没有 hook，但带一个可用的 CLI（`zcode.cjs app-server --stdio`，装在 `C:\Program Files\ZCode`）。AgentHub 因此把 ZCode 做成了**能派活的 agent**：
+ZCode（Z.ai 的编程工作台）没有 hook，但带一个可用的 CLI（`zcode.cjs app-server --stdio`，Windows 装在 `C:\Program Files\ZCode`，macOS 在 `/Applications/ZCode.app/Contents`）。AgentHub 因此把 ZCode 做成了**能派活的 agent**：
 
 - **监听**：只读 `%USERPROFILE%\.zcode\v2\sessions\<工作区哈希>\sess_<uuid>.json`，`meta.status` 直接给出 running / completed / error（映射 running / done / aborted），每 2 秒检查文件改动；展示标题、项目目录、状态，照常触发桌面／手机提醒，时间轴有对话跨度。
 - **派活 / 续聊 / 停止**：本机执行器起 `zcode app-server` 子进程走 ZCode Protocol（v1 的 `session/create`、`session/resume`、`session/send`、`session/stop`），完成事件驱动状态，授权走 `interaction/requestPermission` 到手机确认。项目目录同样受「禁止执行的目录」约束。
@@ -172,6 +173,7 @@ xattr -dr com.apple.quarantine ~/Applications/AgentHub.app   # 未签名包首�
 - 机器上没有 Node 时，可直接下官方 darwin 包解到 `~/.local/node`，跑 npm 前 `export PATH=$HOME/.local/node/bin:$PATH`（否则 npm 的 shebang 找不到 node）。
 - 需要 dmg：在**已登录桌面**的会话里跑 `npm run tauri build -- --bundles app,dmg`。dmg 打包由 `bundle_dmg.sh` 调 Finder 摆图标，SSH 无人值守会一直卡在 `osascript` 上。
 - 仅 Windows 的能力（终端续聊、窗口/标签页跳转、进程链匹配）在 macOS 上会走降级分支直接报错；采集、会话、任务、通知正常。
+- 从访达 / LaunchAgent 启动时 PATH 只有 `/usr/bin:/bin:/usr/sbin:/sbin`，不含 homebrew、nvm、volta、`~/.local/bin`，`claude` / `codex` 会既探测不到也起不来。AgentHub 启动时（`runner::widen_path`）把 homebrew、`/usr/local/bin`、`~/.local/bin`、`~/.volta/bin`、`~/.asdf/shims`、`~/.cargo/bin`、nvm 各版本的 bin 追加到 PATH **末尾**（只补缺的、不插队，用户自己配的顺序不变）；Windows 侧补 `%APPDATA%\npm`、`nodejs` 安装目录与 `~\.local\bin`。指定别的安装位置仍可用 `CODEBUDDY_CLI` / `CODEBUDDY_NODE` / `WORKBUDDY_CLI`。
 
 ## Android 构建
 

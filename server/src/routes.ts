@@ -223,10 +223,14 @@ const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
 /** 能远程派活的工具；执行器上报的 agents 只认这几个（豆包只做监听，不进派活候选） */
-const DISPATCH_AGENTS = ['claude', 'codex', 'workbuddy', 'zcode']
+const DISPATCH_AGENTS = ['claude', 'codex', 'workbuddy', 'zcode', 'codebuddy'] as const
+type DispatchAgent = (typeof DISPATCH_AGENTS)[number]
+/** 派活校验同时也是类型收窄：后面拿 agent 当强类型用 */
+const isDispatchAgent = (a: unknown): a is DispatchAgent =>
+  typeof a === 'string' && (DISPATCH_AGENTS as readonly string[]).includes(a)
 /** 解析执行器上报的 agents 参数（逗号分隔）：只留认识的、去重，空 = 不知道 */
 function parseAgents(raw: string | null): string[] {
-  const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => DISPATCH_AGENTS.includes(s))
+  const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => isDispatchAgent(s))
   return [...new Set(list)]
 }
 
@@ -581,7 +585,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!machine && online.length) machine = online[0]
     const agent = b.agent ?? role?.agent ?? task.agent
     if (agent === 'doubao') throw new TaskError('豆包只做状态监听，请在客户端里执行后把会话关联到任务')
-    if (agent !== 'claude' && agent !== 'codex' && agent !== 'workbuddy' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex、WorkBuddy 或 ZCode')
+    if (!isDispatchAgent(agent)) throw new TaskError('请选择 Claude、Codex、WorkBuddy、ZCode 或 CodeBuddy')
     // 这台电脑上报过装了哪些工具：明确没装就别往里派，排到天亮也跑不起来。
     // 没上报过（老客户端）不拦，交给执行器自己报错。
     const caps = machine ? capsByMachine.get(execKey(userId, machine)) : undefined
@@ -1303,9 +1307,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 谁来判断：这一单归哪位项目经理管——本项目专属经理优先，其次是管所有项目的那位
     const role = await pickManagerFor(pool, userId, proposal.projectId)
     // 用谁的执行工具：优先用项目经理角色配的；没配就跟着原会话那台用同一个工具
-    const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode'
+    const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode' || role?.agent === 'codebuddy'
       ? role.agent
-      : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode') ? session.agent : 'claude')
+      : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode' || session.agent === 'codebuddy') ? session.agent : 'claude')
     const msgs = isTicket ? [] : await listMessages(pool, userId, proposal.sessionId, 8)
     const [task, roles, projects] = await Promise.all([
       proposal.taskId === null ? Promise.resolve(null) : getTask(pool, userId, proposal.taskId).catch(() => null),

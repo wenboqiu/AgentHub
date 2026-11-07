@@ -5,6 +5,7 @@ export const AGENT_LABEL: Record<string, string> = {
   doubao: "豆包",
   workbuddy: "WorkBuddy",
   zcode: "ZCode",
+  codebuddy: "CodeBuddy",
 };
 
 /** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent（WorkBuddy 已支持派活，见 runner.rs 的 run_workbuddy） */
