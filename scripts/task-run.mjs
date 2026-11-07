@@ -140,6 +140,17 @@ function executorCmd(name, prompt, dir) {
   return { bin, args, dir }
 }
 
+/** 执行器子进程的环境消毒：去掉宿主（如 WorkBuddy 会话）注入的产品配置，
+ *  否则 CLI 会解析到 workbuddy-desktop（token 为空）而不是自己 /login 的凭据 */
+function sanitizeEnv(env) {
+  const clean = { ...env }
+  for (const key of [
+    'ACC_PRODUCT_CONFIG', 'ACC_PRODUCT_CONFIG_V2', 'ACC_PRODUCT_CONFIG_V3', 'ACC_PRODUCT_CONFIG_PATH',
+    'WORKBUDDY_RESOURCES_PATH', 'NODE_OPTIONS',
+  ]) delete clean[key]
+  return clean
+}
+
 function promptFor(task, dir, artifactPath) {
   const lines = [
     `你在执行 AgentHub 任务单 #${task.id}。工作目录：${dir}`,
@@ -246,7 +257,7 @@ async function main() {
   console.log(`[task-run] #${id} 用 ${executor} 在 ${dir} 开跑，日志 ${logPath}`)
 
   const timeoutMs = (config.runTimeoutMinutes ?? 30) * 60_000
-  const child = spawn(cmd.bin, cmd.args, { cwd: cmd.dir, stdio: ['ignore', 'pipe', 'pipe'], env: process.env })
+  const child = spawn(cmd.bin, cmd.args, { cwd: cmd.dir, stdio: ['ignore', 'pipe', 'pipe'], env: sanitizeEnv(process.env) })
   const chunks = []
   const write = d => { try { writeFileSync(fd, d) } catch {} }
   child.stdout.on('data', d => { chunks.push(d); write(d) })
