@@ -92,23 +92,28 @@ function watch(args) {
 }
 
 /** 找 WorkBuddy CLI：优先 npm 完整版（有独立登录态，应用内置 lite-wb 无 TUI 不能 /login），
- *  再看环境变量 / 配置，最后按平台猜应用内置安装位置 */
+ *  再看环境变量 / 配置，最后按平台猜应用内置安装位置。
+ *  Windows 一律取无扩展名的 JS 入口（spawn 时用 node 直驱；Node 会拒绝直接 spawn .cmd） */
 function workbuddyCli() {
+  const npmPkg = join('@tencent-ai', 'codebuddy-code', 'bin', 'codebuddy')
   const candidates = [
     process.env.WORKBUDDY_CLI,
     config.workbuddyCli,
-    // npm 完整版（@tencent-ai/codebuddy-code）真实入口：bin/codebuddy 可能是包装脚本，优先 .real
+    // npm 完整版（@tencent-ai/codebuddy-code）真实入口：mac 上 bin/codebuddy 可能是包装脚本，优先 .real
     join(HOME, '.local/bin/codebuddy.real'),
-    join(HOME, '.local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy'),
+    join(HOME, '.local/lib/node_modules', npmPkg),
     join(HOME, '.npm-global/bin/codebuddy'),
     '/usr/local/bin/codebuddy',
     '/opt/homebrew/bin/codebuddy',
-    ...(platform() === 'darwin'
-      ? ['/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy']
-      : [
-          join(process.env.LOCALAPPDATA ?? '', 'Programs', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy.cmd'),
-          join(process.env.LOCALAPPDATA ?? '', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy.cmd'),
-        ]),
+    ...(platform() === 'win32'
+      ? [
+          join(process.env.APPDATA ?? '', 'npm', 'node_modules', npmPkg),
+          join(HOME, '.local', 'node_modules', npmPkg),
+          join(HOME, '.npm-global', 'node_modules', npmPkg),
+          join(process.env.LOCALAPPDATA ?? '', 'Programs', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
+          join(process.env.LOCALAPPDATA ?? '', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
+        ]
+      : ['/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy']),
   ].filter(Boolean)
   for (const path of candidates) {
     if (existsSync(path)) return path
@@ -123,9 +128,11 @@ function executorCmd(name, prompt, dir) {
   }
   const bin = workbuddyCli()
   if (!bin) throw new Error('没找到 WorkBuddy 自带的 CLI，用 --executor claude 或设置 WORKBUDDY_CLI')
-  const args = ['-p', prompt, '--permission-mode', 'acceptEdits', '--allowedTools', 'Edit,Write,Read,Glob,Grep,Bash', '--output-format', 'text']
+  let args = ['-p', prompt, '--permission-mode', 'acceptEdits', '--allowedTools', 'Edit,Write,Read,Glob,Grep,Bash', '--output-format', 'text']
   // CLI 默认会在 127.0.0.1 上占一个端口；桌面端开着时可能撞车，配置里给个固定端口就稳了
   if (config.workbuddyPort) args.push('--port', String(config.workbuddyPort))
+  // Windows：入口是无扩展名 JS 脚本，用当前 node 直驱（daemon 本身跑在 node 上；.cmd 会被 spawn 拒绝）
+  if (platform() === 'win32') return { bin: process.execPath, args: [bin, ...args], dir }
   return { bin, args, dir }
 }
 

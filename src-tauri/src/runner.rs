@@ -1317,26 +1317,38 @@ fn needs_lite_bundle(script: &Path) -> bool {
     script.to_string_lossy().contains("app.asar.unpacked")
 }
 
-/// npm 安装的完整版 codebuddy 入口（node 脚本）。只认确定属于 @tencent-ai/codebuddy-code 的路径，
-/// 避免误命中其它同名命令。
+/// npm 安装的完整版 codebuddy 入口（node 脚本，无扩展名）。只认确定属于
+/// @tencent-ai/codebuddy-code 的路径，避免误命中其它同名命令。
 fn npm_codebuddy_script() -> Option<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
-    let candidates = [
-        // npm --prefix ~/.local 的真实入口（bin/codebuddy 被本项目的包装脚本占用）
-        home.join(".local/bin/codebuddy.real"),
-        home.join(".local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy"),
-        // 常规 npm -g 位置
-        home.join(".npm-global/bin/codebuddy"),
-        PathBuf::from("/usr/local/bin/codebuddy"),
-        PathBuf::from("/opt/homebrew/bin/codebuddy"),
-    ];
+    let candidates: Vec<PathBuf> = if cfg!(target_os = "windows") {
+        // npm -g 默认前缀 %APPDATA%\npm；--prefix 自定义时包落在 <prefix>\node_modules
+        let mut v = Vec::new();
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            v.push(PathBuf::from(appdata)
+                .join("npm").join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin").join("codebuddy"));
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            let home = PathBuf::from(home);
+            v.push(home.join(".local").join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin").join("codebuddy"));
+            v.push(home.join(".npm-global").join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin").join("codebuddy"));
+        }
+        v
+    } else {
+        let home = PathBuf::from(std::env::var_os("HOME")?);
+        vec![
+            // npm --prefix ~/.local 的真实入口（bin/codebuddy 被本项目的包装脚本占用）
+            home.join(".local/bin/codebuddy.real"),
+            home.join(".local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy"),
+            // 常规 npm -g 位置
+            home.join(".npm-global/bin/codebuddy"),
+            PathBuf::from("/usr/local/bin/codebuddy"),
+            PathBuf::from("/opt/homebrew/bin/codebuddy"),
+        ]
+    };
     candidates.into_iter().find(|p| p.is_file())
 }
 
 fn npm_codebuddy_cli() -> Option<ClaudeLikeCli> {
-    if !cfg!(target_os = "macos") {
-        return None; // Windows/Linux 的定位待支持时再加
-    }
     let electron = workbuddy_electron(&workbuddy_script_default()?)?;
     let script = npm_codebuddy_script()?;
     Some(ClaudeLikeCli {
