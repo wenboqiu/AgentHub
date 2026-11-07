@@ -11,15 +11,16 @@
 // 配置：~/.agenthub/watcher/config.json（和 watch-tasks.mjs 共用），token 复用桌面端登录态。
 
 import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, openSync, closeSync } from 'node:fs'
-import { homedir, platform } from 'node:os'
+import { homedir, platform, tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
 
 const HOME = homedir()
 const STATE_DIR = join(HOME, '.agenthub', 'watcher')
 const CONFIG_PATH = join(STATE_DIR, 'config.json')
 const RUNS_DIR = join(STATE_DIR, 'runs')
-const WATCH = join(dirname(new URL(import.meta.url).pathname), 'watch-tasks.mjs')
+const WATCH = join(dirname(fileURLToPath(import.meta.url)), 'watch-tasks.mjs')
 
 const DEFAULT_CONFIG = {
   serverUrl: 'https://agenthub.wondergarden.top',
@@ -110,6 +111,9 @@ function workbuddyCli() {
           join(process.env.APPDATA ?? '', 'npm', 'node_modules', npmPkg),
           join(HOME, '.local', 'node_modules', npmPkg),
           join(HOME, '.npm-global', 'node_modules', npmPkg),
+          // 应用内置 CLI：默认装 C:\Program Files，也可能自定义到别的盘（如 D:\Program Files）
+          join(process.env.ProgramFiles ?? 'C:\\Program Files', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
+          join(process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
           join(process.env.LOCALAPPDATA ?? '', 'Programs', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
           join(process.env.LOCALAPPDATA ?? '', 'WorkBuddy', 'resources', 'app.asar.unpacked', 'cli', 'bin', 'codebuddy'),
         ]
@@ -219,7 +223,10 @@ async function main() {
     console.log(`[task-run] 注意：#${id} 当前状态是 ${task.status}，仍按你的要求重跑`)
   }
 
-  const artifactPath = join('/tmp', `agenthub-task-${id}.md`)
+  // Windows 的 /tmp 会落到当前盘根目录（cwd 在 D: 就是 D:\tmp），跨盘就错位了；统一用系统临时目录
+  const artifactPath = platform() === 'win32'
+    ? join(tmpdir(), `agenthub-task-${id}.md`)
+    : join('/tmp', `agenthub-task-${id}.md`)
   const prompt = promptFor(task, dir, artifactPath)
   const cmd = executorCmd(executor, prompt, dir)
 
