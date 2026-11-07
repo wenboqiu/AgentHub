@@ -147,19 +147,13 @@ export default function Assistant({
   const [text, setText] = useState("");
   const [agent, setAgent] = useState<AssistantAgent>("claude");
   const [machine, setMachine] = useState("");
-  const [cwd, setCwd] = useState("");
-  const [manualCwd, setManualCwd] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const inited = useRef(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  // 目录候选：配置里登记的 + 这台电脑上用过的，去重后给下拉直接选，省得手打路径
-  const dirsOf = (m: string) =>
-    [...new Set((state?.dirs ?? [])
-      .filter(d => !d.machine || (m !== "" && d.machine === m))
-      .map(d => d.cwd))];
-
+  // 工作目录不做成选项：建角色跟目录无关，CLI 进程统一在电脑端的
+  // <文档>/AgentHub 里启动（那个目录由电脑端自动创建，不碰用户的项目文件）
   const load = useCallback(async () => {
     try {
       const s = await api.assistant();
@@ -169,8 +163,6 @@ export default function Assistant({
         inited.current = true;
         setAgent(s.suggestion.agent);
         setMachine(s.suggestion.machine);
-        // 空 = 电脑端的默认工作目录（<文档>/AgentHub），比塞一个项目目录更符合「建角色」这件事
-        setCwd(s.suggestion.cwd || "");
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -200,7 +192,7 @@ export default function Assistant({
     try {
       if (!thread) {
         if (!machine.trim()) throw new Error("先选一台在线的电脑");
-        await api.startAssistant({ agent, machine: machine.trim(), cwd: cwd.trim(), text: body });
+        await api.startAssistant({ agent, machine: machine.trim(), cwd: "", text: body });
       } else {
         await api.replyAssistant(body);
       }
@@ -222,14 +214,6 @@ export default function Assistant({
 
   const drafts = state?.drafts ?? [];
   const draftOf = (messageId: number) => drafts.find(d => d.messageId === messageId);
-  const dirs = dirsOf(machine);
-  // 默认项（空值）= 电脑端的 <文档>/AgentHub，不需要用户操心；只有主动点「其他」才出输入框
-  const showManualCwd = manualCwd;
-  const pickMachine = (m: string) => {
-    setMachine(m);
-    // 换电脑后，原来那个项目目录多半不存在；回到默认目录比留着一条错路径安全
-    if (cwd && !dirsOf(m).includes(cwd)) setCwd("");
-  };
 
   return (
     <section className="box assistant">
@@ -242,8 +226,7 @@ export default function Assistant({
       </div>
       <p className="hint">
         用一句话说清要什么人，电脑端的 agent 会整理成一份草稿（名字、职责、执行工具、模型、准则）；草稿你可以直接改，点「创建角色」才真正写进角色列表。
-        这条通道借的是派活：电脑得开着 AgentHub，一次大概十几秒，不会读写你的文件
-        {thread ? `；这次的工作目录是 ${thread.cwd || "AgentHub 默认目录（文档/AgentHub）"}` : ""}
+        这条通道借的是派活：电脑得开着 AgentHub，一次大概十几秒，进程在那个电脑的「文档/AgentHub」里启动，不读写你的项目文件
         {state?.roles ? `；现有 ${state.roles} 个角色，助手会避开重名` : ""}。
       </p>
 
@@ -259,34 +242,12 @@ export default function Assistant({
               </select>
             </label>
             <label>电脑
-              <select value={machine} disabled={busy} onChange={e => pickMachine(e.target.value)}>
+              <select value={machine} disabled={busy} onChange={e => setMachine(e.target.value)}>
                 <option value="">{state?.online.length ? "选一台" : "没有在线的电脑"}</option>
                 {(state?.online ?? []).map(m => <option key={m} value={m}>{m}</option>)}
               </select>
             </label>
-            <label>工作目录
-              {showManualCwd ? (
-                <span className="model-custom">
-                  <input value={cwd} maxLength={4000} disabled={busy} placeholder="电脑上已存在的目录，例如 D:\\Work2\\Demo" onChange={e => setCwd(e.target.value)} />
-                  <button type="button" className="ghost" disabled={busy} onClick={() => { setManualCwd(false); setCwd(""); }}>用默认目录</button>
-                </span>
-              ) : (
-                <select value={cwd} disabled={busy} onChange={e => {
-                  if (e.target.value === "__custom__") { setManualCwd(true); return; }
-                  setCwd(e.target.value);
-                }}>
-                  <option value="">AgentHub 默认目录（文档/AgentHub，自动创建）</option>
-                  {dirs.map(d => <option key={d} value={d}>{d}</option>)}
-                  {cwd && !dirs.includes(cwd) && <option value={cwd}>{cwd}</option>}
-                  <option value="__custom__">其他（手动填路径）…</option>
-                </select>
-              )}
-            </label>
           </div>
-          <p className="hint">
-            工作目录不是角色的属性：这条通道借你电脑上已登录的 CLI 当模型用，CLI 进程必须在某个真实目录里启动。
-            默认的「文档/AgentHub」由电脑端自动创建，不读写你的项目文件，卸载重装也还在；想换个地方也可以从列表里挑或手填。
-          </p>
           <div className="assistant-examples">
             {EXAMPLES.map(e => <button key={e} className="chip" disabled={busy} onClick={() => void send(e)}>{e}</button>)}
           </div>

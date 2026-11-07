@@ -838,29 +838,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 服务端只额外记住「这个会话属于助手」，好把 agent 回的 JSON 认成草稿。
   app.get('/assistant', async req => serial(async () => {
     const thread = await getThread(pool, req.userId)
-    const [messages, drafts, run, roles, projectRows, dirRows] = await Promise.all([
+    const [messages, drafts, run, roles] = await Promise.all([
       thread?.sessionId ? listMessages(pool, req.userId, thread.sessionId, 100) : Promise.resolve([]),
       thread ? listDrafts(pool, req.userId, thread.id) : Promise.resolve([]),
       thread?.lastRunId ? getRun(pool, req.userId, thread.lastRunId) : Promise.resolve(null),
       listRoles(pool, req.userId),
-      // 项目上登记的目录（每台电脑一条）：这是用户刻意维护的目录候选
-      pool.query(`SELECT dirs FROM projects WHERE user_id = $1 AND dirs <> '[]'::jsonb`, [req.userId]),
-      // 这台账号在电脑上用过的目录，界面下拉直接选，省得每次都手打路径
-      pool.query(`SELECT machine, cwd, max(updated_at) at FROM sessions
-                  WHERE user_id = $1 AND cwd <> '' GROUP BY machine, cwd ORDER BY at DESC LIMIT 40`, [req.userId]),
     ])
     const online = agentList(req.userId)
-    const seen = new Set<string>()
-    const dirs = [
-      // 项目里登记的排在前面：那是用户刻意维护的目录
-      ...projectRows.rows.flatMap((r: any) => Array.isArray(r.dirs) ? r.dirs.filter((d: any) => d && typeof d.cwd === 'string' && d.cwd) : []),
-      ...dirRows.rows.map(r => ({ machine: String(r.machine ?? ''), cwd: String(r.cwd) })),
-    ].filter(d => {
-      const key = `${d.machine ?? ''}\0${d.cwd}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    }).slice(0, 40)
     return {
       thread,
       messages,
@@ -869,13 +853,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       pending: !!run && (run.status === 'queued' || run.status === 'running'),
       runError: run && run.status === 'failed' ? run.error : '',
       online,
+      // 不给工作目录建议：建角色跟目录无关，一律交给电脑端用 <文档>/AgentHub
       suggestion: {
         agent: thread?.agent ?? 'claude',
         machine: thread?.machine ?? (online.length === 1 ? online[0] : ''),
-        // 默认就是空：交给电脑端用 <文档>/AgentHub，用户不用为了建角色先挑项目目录
-        cwd: thread?.cwd ?? '',
       },
-      dirs,
       roles: roles.length,
     }
   }))

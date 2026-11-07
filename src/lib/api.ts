@@ -90,9 +90,7 @@ export type AssistantState = {
   pending: boolean;
   runError: string;
   online: string[];
-  suggestion: { agent: AssistantAgent; machine: string; cwd: string };
-  /** 项目里登记过、这台账号在电脑上用过的目录，供下拉直接选；machine 为空表示不分机器 */
-  dirs: { machine: string; cwd: string }[];
+  suggestion: { agent: AssistantAgent; machine: string };
   roles: number;
 };
 
