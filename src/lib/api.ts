@@ -44,9 +44,14 @@ export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updat
 
 /** 一条目录 = 这个项目在某台电脑上住在哪；machine 为空表示哪台电脑都适用 */
 export type ProjectDir = { machine: string | null; cwd: string };
-/** 项目配置里的候选电脑：online = 此刻连着；at = 最近一次在这台上干活的时间；
- *  agents = 这台电脑上报过能跑的工具（claude / codex / zcode）；空 = 没上报过（老电脑端），按「不知道」处理 */
-export type Machine = { name: string; online: boolean; at: string | null; agents: string[] };
+/** 项目配置里的候选电脑：online = 此刻连着；at = 最近一次在这台上干活的时间 */
+export type Machine = {
+  name: string;
+  online: boolean;
+  at: string | null;
+  /** 这台电脑上报过「装了哪些工具」；空数组 = 没上报（老电脑端），按「不知道」处理，不拦 */
+  agents: string[];
+};
 /** 项目：一个代码库的身份与背景知识 + 它在各台电脑上的目录，派活时按当前机器自动挑 */
 export type Project = { id: number; name: string; brief: string; dirs: ProjectDir[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
