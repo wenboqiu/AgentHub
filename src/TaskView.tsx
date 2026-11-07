@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import type { Api, EvidenceKind, Goal, Project, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskConstraints, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import type { Api, Attachment, AttachmentInput, EvidenceKind, Goal, Machine, Project, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskConstraints, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { NO_CONSTRAINTS } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
@@ -8,6 +8,8 @@ import { PrioritySelect } from "./GoalPriority";
 import Checklist from "./Checklist";
 import InlineField from "./InlineField";
 import Markdown from "./Markdown";
+import TaskNotes from "./TaskNotes";
+import { fileKind, formatSize, notesForAgent, readForUpload, refOf, saveBase64 } from "./lib/attachments";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
@@ -36,8 +38,12 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const [review, setReview] = useState<Review | null>(null);
   const [roles, setRoles] = useState<Role[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [machines, setMachines] = useState<Machine[]>([]);
+  // 附件：图片带 data URL 可直接内联渲染，文件点下载时再取内容
+  const [attachments, setAttachments] = useState<Attachment[]>([]), [preview, setPreview] = useState<string | null>(null);
   const [failing, setFailing] = useState<number | null>(null), [note, setNote] = useState(""), [newItem, setNewItem] = useState("");
   const flashTimer = useRef<number | undefined>(undefined);
+  const attachPicker = useRef<HTMLInputElement | null>(null);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
   useEffect(() => { if (!task.timerStartedAt) return; const t = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(t); }, [task.timerStartedAt]);
   // 预摘要：打开详情时拉一次，任务更新（如重新进入待验收）后再拉；WS 推送的实时摘要优先
@@ -49,6 +55,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     api.thread(task.id).then(r => { if (alive) setTimeline(r.events); }).catch(() => { if (alive) setTimeline([]); });
     // 验收：检查项 + 证据 + 打回沉淀的标准
     api.review(task.id).then(r => { if (alive) setReview(r); }).catch(() => { if (alive) setReview(null); });
+    // 附件：备注里的 attachment:ID 引用靠它解析
+    api.attachments(task.id).then(r => { if (alive) setAttachments(r); }).catch(() => { if (alive) setAttachments([]); });
     return () => { alive = false; };
   }, [api, task.id, task.updatedAt]);
   // 角色与项目只在打开详情时拉一次（改动不频繁）
@@ -58,6 +66,13 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     api.projects().then(p => { if (alive) setProjects(p); }).catch(() => {});
     return () => { alive = false; };
   }, [api]);
+  // 电脑的工具清单是执行器连上来时上报的：在线名单一变就重拉，刚上线的电脑才能马上出现在候选里
+  const onlineKey = [...agents].sort().join(",");
+  useEffect(() => {
+    let alive = true;
+    api.machines().then(ms => { if (alive) setMachines(ms); }, () => { if (alive) setMachines([]); });
+    return () => { alive = false; };
+  }, [api, onlineKey]);
   const digest: TaskDigests | null = liveDigest ?? fetchedDigest;
   const artifact = liveArtifact ?? fetchedArtifact;
   const takeArtifact = (a: TaskArtifact) => { setFetchedArtifact(a); onArtifact(a); };
@@ -92,6 +107,45 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
 
   const guard = async (fn: () => Promise<unknown>) => { setBusy(true); setErr(""); try { await fn(); flash(); } catch (e) { setErr(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); } };
   const patch = (v: TaskInput) => void guard(async () => onSaved(await api.updateTask(task.id, v)));
+  // 附件：备注里只存 attachment:ID 引用，本体在这几个接口里进出
+  const uploadAttachment = async (input: AttachmentInput): Promise<Attachment> => {
+    const a = await api.uploadAttachment(task.id, input);
+    setAttachments(cur => (cur.some(x => x.id === a.id) ? cur : [...cur, a]));
+    return a;
+  };
+  const openAttachment = (id: number) => {
+    const a = attachments.find(x => x.id === id);
+    if (a?.kind === "image" && a.url) { setPreview(a.url); return; }
+    void guard(async () => {
+      const r = await api.downloadAttachment(task.id, id);
+      saveBase64(r.name, r.mime, r.data);
+    });
+  };
+  const removeAttachment = (a: Attachment) => {
+    if (!window.confirm(`删除附件「${a.name}」？备注里引用它的地方会一起摘掉。`)) return;
+    void guard(async () => {
+      const r = await api.deleteAttachment(task.id, a.id);
+      setAttachments(r.attachments);
+      onSaved(r.task);
+    });
+  };
+  // 备注编辑器保存：失败要把错误抛回去，编辑器才知道该留在编辑态
+  const saveNotes = async (notes: string) => {
+    setBusy(true);
+    try { onSaved(await api.updateTask(task.id, { notes })); flash(); }
+    finally { setBusy(false); }
+  };
+  const attachToNotes = (a: Attachment) => void guard(async () => {
+    const base = task.notes.trimEnd();
+    onSaved(await api.updateTask(task.id, { notes: base ? `${base}\n\n${refOf(a)}` : refOf(a) }));
+  });
+  // 附件区直接上传：不经过备注编辑器，传完再决定要不要往备注里插引用
+  const pickAttachments = (files: File[]) => void guard(async () => {
+    for (const f of files) {
+      try { await uploadAttachment(await readForUpload(f)); }
+      catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    }
+  });
   // 验收判定：通过 / 打回（打回原因沉淀为账号级标准，下次交付前自查）
   const decide = (it: ReviewItem, status: ReviewItem["status"]) => void guard(async () => {
     await api.decideReviewItem(task.id, it.id, status, status === "fail" ? note : it.note);
@@ -111,12 +165,33 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const currentRole = task.roleId === null ? null : roles.find(r => r.id === task.roleId) ?? null;
   const currentProject = task.projectId === null ? null : projects.find(p => p.id === task.projectId) ?? null;
   const done = task.status === "done";
-  const machine = task.machine || (agents.length === 1 ? agents[0] : "");
-  const listenOnly = isListenOnly(task.agent);
+  // 执行工具跟着角色走：角色绑了工具就以它为准（服务端派活也是这个顺序），
+  // 任务上的 agent 只在没挂角色 / 角色没指定工具时兜底——否则会出现「角色写 Claude、任务写 Codex」的冲突
+  const tool = currentRole?.agent ?? task.agent;
+  const listenOnly = isListenOnly(tool);
+  // 候选电脑：上报过能跑这个工具的，或者压根没上报过（老电脑端，当「不知道」放行）；
+  // 明确报过没装的直接不列——列出来也派不过去，服务端会拒
+  const candidates = machines.length
+    ? machines.map(m => ({ name: m.name, online: m.online, agents: m.agents }))
+    : [...new Set([...agents, ...(task.machine ? [task.machine] : [])])]
+      .map(name => ({ name, online: agents.includes(name), agents: [] as string[] }));
+  const usable = candidates.filter(c => !tool || c.agents.length === 0 || c.agents.includes(tool));
+  // 任务上已经存着的那台始终留在下拉里（哪怕它没装现在的工具），不然界面会静默清空
+  const options = task.machine && !usable.some(c => c.name === task.machine)
+    ? [...usable, ...candidates.filter(c => c.name === task.machine)]
+    : usable;
+  const usableOnline = usable.filter(c => c.online);
+  const machine = task.machine || (usableOnline.length === 1 ? usableOnline[0].name : "");
   // 电脑离线不再拦住派活：改成入队，等那台电脑上线自动开始
   const offline = !!machine && !agents.includes(machine);
-  const reason = !task.agent ? "请选择执行工具" : listenOnly ? `${agentName(task.agent ?? "")} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上` : !task.cwd ? "请填写项目目录" : !machine ? "请选择电脑" : "";
-  const machines = [...new Set([...agents, ...(task.machine ? [task.machine] : [])])];
+  // 选中的这台装没装现在的工具：上报过、且清单里没有它 = 明确没装
+  const machineCaps = candidates.find(c => c.name === machine)?.agents ?? [];
+  const machineLacks = !!tool && machineCaps.length > 0 && !machineCaps.includes(tool);
+  const reason = !tool ? "请选择执行工具"
+    : listenOnly ? `${agentName(tool)} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上`
+      : !task.cwd ? "请填写项目目录"
+        : !machine ? (usable.length ? "请选择电脑" : `没有能跑 ${agentName(tool)} 的电脑：先在装了这个工具的电脑上打开 AgentHub`)
+          : machineLacks ? `${machine} 没装 ${agentName(tool)}：换一台电脑，或给这个角色换个工具` : "";
   const items = task.checklist ?? [];
   const goalTitle = goals.find(g => g.id === task.goalId)?.title;
 
@@ -151,7 +226,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {task.doneAt && <div className="prop"><span className="prop-label">完成时间</span><span className="prop-value">{fmt(task.doneAt)}</span></div>}
       </div>
 
-      <InlineField className="notes-field" multiline value={task.notes} ariaLabel="任务备注" placeholder="添加备注…（⌘/Ctrl + 回车保存）" maxLength={4000} required={false} disabled={busy} onSave={notes => patch({ notes })} />
+      <TaskNotes notes={task.notes} attachments={attachments} disabled={busy} onSave={saveNotes} upload={uploadAttachment} onOpen={openAttachment} onImage={setPreview} />
 
       <Checklist items={items} disabled={busy} onChange={checklist => patch({ checklist })} />
     </section>
@@ -282,6 +357,40 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
       )}
     </section>
 
+    <section className="detail-section">
+      <h3>
+        附件
+        {attachments.length ? <span className="dim"> · {attachments.length}</span> : null}
+        <button className="link" disabled={busy} onClick={() => attachPicker.current?.click()}>上传</button>
+        <input ref={attachPicker} type="file" multiple hidden onChange={e => {
+          const files = Array.from(e.target.files ?? []);
+          e.target.value = "";
+          if (files.length) pickAttachments(files);
+        }} />
+      </h3>
+      {attachments.length === 0
+        ? <p className="dim">还没有附件。在备注里粘贴截图或拖文件进来，也可以点上面的「上传」。</p>
+        : <ul className="attachment-list">
+          {attachments.map(a => (
+            <li key={a.id} className={`attachment-item ${a.kind}`}>
+              {a.kind === "image" && a.url
+                ? <img className="attachment-thumb" src={a.url} alt={a.name} onClick={() => setPreview(a.url!)} />
+                : <span className="attachment-kind">{fileKind(a.name, a.mime)}</span>}
+              <span className="attachment-meta">
+                <strong>{a.name}</strong>
+                <span className="dim">{a.kind === "image" ? "图片" : "文件"} · {formatSize(a.size)}</span>
+              </span>
+              <span className="attachment-actions">
+                <button className="link" disabled={busy} onClick={() => attachToNotes(a)}>插入备注</button>
+                <button className="link" disabled={busy} onClick={() => openAttachment(a.id)}>下载</button>
+                <button className="link danger" disabled={busy} onClick={() => removeAttachment(a)}>删除</button>
+              </span>
+            </li>
+          ))}
+        </ul>}
+      <p className="hint">图片和文件是独立实体，备注里只存 attachment:ID 引用；删掉附件时备注里对应的引用会一起摘掉，不会留下坏图。</p>
+    </section>
+
     {timeline !== null && timeline.length > 0 && (
       <section className="detail-section">
         <h3>
@@ -316,7 +425,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {roles.length > 0 && <label className="role-pick">角色
           <select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">不指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select>
         </label>}
-        <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(task.notes || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
+        <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(notesForAgent(task.notes, attachments) || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
         {reason ? <span className="dim">{reason}</span> : offline ? <span className="dim">{machine} 离线，开始后会在它上线时自动派发</span> : null}
       </div>
       {task.queuedAt && <p className="hint queue-hint" role="status">
@@ -330,15 +439,26 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
         {task.sessionIds.length > 0 && <p className="hint">接着上次派发的会话继续：没换工具 / 电脑 / 目录的话，不会再新开一个对话。</p>}
       </form>}
-      <details className="exec-settings" open={!task.agent || !task.cwd}>
+      <details className="exec-settings" open={!tool || !task.cwd}>
         <summary>执行设置（角色 / 项目 / 工具 / 电脑 / 目录）</summary>
         <div className="form-grid">
-          <label>角色<select value={task.roleId ?? ""} disabled={busy} onChange={e => patch({ roleId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select></label>
+          <label>角色<select value={task.roleId ?? ""} disabled={busy} onChange={e => {
+            const id = e.target.value ? Number(e.target.value) : null;
+            const r = roles.find(x => x.id === id);
+            // 角色绑着执行工具：选它的同时把任务上的工具对齐，免得两个字段互相打架
+            patch({ roleId: id, ...(r?.agent ? { agent: r.agent } : {}) });
+          }}><option value="">未指定</option>{roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.model ? ` · ${r.model}` : ""}</option>)}</select></label>
           <label>项目<select value={task.projectId ?? ""} disabled={busy} onChange={e => patch({ projectId: e.target.value ? Number(e.target.value) : null })}><option value="">未指定</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-          <label>执行工具<select value={task.agent ?? ""} disabled={busy} onChange={e => patch({ agent: (e.target.value || null) as Task["agent"] })}><option value="">无（普通待办）</option>{task.agent && !isDispatchable(task.agent) && <option value={task.agent}>{AGENT_LABEL[task.agent] ?? task.agent}（只做监听，不能派活）</option>}{AGENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></label>
-          <label>电脑<select value={task.machine ?? ""} disabled={busy} onChange={e => patch({ machine: e.target.value || null })}><option value="">开始时自动选择</option>{machines.map(m => <option key={m} value={m}>{m}{agents.includes(m) ? "" : "（离线）"}</option>)}</select></label>
+          <label>执行工具
+            {currentRole?.agent
+              ? <input value={`${AGENT_LABEL[currentRole.agent] ?? currentRole.agent}（由角色决定）`} readOnly disabled aria-label="执行工具" />
+              : <select value={task.agent ?? ""} disabled={busy} onChange={e => patch({ agent: (e.target.value || null) as Task["agent"] })}><option value="">无（普通待办）</option>{task.agent && !isDispatchable(task.agent) && <option value={task.agent}>{AGENT_LABEL[task.agent] ?? task.agent}（只做监听，不能派活）</option>}{AGENT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select>}
+          </label>
+          <label>电脑<select value={task.machine ?? ""} disabled={busy} onChange={e => patch({ machine: e.target.value || null })}><option value="">开始时自动选择</option>{options.map(c => <option key={c.name} value={c.name}>{c.name}{c.online ? "" : "（离线）"}{tool && c.agents.length > 0 && !c.agents.includes(tool) ? `（没装 ${agentName(tool)}）` : tool && c.agents.length === 0 ? "（未上报工具）" : ""}</option>)}</select></label>
         </div>
         <label className="cwd-field">项目目录<InlineField value={task.cwd ?? ""} ariaLabel="项目目录" placeholder={"例如 D:\\Work2\\项目"} maxLength={4000} required={false} disabled={busy} onSave={cwd => patch({ cwd: cwd || null })} /></label>
+        {currentRole?.agent && <p className="hint">执行工具由角色「{currentRole.name}」决定，要换工具去角色页改它；角色不绑电脑，在哪台干活由这个任务挑——下面只列装了这个工具的电脑。</p>}
+        {machineLacks && <p className="form-error" role="alert">{machine} 没装 {agentName(tool ?? "")}：换一台装了它的电脑，或者给这个角色换工具。</p>}
         {currentProject && <p className="hint">项目「{currentProject.name}」{currentProject.brief ? `：${currentProject.brief.slice(0, 80)}${currentProject.brief.length > 80 ? "…" : ""}` : "（还没写项目说明）"}；派活时项目说明和该角色在这个项目上的记忆会一起下发。</p>}
         {currentRole && <p className="hint">角色「{currentRole.name}」：{currentRole.agent ? AGENT_LABEL[currentRole.agent] ?? currentRole.agent : "执行工具未定"}{currentRole.model ? ` · 模型 ${currentRole.model}` : " · 用执行端默认模型"}{currentRole.context ? ` · 上下文 ${currentRole.context.length} 字` : " · 没有上下文"}；派活时随第一条消息一起下发。</p>}
         {currentProject && currentProject.dirs.length > 0 && <p className="hint">项目登记了 {currentProject.dirs.length} 条目录（{currentProject.dirs.map(d => d.machine ?? "任意电脑").join("、")}）；开始执行时按当前那台电脑自动挑对应目录，目录留空就会被自动补上。</p>}
@@ -358,6 +478,12 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
       <button className="danger" disabled={busy} onClick={() => { if (confirm("删除这个任务？关联会话会保留。")) void guard(async () => { await api.deleteTask(task.id); onDeleted(); }); }}>删除任务</button>
       <span className="dim">{goalTitle ? `属于「${goalTitle}」` : "未归属目标"}</span>
     </section>
+    {/* 附件图片预览：和会话里的图片同一个浮层 */}
+    {preview && (
+      <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片预览" onClick={() => setPreview(null)}>
+        <img src={preview} alt="图片预览" />
+      </div>
+    )}
   </main></div>;
 }
 

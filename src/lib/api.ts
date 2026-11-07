@@ -44,8 +44,9 @@ export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updat
 
 /** 一条目录 = 这个项目在某台电脑上住在哪；machine 为空表示哪台电脑都适用 */
 export type ProjectDir = { machine: string | null; cwd: string };
-/** 项目配置里的候选电脑：online = 此刻连着；at = 最近一次在这台上干活的时间 */
-export type Machine = { name: string; online: boolean; at: string | null };
+/** 项目配置里的候选电脑：online = 此刻连着；at = 最近一次在这台上干活的时间；
+ *  agents = 这台电脑上报过能跑的工具（claude / codex / zcode）；空 = 没上报过（老电脑端），按「不知道」处理 */
+export type Machine = { name: string; online: boolean; at: string | null; agents: string[] };
 /** 项目：一个代码库的身份与背景知识 + 它在各台电脑上的目录，派活时按当前机器自动挑 */
 export type Project = { id: number; name: string; brief: string; dirs: ProjectDir[]; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
@@ -107,6 +108,10 @@ export type FailureDigest = { kind: "failure"; builtAt: string; runId: string; s
 export type TaskDigests = { review: ReviewDigest | null; failure: FailureDigest | null };
 /** 任务产物：跑完自动生成的 Markdown 文档；edited = 人改过，之后不再被自动重建覆盖 */
 export type TaskArtifact = { taskId: number; md: string; source: "digest" | "agent" | "user"; edited: boolean; createdAt: string; updatedAt: string };
+/** 任务附件：图片带可直接渲染的 data URL；文件只带元信息，下载时再取内容 */
+export type Attachment = { id: number; taskId: number; kind: "image" | "file"; name: string; mime: string; size: number; createdAt: string; url: string | null };
+/** 上传入参：图片是 data URL，文件是裸 base64（8MB 上限）。名称与类型由前端带上，大小由服务端核 */
+export type AttachmentInput = { kind: "image" | "file"; name: string; mime: string; data: string };
 /** 项目近况：任务完成时追加的一句结论，派活时注入提示 */
 export type BriefEntry = { id: number; text: string; taskId: number | null; at: string };
 /** 验收检查项：来自任务清单（或人工添加），可判通过/打回，打回原因沉淀为标准 */
@@ -383,6 +388,14 @@ export class Api {
   rebuildArtifact = (id: number, force = false) =>
     this.call<{ artifact: TaskArtifact; path: string }>("POST", `/tasks/${id}/artifact/rebuild`, { force });
   deleteArtifact = (id: number) => this.call<{ ok: true }>("DELETE", `/tasks/${id}/artifact`);
+  // 附件：列表 / 上传 / 下载（返回 base64）/ 删除（顺手摘掉备注里的引用）
+  attachments = async (id: number) => (await this.call<{ attachments: Attachment[] }>("GET", `/tasks/${id}/attachments`)).attachments;
+  uploadAttachment = async (id: number, input: AttachmentInput) =>
+    (await this.call<{ attachment: Attachment }>("POST", `/tasks/${id}/attachments`, input)).attachment;
+  downloadAttachment = (id: number, attachmentId: number) =>
+    this.call<{ name: string; mime: string; size: number; data: string }>("GET", `/tasks/${id}/attachments/${attachmentId}`);
+  deleteAttachment = (id: number, attachmentId: number) =>
+    this.call<{ task: Task; attachments: Attachment[] }>("DELETE", `/tasks/${id}/attachments/${attachmentId}`);
   projectBrief = async (id: number) => (await this.call<{ entries: BriefEntry[] }>("GET", `/projects/${id}/brief`)).entries;
   addBrief = async (id: number, text: string) =>
     (await this.call<{ entries: BriefEntry[] }>("POST", `/projects/${id}/brief`, { text })).entries;

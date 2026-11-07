@@ -2,6 +2,7 @@ import type pg from 'pg'
 import { randomUUID } from 'node:crypto'
 import { listMessages, type Session } from './db.ts'
 import { TaskError, type Task } from './tasks.ts'
+import { readableNotes } from './attachments.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
 import { NO_CONSTRAINTS, normalizeConstraints, hasConstraints, boundaryLine, type TaskConstraints } from './referee.ts'
 import type { ProjectDir } from './projects.ts'
@@ -440,7 +441,7 @@ export function heuristicDraft(input: {
       title: `继续：${todo[0]}`.slice(0, MAX_TITLE),
       notes: [
         `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
-        task.notes ? `原任务：${task.notes.slice(0, 800)}` : '',
+        task.notes ? `原任务：${readableNotes(task.notes).slice(0, 800)}` : '',
         lastReply ? `本次进展：\n${lastReply.slice(-800)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
@@ -654,7 +655,7 @@ export function refineMessage(input: {
   parts.push(`【会话】${input.sessionTitle || '未命名会话'}（${input.agent}${input.project ? ` · ${input.project}` : ''}）`)
   if (input.task) {
     const todo = input.task.todo.length ? `\n未完成清单：${input.task.todo.join('；')}` : ''
-    parts.push(`【当时挂着的任务】${input.task.title}${input.task.notes ? `\n说明：${input.task.notes.slice(0, 600)}` : ''}${todo}`)
+    parts.push(`【当时挂着的任务】${input.task.title}${input.task.notes ? `\n说明：${readableNotes(input.task.notes).slice(0, 600)}` : ''}${todo}`)
   }
   if (input.tail.length) {
     parts.push(`【会话最后几条】\n${input.tail.map(m => `${m.role === 'user' ? '用户' : '助手'}：${m.text.slice(0, 700)}`).join('\n\n')}`)

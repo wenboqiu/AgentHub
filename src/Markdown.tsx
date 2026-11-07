@@ -1,22 +1,64 @@
 import { memo } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { Attachment } from "./lib/api";
+import { attachmentId, formatSize } from "./lib/attachments";
 
 /**
  * 应用里所有展示 agent / 机器生成文本的地方统一走这里（对话流、任务产物、
- * 验收摘要、项目近况、会话摘要、助手气泡等），按 GFM 渲染。
+ * 验收摘要、项目近况、会话摘要、助手气泡、任务备注等），按 GFM 渲染。
  * 默认不渲染原始 HTML（react-markdown 的安全默认），链接统一新窗口打开，
  * 避免 Tauri webview 里被原地导航。memo 化：流式增长时只有文本变了才重渲染。
  *
  * compact：卡片 / 列表里的紧凑排版（边距减半），如会话摘要、项目近况。
+ * attachments：任务备注里的 `attachment:12` 引用 → 附件实体。不传就按普通链接渲染；
+ * 传了但找不到（附件被删）降级成「附件已删除」，不装成坏图。react-markdown 默认会
+ * 过滤掉不认识的协议，所以这里用 urlTransform 给 attachment: 单独放行。
  */
-const Markdown = memo(function Markdown({ text, compact = false }: { text: string; compact?: boolean }) {
+type Props = {
+  text: string;
+  compact?: boolean;
+  attachments?: Attachment[];
+  /** 点文件附件（下载 / 打开）；图片点击走 onImage 预览 */
+  onAttachment?: (id: number) => void;
+  onImage?: (url: string) => void;
+};
+
+const Markdown = memo(function Markdown({ text, compact = false, attachments, onAttachment, onImage }: Props) {
+  const byId = new Map((attachments ?? []).map(a => [a.id, a]));
+  const urlTransform = attachments?.length
+    ? (url: string) => (url.startsWith("attachment:") ? url : defaultUrlTransform(url))
+    : defaultUrlTransform;
   return (
     <div className={`md${compact ? " md-compact" : ""}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={urlTransform}
         components={{
-          a: (props) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+          a: ({ href, children }) => {
+            const id = attachmentId(href);
+            if (id === null) {
+              // href 为空 = 协议被默认过滤（附件还没加载出来）：渲染成纯文本，别给个能点跳的空链接
+              return href
+                ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                : <span>{children}</span>;
+            }
+            const a = byId.get(id);
+            if (!a) return <span className="attachment-chip missing" title="附件已删除">{children}</span>;
+            return (
+              <button type="button" className="attachment-chip" title={`${a.name} · ${formatSize(a.size)}`}
+                onClick={e => { e.stopPropagation(); onAttachment?.(a.id); }}>
+                {children}<span className="dim"> · {formatSize(a.size)}</span>
+              </button>
+            );
+          },
+          img: ({ src, alt }) => {
+            const id = attachmentId(typeof src === "string" ? src : "");
+            if (id === null) return src ? <img src={src} alt={alt ?? ""} loading="lazy" /> : null;
+            const a = byId.get(id);
+            if (!a?.url) return <span className="attachment-chip missing">附件已删除{alt ? `（${alt}）` : ""}</span>;
+            return <img className="md-image" src={a.url} alt={alt || a.name} onClick={e => { e.stopPropagation(); onImage?.(a.url!); }} />;
+          },
         }}
       >
         {text}

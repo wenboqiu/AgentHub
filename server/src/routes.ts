@@ -105,6 +105,7 @@ import {
 import { composeTicket, getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
+import { ATTACHMENT_BODY_LIMIT, addAttachment, assertRefs, attachmentData, deleteAttachment, listAttachments, readableNotes, stripRef } from './attachments.ts'
 
 type Sock = {
   send(data: string): void
@@ -640,7 +641,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       })
       : ''
     if (filled) pushTask(userId, await saveTask(pool, userId, { notes: filled }, task.id))
-    const text = taskText(b.text ?? (filled || task.notes || task.title), '第一条消息', 8000)
+    // 备注里的 attachment:ID 引用对执行者没有意义，换成引用里的文字再发
+    const text = taskText(b.text ?? (filled || readableNotes(task.notes) || task.title), '第一条消息', 8000)
     const instructions = [
       composeInstructions({
         role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
@@ -1116,6 +1118,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.patch('/tasks/:id', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
     const b = object(req.body ?? {})
+    // 备注里的附件引用必须指向这个任务自己的附件：指错了渲染出来是坏图，事后也查不出原因
+    if (typeof b.notes === 'string') await assertRefs(pool,req.userId,id,b.notes)
     let task = await saveTask(pool,req.userId,req.body,id)
     // 只有这次请求显式换了角色才套用，避免每次编辑都重算
     task = await roleDefaults(req.userId, task, b)
@@ -1196,6 +1200,32 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await getTask(pool,req.userId,id)
     await deleteArtifact(pool,req.userId,id)
     return { ok: true }
+  }))
+  // ---------- 任务附件：图片 / 文件独立存放，备注里只写 attachment:ID 引用 ----------
+  // 列表里图片带 data URL（详情页要直接内联渲染），文件只给元信息，点下载时再取内容
+  app.get('/tasks/:id/attachments', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    return { attachments: await listAttachments(pool,req.userId,id) }
+  }))
+  // 收 base64：图片是 data URL，文件是裸 base64；body 上限按最大文件放宽
+  app.post('/tasks/:id/attachments', { bodyLimit: ATTACHMENT_BODY_LIMIT }, async req => serial(async () => ({
+    attachment: await addAttachment(pool,req.userId,entityId((req.params as {id:string}).id),req.body),
+  })))
+  app.get('/tasks/:id/attachments/:attachmentId', async req => serial(async () => {
+    const p = req.params as {id:string;attachmentId:string}
+    return attachmentData(pool,req.userId,entityId(p.id),entityId(p.attachmentId))
+  }))
+  // 删除附件：顺手把备注里指向它的引用摘掉，免得留下坏图
+  app.delete('/tasks/:id/attachments/:attachmentId', async req => serial(async () => {
+    const p = req.params as {id:string;attachmentId:string}
+    const id = entityId(p.id), attachmentId = entityId(p.attachmentId)
+    const task = await getTask(pool,req.userId,id)
+    await deleteAttachment(pool,req.userId,id,attachmentId)
+    const next = stripRef(task.notes,attachmentId)
+    const saved = next === task.notes ? task : await saveTask(pool,req.userId,{notes:next},id)
+    if (saved !== task) pushTask(req.userId,saved)
+    return { task: saved, attachments: await listAttachments(pool,req.userId,id) }
   }))
   // Thread 视图：任务 = 统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要）
   app.get('/threads/task/:id', async req => serial(async () => {

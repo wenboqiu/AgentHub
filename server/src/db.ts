@@ -11,6 +11,7 @@ import { migrateMemories } from './memories.ts'
 import { migrateAssistant } from './assistant.ts'
 import { migrateProposals } from './proposals.ts'
 import { migrateArtifacts } from './artifacts.ts'
+import { migrateAttachments } from './attachments.ts'
 import { migrateReferee } from './referee.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
 
@@ -217,6 +218,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateDispatchManager(client)
     // 任务产物引用 tasks；项目近况的表在 migrateProjects 里一起建（同属项目上下文）
     await migrateArtifacts(client)
+    // 任务附件引用 tasks（备注里只存 attachment:ID 引用，本体在这张表）
+    await migrateAttachments(client)
     // 审批来源（人 / 项目经理代批）加在 approvals 上，表在建库时就存在了
     await migrateReferee(client)
     // profiles 实体已废弃（执行目录收进项目）：各处引用清完后删表兜底（CASCADE 清残留约束）
