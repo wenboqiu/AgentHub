@@ -142,7 +142,7 @@ function bearer(req: FastifyRequest) {
 
 // 一个 WS 连接：属于哪个账号、哪个设备会话（踢设备时按它们关闭）
 type Conn = { sock: Sock; userId: number; authSessionId: number }
-type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean }
+type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean; agents: string[] }
 const INVALID_LOGIN = 4401
 
 // Codex Desktop 结束一轮时不一定会写终态（直接关窗口、进程被杀都只留下 task_started），
@@ -197,6 +197,14 @@ const PENDING = ':pending-'
 const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
+
+/** 能远程派活的工具；执行器上报的 agents 只认这几个（豆包 / WorkBuddy 只做监听，不进派活候选） */
+const DISPATCH_AGENTS = ['claude', 'codex', 'zcode']
+/** 解析执行器上报的 agents 参数（逗号分隔）：只留认识的、去重，空 = 不知道 */
+function parseAgents(raw: string | null): string[] {
+  const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => DISPATCH_AGENTS.includes(s))
+  return [...new Set(list)]
+}
 
 /** Codex 提问的 questions JSON：解析出问题文本；解析失败退回原文片段 */
 function userInputQuestions(detail: string): { id: string; question: string; options: { label: string; description?: string }[] }[] | null {
@@ -283,6 +291,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const clients = new Set<Conn>()
   // (userId, machine) -> 在线执行器连接
   const executors = new Map<string, Exec>()
+  // (userId, machine) -> 这台电脑上报过能跑哪些工具（claude / codex / zcode）。
+  // 执行器断线也留着：给离线电脑派活是常事，靠它判断「这台装没装这个工具」。
+  // 只放内存——重启后等电脑再连一次就补上；空数组 = 从没上报过（老客户端），按「不知道」处理。
+  const capsByMachine = new Map<string, string[]>()
+  /** 某个账号下每台电脑的工具清单；只返回上报过的，没上报的不出现在表里 */
+  const capsOfUser = (userId: number) => {
+    const out = new Map<string, string[]>()
+    for (const [key, agents] of capsByMachine) {
+      const [uid, ...rest] = key.split(':')
+      if (Number(uid) !== userId) continue
+      out.set(rest.join(':'), agents)
+    }
+    return out
+  }
   // 等待执行器返回的历史请求
   const historyWaits = new Map<string, { userId: number; machine: string; resolve: (r: HistoryResult) => void }>()
   // 每个 run 最近一次「正在做什么」：执行器实时上报，只放内存（不需要持久化），
@@ -536,6 +558,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const agent = b.agent ?? role?.agent ?? task.agent
     if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
     if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
+    // 这台电脑上报过装了哪些工具：明确没装就别往里派，排到天亮也跑不起来。
+    // 没上报过（老客户端）不拦，交给执行器自己报错。
+    const caps = machine ? capsByMachine.get(execKey(userId, machine)) : undefined
+    if (caps?.length && !caps.includes(agent)) {
+      throw new TaskError(`${machine} 上没装 ${agent}：换一台电脑，或给这个角色换一个它装了的工具（这台装了 ${caps.join('、')}）`, 409)
+    }
     const cwd = taskText(b.cwd ?? task.cwd ?? dir?.cwd ?? '', '项目目录', 4000)
     // 开跑方式：任务上记着「第一次接着哪个会话」（确认任务单时定的），请求里显式给了就用请求的。
     // 能不能续按最终的工具 / 电脑 / 目录现算——角色可能被改过，续不上就退回新会话，不硬来。
@@ -985,11 +1013,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { ok: true }
   }))
   // 可选电脑：项目配置里的下拉项——在线执行器 + 这个账号用过的机器，离线也列出来
-  app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId)) })))
+  app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId), capsOfUser(req.userId)) })))
   // 电脑改名：本机名一变，旧名下的会话 / 运行 / 项目目录一起挪过去，别留一台「不存在的电脑」
   app.post('/machines/rename', async req => serial(async () => {
     const b = object(req.body ?? {})
-    return renameMachine(pool, req.userId, b.from, b.to)
+    const res = await renameMachine(pool, req.userId, b.from, b.to)
+    // 能力清单跟着改名一起挪：不然改完名到这台电脑重连之前，它看起来像「没上报过工具」
+    const from = typeof b.from === 'string' ? b.from.trim() : ''
+    const to = typeof b.to === 'string' ? b.to.trim() : ''
+    const caps = from && to && from !== to ? capsByMachine.get(execKey(req.userId, from)) : undefined
+    if (caps) {
+      capsByMachine.set(execKey(req.userId, to), caps)
+      capsByMachine.delete(execKey(req.userId, from))
+    }
+    return res
   }))
   // 项目：一个代码库的身份与背景知识，目录列表（每台电脑一条）也挂在它身上
   app.get('/projects', async req => serial(async () => ({ projects: await listProjects(pool, req.userId) })))
@@ -1735,7 +1772,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       const key = execKey(userId, machine)
       // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）
       const caps = new Set((q.get('capabilities') ?? '').split(',').map(s => s.trim()).filter(Boolean))
-      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1') }
+      // agents 是这台电脑装有哪几个工具：老客户端不带这个参数 = 不知道，保留上次上报的结果
+      const agents = parseAgents(q.get('agents'))
+      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1'), agents }
       let registered = false
       const queue: unknown[] = []
       const handle = (data: unknown) => {
@@ -1767,6 +1806,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       await serial(() => dropExecutor(userId, machine))
       if (socket.readyState !== 1) return
       executors.set(key, me)
+      // 只在真的探到工具时才覆盖：老客户端不带 agents，别把它上次上报的结果抹成空
+      if (agents.length) capsByMachine.set(key, agents)
       registered = true
       pushAgents(userId)
       void serial(() => drainQueue(userId, machine)).catch(e => app.log.error(e, '投递排队派发失败'))

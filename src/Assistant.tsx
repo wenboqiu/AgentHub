@@ -5,6 +5,7 @@ import type {
   AssistantDraft,
   AssistantDraftFields,
   AssistantState,
+  Machine,
   Task,
 } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
@@ -144,6 +145,7 @@ export default function Assistant({
   onClose(): void;
 }) {
   const [state, setState] = useState<AssistantState | null>(null);
+  const [machines, setMachines] = useState<Machine[]>([]);
   const [text, setText] = useState("");
   const [agent, setAgent] = useState<AssistantAgent>("claude");
   const [machine, setMachine] = useState("");
@@ -170,6 +172,26 @@ export default function Assistant({
   }, [api]);
 
   useEffect(() => { void load(); }, [load]);
+
+  // 每台电脑装了哪些工具：执行器连上来时报给服务端。选了执行工具就只留装了这个工具的电脑，
+  // 免得挑一台根本跑不起来的——角色定了工具，能落在哪台电脑上由工具决定。
+  const loadMachines = useCallback(() => {
+    api.machines().then(setMachines, () => setMachines([]));
+  }, [api]);
+  useEffect(() => { loadMachines(); }, [loadMachines]);
+  /** 这台电脑能不能跑这个工具；没上报过（老电脑端）当「不知道」，照留 */
+  const canRun = (m: { agents: string[] }, a: string) => m.agents.length === 0 || m.agents.includes(a);
+  const candidates: { name: string; online: boolean; agents: string[] }[] = machines.length
+    ? machines.filter(m => m.online && canRun(m, agent)).map(m => ({ name: m.name, online: m.online, agents: m.agents }))
+    : (state?.online ?? []).map(name => ({ name, online: true, agents: [] }));
+  // 建议的电脑没装这个工具就别硬填：只有一台能跑就直接换成它，多台就等用户自己挑
+  useEffect(() => {
+    if (!machines.length || !machine) return;
+    const m = machines.find(x => x.name === machine);
+    if (m && canRun(m, agent)) return;
+    const ok = machines.filter(x => x.online && canRun(x, agent));
+    setMachine(ok.length === 1 ? ok[0].name : "");
+  }, [machines, machine, agent]);
 
   // 等 agent 回话时轮询：这条通道是电脑端跑 CLI，没有流式，只能按 run 状态收尾
   const pending = !!state?.pending;
@@ -243,11 +265,14 @@ export default function Assistant({
             </label>
             <label>电脑
               <select value={machine} disabled={busy} onChange={e => setMachine(e.target.value)}>
-                <option value="">{state?.online.length ? "选一台" : "没有在线的电脑"}</option>
-                {(state?.online ?? []).map(m => <option key={m} value={m}>{m}</option>)}
+                <option value="">{candidates.length ? "选一台" : `没有装了 ${AGENT_LABEL[agent] ?? agent} 的在线电脑`}</option>
+                {candidates.map(m => <option key={m.name} value={m.name}>{m.name}</option>)}
               </select>
             </label>
           </div>
+          {machines.length > 0 && candidates.length === 0 && (
+            <p className="hint">没有在线电脑上报装了 {AGENT_LABEL[agent] ?? agent}：在装了这个工具的那台电脑上打开 AgentHub，再回来看这里。</p>
+          )}
           <div className="assistant-examples">
             {EXAMPLES.map(e => <button key={e} className="chip" disabled={busy} onClick={() => void send(e)}>{e}</button>)}
           </div>

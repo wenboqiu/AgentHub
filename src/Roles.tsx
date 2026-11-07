@@ -75,7 +75,7 @@ function Fields({ form, projects, busy, onChange }: {
       <label>上下文（角色准则，最多 4000 字）
         <textarea value={form.context} rows={4} maxLength={4000} disabled={busy} placeholder={"例如：只改前端，动手前先读现有写法；改完跑 tsc；不确定的地方先问，不要猜。"} onChange={e => onChange({ context: e.target.value })} />
       </label>
-      <p className="hint">Claude 走系统提示（--append-system-prompt），Codex 没有等价钩子，执行器会把上下文放在首条消息前面；模型从下拉里挑，留空就用执行端默认（推荐，换版本不用回来改）。可用工具只是声明，方便你和别人看清职责边界，不会真的改变执行端权限。</p>
+      <p className="hint">Claude 走系统提示（--append-system-prompt），Codex 没有等价钩子，执行器会把上下文放在首条消息前面；模型从下拉里挑，留空就用执行端默认（推荐，换版本不用回来改）。执行工具决定派活时能挑哪些电脑——只有上报装了它的电脑会出现在任务里；可用工具只是声明，方便你和别人看清职责边界，不会真的改变执行端权限。</p>
     </>
   );
 }
@@ -171,7 +171,7 @@ export default function Roles({ api }: { api: Api }) {
         </button>
       </div>
       <p className="hint">
-        把「谁来干、什么职责、用什么模型、按什么准则、记得什么」存成一个名字——像一名员工。建任务或派活时选角色，执行工具就定了，模型、准则、项目背景和这个项目的经验一起下发给电脑端；在哪个目录干活由选中的项目按当前电脑自动挑。
+        把「谁来干、什么职责、用什么模型、按什么准则、记得什么」存成一个名字——像一名员工。角色绑执行工具和模型，但不绑电脑：派活时只在「装了该工具的电脑」里挑，具体在哪台、哪个目录由任务定。建任务或派活时选角色，工具、模型、准则和这个项目的经验一起下发。
       </p>
       {assist && <Assistant api={api} onCreated={load} onClose={() => setAssist(false)} />}
       {list === null ? (

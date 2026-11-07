@@ -55,7 +55,32 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
-fn build_url(s: &Snapshot) -> Result<String, String> {
+/// 本机装了哪几个工具：扫一遍 PATH，找得到 claude / codex / zcode 的可执行文件就算支持。
+/// 服务端拿它给角色挑电脑——没装这个工具的机器不该出现在候选里。
+/// 一个都没探到就不上报（服务端当作「不知道」，别把老电脑全判成不支持）。
+pub fn installed_agents() -> Vec<&'static str> {
+    const NAMES: [&str; 3] = ["claude", "codex", "zcode"];
+    let Some(path) = std::env::var_os("PATH") else { return Vec::new() };
+    let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    NAMES.iter().copied().filter(|n| dirs.iter().any(|d| has_exe(d, n))).collect()
+}
+
+#[cfg(windows)]
+fn has_exe(dir: &std::path::Path, name: &str) -> bool {
+    // npm 全局装出来的是 .cmd/.bat，原生装的是 .exe；git bash 那种无扩展名的 shim 也认
+    ["exe", "cmd", "bat"].iter().any(|ext| dir.join(format!("{name}.{ext}")).is_file())
+        || dir.join(name).is_file()
+}
+
+#[cfg(not(windows))]
+fn has_exe(dir: &std::path::Path, name: &str) -> bool {
+    dir.join(name).is_file()
+}
+
+fn build_url(s: &Snapshot, agents: &[&str]) -> Result<String, String> {
     let base = s.server_url.trim_end_matches('/');
     let ws = if let Some(r) = base.strip_prefix("https://") {
         format!("wss://{r}")
@@ -64,7 +89,11 @@ fn build_url(s: &Snapshot) -> Result<String, String> {
     } else {
         return Err("服务端地址必须以 http:// 或 https:// 开头".into());
     };
-    Ok(format!("{ws}/ws?token={}&role=agent&machine={}&capabilities=reply-branch-v1,role-v1", urlencode(&s.token), urlencode(&s.machine)))
+    let mut url = format!("{ws}/ws?token={}&role=agent&machine={}&capabilities=reply-branch-v1,role-v1", urlencode(&s.token), urlencode(&s.machine));
+    if !agents.is_empty() {
+        url.push_str(&format!("&agents={}", agents.join(",")));
+    }
+    Ok(url)
 }
 
 fn set_read_timeout(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, d: Duration) {
@@ -101,7 +130,9 @@ impl From<String> for Fail {
 
 /// 一次连接的完整生命周期；返回值是结束原因（Ok = 配置变化主动断开）
 fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result<(), Fail> {
-    let url = build_url(snap)?;
+    // 能力只在连上的那一刻探一次：PATH 扫盘，别放进等消息的热循环里
+    let agents = installed_agents();
+    let url = build_url(snap, &agents)?;
     let (mut ws, _) = tungstenite::connect(url.as_str()).map_err(|e| match &e {
         WsError::Http(resp) if resp.status().as_u16() == 401 => Fail::Auth,
         _ => Fail::Other(format!("连接失败：{e}")),
@@ -224,11 +255,19 @@ mod tests {
 
     #[test]
     fn builds_ws_url() {
-        assert_eq!(build_url(&snap("https://x.example.com/")).unwrap(), "wss://x.example.com/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1");
-        assert!(!build_url(&snap("https://x")).unwrap().contains("control"));
-        assert_eq!(build_url(&snap("http://127.0.0.1:3000")).unwrap(), "ws://127.0.0.1:3000/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1");
-        assert!(build_url(&snap("ftp://x")).is_err());
+        assert_eq!(build_url(&snap("https://x.example.com/"), &[]).unwrap(), "wss://x.example.com/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1");
+        assert!(!build_url(&snap("https://x"), &[]).unwrap().contains("control"));
+        assert_eq!(build_url(&snap("http://127.0.0.1:3000"), &[]).unwrap(), "ws://127.0.0.1:3000/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1");
+        assert!(build_url(&snap("ftp://x"), &[]).is_err());
         assert_eq!(urlencode("中a"), "%E4%B8%ADa");
+    }
+
+    #[test]
+    fn reports_installed_agents() {
+        // 探到了就带上，没探到就不带这个参数（服务端当作「不知道」，不把老电脑判成不支持）
+        let with = build_url(&snap("https://x"), &["claude", "zcode"]).unwrap();
+        assert!(with.ends_with("&agents=claude,zcode"), "{with}");
+        assert!(!build_url(&snap("https://x"), &[]).unwrap().contains("agents="));
     }
 
     #[test]

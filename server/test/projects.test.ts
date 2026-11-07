@@ -44,8 +44,8 @@ function harness() {
     sockets.push(ws)
     return msgs
   }
-  const executor = async (machine: string) => {
-    const msgs = await connect(`role=agent&machine=${machine}&capabilities=reply-branch-v1,role-v1`)
+  const executor = async (machine: string, agents?: string) => {
+    const msgs = await connect(`role=agent&machine=${machine}&capabilities=reply-branch-v1,role-v1${agents ? `&agents=${agents}` : ''}`)
     await waitFor(async () => (await call('GET', '/control/status')).body.agents.includes(machine))
     return msgs
   }
@@ -208,6 +208,29 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.equal((await h.call('GET', '/machines', undefined, other.token)).body.machines.some((m: any) => m.name === pc), false)
   })
 
+  it('电脑上报装了哪些工具；没上报过的老电脑不判成不支持', async () => {
+    const pc = `caps-pc-${stamp}`
+    const old = `caps-old-${stamp}`
+    await h.executor(pc, 'claude,zcode')
+    await h.executor(old) // 老客户端：不带 agents
+
+    const ms = (await h.call('GET', '/machines')).body.machines as { name: string; online: boolean; agents: string[] }[]
+    assert.deepEqual(ms.find(m => m.name === pc)?.agents, ['claude', 'zcode'])
+    assert.deepEqual(ms.find(m => m.name === old)?.agents, [], '没上报过 = 不知道')
+
+    // 明确没装这个工具就别派了，排到天亮也跑不起来
+    const p = await h.project({ name: uniq('能力项目'), dirs: [{ machine: pc, cwd: 'D:\\Work2\\Caps' }] })
+    const role = (await h.call('POST', '/roles', { name: uniq('Codex 角色'), title: '写代码', agent: 'codex' })).body.role
+    const t = await h.task({ projectId: p.id, roleId: role.id, agent: 'codex', machine: pc, cwd: 'D:\\Work2\\Caps' })
+    const refused = await h.call('POST', `/tasks/${t.id}/start`, {})
+    assert.equal(refused.status, 409, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /没装 codex/)
+
+    // 换成年久失修的机器（没上报）照旧放行，交给执行器自己报错
+    const t2 = await h.task({ projectId: p.id, agent: 'codex', machine: old, cwd: 'D:\\Work2\\Caps' })
+    const ok = await h.call('POST', `/tasks/${t2.id}/start`, {})
+    assert.equal(ok.status, 200, JSON.stringify(ok.body))
+  })
   it('电脑改名：旧名下的会话与项目目录一起挪到新名，旧名不再出现在清单里', async () => {
     const oldName = `old-pc-${stamp}`
     const newName = `new-pc-${stamp}`
