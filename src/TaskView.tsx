@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { Api, Attachment, AttachmentInput, EvidenceKind, Goal, Machine, Project, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskConstraints, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { NO_CONSTRAINTS } from "./lib/api";
+import { BOUND_PRESETS, applyPreset, presetHint, presetOf, type PresetId } from "./lib/boundsPresets";
 import { TASK_LABEL } from "./TasksPanel";
 import Icon from "./Icon";
 import { localDateTime } from "./ScheduleFields";
@@ -558,8 +559,32 @@ function BoundsEditor({ value, disabled, onChange }: { value: TaskConstraints; d
     onChange({ ...value, note: next });
   };
   const onEnter = (e: KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") e.currentTarget.blur(); };
+
+  const preset = presetOf(value);
+  const apply = (id: PresetId) => {
+    // 「自定义」只是状态，不是动作：选了什么都不改
+    if (id === "custom") return;
+    const next = applyPreset(value, id);
+    if (next.net === value.net && next.push === value.push && next.scripts === value.scripts && next.note === value.note) return;
+    onChange(next);
+  };
+  const hint = presetHint(value);
+
   return (
     <div className="bounds-editor">
+      <label className="bounds-preset">场景
+        <select className="inline-control" aria-label="边界策略" value={preset} disabled={disabled}
+          onChange={e => apply(e.target.value as PresetId)}>
+          {BOUND_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+          <option value="custom">自定义</option>
+        </select>
+      </label>
+      <p className="bounds-hint dim">{hint}
+        {/* 下拉选中项再点一次不会触发 change，说明空着时给一个明确的「填上」入口 */}
+        {preset !== "custom" && !value.note && (
+          <button type="button" className="link" disabled={disabled} onClick={() => apply(preset)}>填上</button>
+        )}
+      </p>
       <label className="bounds-paths">只允许改
         <input className="inline-control" value={paths} maxLength={400} disabled={disabled}
           placeholder="留空 = 整个项目目录；多个用逗号分隔，如 server/src, docs"

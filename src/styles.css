@@ -863,6 +863,10 @@ header h1 { white-space: nowrap; }
 /* 执行边界：任务允许碰什么，代批先按它判 */
 .bounds-editor { display: grid; gap: 12px; margin: 0 4px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 16px; }
 .bounds-paths { display: flex; flex-direction: column; gap: 8px; font-size: 13px; font-weight: 550; }
+.bounds-preset { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 550; }
+.bounds-preset select { flex: 1; background: var(--field); border-color: var(--line); }
+.bounds-hint { margin: -4px 0 0; font-size: 12px; line-height: 1.5; }
+.bounds-hint .link { margin-left: 6px; font-size: 12px; }
 .bounds-editor .inline-control { width: 100%; }
 .bounds-flags { display: flex; flex-wrap: wrap; gap: 8px 18px; }
 .bounds-flags .check { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; }
