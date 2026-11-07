@@ -230,6 +230,8 @@ type Props = {
   /** 等待授权（手机/桌面确认）的会话 id，按最高优先级标色 */
   approvals: Set<string>;
   onOpen(id: string): void;
+  /** 把单个会话标记为已处理（挂到待处理气泡上的小按钮） */
+  onAck(id: string): void;
 };
 
 /**
@@ -238,7 +240,7 @@ type Props = {
  * 展开：会话气泡同样随机散布（最急的靠中间），点击打开会话，项目名与计数移到顶部工具条；
  * 已处理：不进图，主图下方一个可折叠的纯列表。
  */
-export default function PendingGraph({ sessions, handled, approvals, onOpen }: Props) {
+export default function PendingGraph({ sessions, handled, approvals, onOpen, onAck }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [handledOpen, setHandledOpen] = useState(false);
 
@@ -353,10 +355,10 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
             // 球画大了字也跟着放大一点，不然大球里一行小字反而更空；长标题多给几行
             const fs = clamp(e.size / 88, 1, 1.25);
             const titleLines = e.size >= 165 ? 4 : e.size >= 130 ? 3 : 2;
+            // 外层用 div：气泡本体和「已处理」是两个并列按钮，button 里不能再套 button
             return (
-              <button
+              <div
                 key={e.s.id}
-                type="button"
                 className="pg-slot pg-scatter-slot"
                 style={{
                   width: e.size,
@@ -366,21 +368,37 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
                   marginLeft: -e.size / 2,
                   marginTop: -e.size / 2,
                 }}
-                title={tip}
-                aria-label={`打开会话：${label}`}
-                onClick={() => onOpen(e.s.id)}
               >
                 <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
-                  <span className={`pg-bubble pg-session ${tone}${e.run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 50}ms` }}>
-                    {e.run && <span className="pg-run-arc" />}
-                    <span className="pg-state" style={{ fontSize: 10.5 * fs }}>{label}</span>
-                    <span className="pg-title" style={{ fontSize: 11 * fs, WebkitLineClamp: titleLines }}>
-                      {e.s.title || e.s.summary || "未命名会话"}
+                  <button
+                    type="button"
+                    className="pg-open"
+                    title={tip}
+                    aria-label={`打开会话：${label}`}
+                    onClick={() => onOpen(e.s.id)}
+                  >
+                    <span className={`pg-bubble pg-session ${tone}${e.run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 50}ms` }}>
+                      {e.run && <span className="pg-run-arc" />}
+                      <span className="pg-state" style={{ fontSize: 10.5 * fs }}>{label}</span>
+                      <span className="pg-title" style={{ fontSize: 11 * fs, WebkitLineClamp: titleLines }}>
+                        {e.s.title || e.s.summary || "未命名会话"}
+                      </span>
+                      <span className="pg-agent" style={{ fontSize: 9.5 * fs }}>{AGENT_LABEL[e.s.agent]}</span>
                     </span>
-                    <span className="pg-agent" style={{ fontSize: 9.5 * fs }}>{AGENT_LABEL[e.s.agent]}</span>
-                  </span>
+                  </button>
+                  {!e.run && (
+                    <button
+                      type="button"
+                      className="pg-ack"
+                      title="标记为已处理"
+                      aria-label={`已处理：${e.s.title || e.s.summary || e.s.id}`}
+                      onClick={() => onAck(e.s.id)}
+                    >
+                      已处理
+                    </button>
+                  )}
                 </span>
-              </button>
+              </div>
             );
           })}
         </div>
@@ -389,7 +407,7 @@ export default function PendingGraph({ sessions, handled, approvals, onOpen }: P
           <span><i className="pg-dot tone-wait" />等待授权</span>
           <span><i className="pg-dot tone-amber" />完成待确认</span>
           <span><i className="pg-dot tone-abort" />中断待确认</span>
-          <span>点击气泡打开会话</span>
+          <span>点击气泡打开会话 · 「已处理」标记完成</span>
         </p>
       </div>
     );

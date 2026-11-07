@@ -907,11 +907,13 @@ header h1 { white-space: nowrap; }
 
 .pg-slot { position: relative; display: block; padding: 0; min-width: 0; min-height: 0; border: 0; background: none; border-radius: 50%; }
 button.pg-slot { cursor: pointer; }
-.pg-floater { display: block; width: 100%; height: 100%; border-radius: 50%; animation: pg-float 5.2s ease-in-out infinite; }
+/* 展开态的会话球：外层是 div，打开会话的按钮包住气泡，「已处理」另是一个按钮 */
+.pg-open { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: none; border-radius: 50%; cursor: pointer; }
+.pg-floater { position: relative; display: block; width: 100%; height: 100%; border-radius: 50%; animation: pg-float 5.2s ease-in-out infinite; }
 
 .pg-bubble { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 100%; height: 100%; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--tone) 45%, transparent); background: radial-gradient(circle at 32% 26%, color-mix(in srgb, var(--tone) 30%, var(--card)), color-mix(in srgb, var(--tone) 11%, var(--card)) 72%); color: var(--fg); box-shadow: var(--shadow); animation: pg-pop .5s cubic-bezier(.34,1.56,.64,1) backwards; transition: transform .18s ease, box-shadow .18s ease; }
-button.pg-slot:hover .pg-bubble { transform: scale(1.06); box-shadow: 0 12px 34px rgba(25,35,55,.14), 0 2px 6px rgba(25,35,55,.08); }
-button.pg-slot:active .pg-bubble { transform: scale(.97); }
+.pg-slot:hover .pg-bubble { transform: scale(1.06); box-shadow: 0 12px 34px rgba(25,35,55,.14), 0 2px 6px rgba(25,35,55,.08); }
+.pg-slot:active .pg-bubble { transform: scale(.97); }
 
 /* 色调：取自主题变量，深浅色自动适配 */
 .pg-bubble.tone-blue { --tone: var(--accent); }
@@ -954,6 +956,11 @@ button.pg-slot:active .pg-bubble { transform: scale(.97); }
 
 /* 运行中会话气泡：旋转弧表示在跑 */
 .pg-bubble.pg-run .pg-run-arc { position: absolute; inset: -4px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 45%, transparent); animation: pg-spin 2.6s linear infinite; pointer-events: none; }
+
+/* 单个已处理：挂在待处理气泡底部的小胶囊，跟气泡一起漂 */
+.pg-ack { position: absolute; left: 50%; bottom: -10px; transform: translateX(-50%); z-index: 2; padding: 3px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); color: var(--dim); font-size: 11px; line-height: 1.4; white-space: nowrap; box-shadow: 0 1px 4px rgba(25,35,55,.08); opacity: .85; transition: opacity .15s ease, color .15s ease, border-color .15s ease; }
+.pg-ack:hover { color: var(--fg); border-color: var(--accent); opacity: 1; }
+.pg-ack:active { transform: translateX(-50%) scale(.94); }
 
 /* 已处理：不进图，只有一条可折叠的列表 */
 .pg-handled { margin: 20px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); }

@@ -565,7 +565,7 @@ export default function App() {
               {running.length > 0 && <span className="count dim">{running.length} 运行中</span>}
             </h2>
             {pending.length + running.length > 0 ? (
-              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} onOpen={openSession} />
+              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} onOpen={openSession} onAck={ack} />
             ) : (
               <p className="empty">没有待处理或运行中的会话</p>
             )}
