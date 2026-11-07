@@ -13,6 +13,7 @@ import TaskNotes from "./TaskNotes";
 import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
 import { pickMachine } from "./lib/machines";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
+import { autoModelRange } from "./lib/models";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
 const STATE_LABEL: Record<string, string> = { idle: "空闲", running: "运行中", waiting: "等待授权", done: "已完成", aborted: "已中断", ended: "已结束", unknown: "状态未知" };
@@ -30,6 +31,8 @@ const toIso = (v: string) => v ? new Date(v).toISOString() : null;
 export default function TaskView({ task, goals, sessions, agents, api, digest: liveDigest, artifact: liveArtifact, onArtifact, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; digest?: TaskDigests; artifact?: TaskArtifact; onArtifact(a: TaskArtifact): void; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
   const [busy, setBusy] = useState(false), [err, setErr] = useState(""), [saved, setSaved] = useState(false);
   const [starting, setStarting] = useState(false), [message, setMessage] = useState(""), [linking, setLinking] = useState(false);
+  /** 上一次派活由项目经理挑的模型与理由：只在这一屏显示，重新打开以执行记录为准 */
+  const [dispatchNote, setDispatchNote] = useState("");
   const [now, setNow] = useState(Date.now());
   const [fetchedDigest, setFetchedDigest] = useState<TaskDigests | null>(null);
   // 任务产物：跑完自动生成，可改可导出。liveArtifact 是 WS 推来的最新一份
@@ -338,7 +341,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
             <strong>验收摘要{digest.review.sessionTitle ? ` · ${digest.review.sessionTitle}` : ""}</strong>
             <p className="dim">
               {digest.review.messages > 0 ? `已同步 ${digest.review.messages} 条消息` : "会话还没有同步消息"}
-              {digest.review.runs.length ? ` · 最近执行 ${digest.review.runs.map(r => r.status).join(" / ")}` : ""}
+              {digest.review.runs.length ? ` · 最近执行 ${digest.review.runs.map(r => r.model ? `${r.status}（${r.model}）` : r.status).join(" / ")}` : ""}
             </p>
             <p>{digest.review.lastReply ? <Markdown text={digest.review.lastReply} /> : "还没有助手回复内容；打开会话详情加载历史可看全文。"}</p>
             {digest.review.sessionId && <button className="link" onClick={() => onSession(digest.review!.sessionId!)}>打开会话</button>}
@@ -458,11 +461,13 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(notesForAgent(task.notes, attachments ?? []) || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
         {reason ? <span className="dim">{reason}</span> : offline ? <span className="dim">{machine} 离线，开始后会在它上线时自动派发</span> : null}
       </div>
+      {dispatchNote && <p className="hint" role="status">{dispatchNote}</p>}
       {task.queuedAt && <p className="hint queue-hint" role="status">
         已排队 · 等 {task.machine || machine} 上线后自动开始（{new Date(task.queuedAt).toLocaleString()} 入队）
         <button className="link" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unqueueTask(task.id)))}>取消排队</button>
       </p>}
       {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task);
+              setDispatchNote(r.modelNote ?? "");
               if (r.roleDegraded) setErr("电脑端版本较旧：角色里的模型与上下文没有生效，升级电脑端后重新派发即可");
               if (r.sessionId) onSession(r.sessionId); else setStarting(false); }); }}>
         <label>{task.sessionIds.length ? "这次要做什么" : "第一条消息"}<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
@@ -490,7 +495,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         {currentRole?.agent && <p className="hint">执行工具由角色「{currentRole.name}」决定，要换工具去角色页改它；角色不绑电脑，在哪台干活由这个任务挑——下面只列装了这个工具的电脑。</p>}
         {machineLacks && <p className="form-error" role="alert">{machine} 没装 {agentName(tool ?? "")}：换一台装了它的电脑，或者给这个角色换工具。</p>}
         {currentProject && <p className="hint">项目「{currentProject.name}」{currentProject.brief ? `：${currentProject.brief.slice(0, 80)}${currentProject.brief.length > 80 ? "…" : ""}` : "（还没写项目说明）"}；派活时项目说明和该角色在这个项目上的记忆会一起下发。</p>}
-        {currentRole && <p className="hint">角色「{currentRole.name}」：{currentRole.agent ? AGENT_LABEL[currentRole.agent] ?? currentRole.agent : "执行工具未定"}{currentRole.model ? ` · 模型 ${currentRole.model}` : " · 用执行端默认模型"}{currentRole.context ? ` · 上下文 ${currentRole.context.length} 字` : " · 没有上下文"}；派活时随第一条消息一起下发。</p>}
+        {currentRole && <p className="hint">角色「{currentRole.name}」：{currentRole.agent ? AGENT_LABEL[currentRole.agent] ?? currentRole.agent : "执行工具未定"}{currentRole.model ? ` · 模型 ${currentRole.model}` : autoModelRange(currentRole.agent).length ? ` · 模型未指定：派活时由项目经理按复杂度在 ${autoModelRange(currentRole.agent).join(" / ")} 里挑` : " · 用执行端默认模型"}{currentRole.context ? ` · 上下文 ${currentRole.context.length} 字` : " · 没有上下文"}；派活时随第一条消息一起下发。</p>}
         {currentProject && currentProject.dirs.length > 0 && <p className="hint">项目登记了 {currentProject.dirs.length} 条目录（{currentProject.dirs.map(d => d.machine ?? "任意电脑").join("、")}）；开始执行时按当前那台电脑自动挑对应目录，目录留空就会被自动补上。</p>}
       </details>
     </section>

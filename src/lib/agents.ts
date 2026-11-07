@@ -8,8 +8,12 @@ export const AGENT_LABEL: Record<string, string> = {
   codebuddy: "CodeBuddy",
 };
 
-/** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent（WorkBuddy 已支持派活，见 runner.rs 的 run_workbuddy） */
-const LISTEN_ONLY = new Set(["doubao"]);
+/** 只做状态 / 消息监听，不支持远程续聊、新开、分支的 agent。
+ *  - doubao：本来只有状态上报；
+ *  - workbuddy：桌面端内置的是 lite-wb bundle，没有独立登录态（实测 `-p` 直接
+ *    `Authentication required`），而能自己 `/login` 的那份就是 npm 完整版，也就是 codebuddy。
+ *    所以它在派活入口里没有独立价值，只保留「看桌面端会话」，派活用 CodeBuddy。 */
+const LISTEN_ONLY = new Set(["doubao", "workbuddy"]);
 
 export const isListenOnly = (agent: string | null | undefined): boolean => !!agent && LISTEN_ONLY.has(agent);
 

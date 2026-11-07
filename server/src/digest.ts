@@ -58,8 +58,8 @@ export async function buildReviewDigest(pool: pg.Pool, userId: number, taskId: n
     )
   ).rows[0]
   const runs = (
-    await pool.query('SELECT status, error, updated_at FROM runs WHERE user_id=$1 AND task_id=$2 ORDER BY created_at DESC, id DESC LIMIT 3', [userId, taskId])
-  ).rows.map((r: { status: string; error: string; updated_at: Date }) => ({ status: r.status, error: r.error, updatedAt: r.updated_at.toISOString() }))
+    await pool.query('SELECT status, error, model, updated_at FROM runs WHERE user_id=$1 AND task_id=$2 ORDER BY created_at DESC, id DESC LIMIT 3', [userId, taskId])
+  ).rows.map((r: { status: string; error: string; model: string | null; updated_at: Date }) => ({ status: r.status, error: r.error, model: r.model ?? null, updatedAt: r.updated_at.toISOString() }))
   let lastReply = '', lastReplyAt: string | null = null, messages = 0
   let evidence: Evidence[] = []
   if (s) {

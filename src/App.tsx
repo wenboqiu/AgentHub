@@ -167,6 +167,9 @@ export default function App() {
   const [agents, setAgents] = useState<string[]>([]);
   // 历史会话：快照只推「24 小时内且没结束」的，更早的要单独拉一次。点开才拉，不拖慢启动。
   const [archive, setArchive] = useState<Session[] | null>(null);
+  // 气泡图当前展开的项目（第二级）。放在这里而不是 PendingGraph 里：点会话进详情页时
+  // 图组件会被卸载，状态留在内部的话，返回就掉回总览了。
+  const [graphProject, setGraphProject] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const bus = useMemo(() => makeBus(), []);
   const [now, setNow] = useState(Date.now());
@@ -566,7 +569,7 @@ export default function App() {
               {running.length > 0 && <span className="count dim">{running.length} 运行中</span>}
             </h2>
             {pending.length + running.length > 0 ? (
-              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} onOpen={openSession} />
+              <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} expanded={graphProject} onExpand={setGraphProject} onOpen={openSession} />
             ) : (
               <p className="empty">没有待处理或运行中的会话</p>
             )}

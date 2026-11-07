@@ -63,6 +63,7 @@ import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
 import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
+import { pickDispatchModel } from './model-pick.ts'
 import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, renameMachine, saveProject } from './projects.ts'
 import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
@@ -222,8 +223,10 @@ const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
-/** 能远程派活的工具；执行器上报的 agents 只认这几个（豆包只做监听，不进派活候选） */
-const DISPATCH_AGENTS = ['claude', 'codex', 'workbuddy', 'zcode', 'codebuddy'] as const
+/** 能远程派活的工具；执行器上报的 agents 只认这几个。
+ *  豆包只做监听；WorkBuddy 也只做监听——桌面端内置的 lite bundle 没有独立登录态（实测派活必报
+ *  `Authentication required`），而能自己 `/login` 的那份就是 npm 完整版，也就是 codebuddy。 */
+const DISPATCH_AGENTS = ['claude', 'codex', 'zcode', 'codebuddy'] as const
 type DispatchAgent = (typeof DISPATCH_AGENTS)[number]
 /** 派活校验同时也是类型收窄：后面拿 agent 当强类型用 */
 const isDispatchAgent = (a: unknown): a is DispatchAgent =>
@@ -479,14 +482,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
   // prompt 用来把「实际发给 agent 的内容」和「记录里显示的内容」分开（助手在消息前面拼了输出格式契约）。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: Delivery, sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }, prompt?: string) {
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: Delivery, sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string; modelNote?: string }, prompt?: string) {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
     try {
       await db.query('BEGIN')
       pending = await createPendingSession(db,userId,pendingId,base,title)
-      run = await createRun(db,userId,runId,pendingId,base.machine,taskId ?? null)
+      run = await createRun(db,userId,runId,pendingId,base.machine,taskId ?? null,{ model: role?.model ?? null, note: role?.modelNote ?? '' })
       message = await insertMessage(db,userId,pendingId,runId,'user',text)
       if (taskId !== undefined) {
         await linkSession(db,userId,taskId,pendingId)
@@ -532,7 +535,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
    * 与 startSession 的区别只在「落到哪条会话上」：这里 sessionId 是已经在用的真实会话，
    * 不需要 pending 会话等待执行器回报 id。
    */
-  async function resumeTaskSession(userId: number, task: Task, session: Pick<Session, 'id' | 'agent' | 'machine' | 'cwd'>, text: string, role: { model: string | null; instructions: string }) {
+  async function resumeTaskSession(userId: number, task: Task, session: Pick<Session, 'id' | 'agent' | 'machine' | 'cwd'>, text: string, role: { model: string | null; instructions: string; modelNote?: string }) {
     // 同一个会话同时只能有一个运行：在跑时再续就是双写
     if (await activeRun(pool, userId, session.id)) throw new TaskError('这个会话还有一个运行没结束，等它跑完再继续', 409)
     const runId = randomUUID()
@@ -540,7 +543,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     let run: Run, message: Message, saved: Task
     try {
       await db.query('BEGIN')
-      run = await createRun(db, userId, runId, session.id, session.machine, task.id)
+      run = await createRun(db, userId, runId, session.id, session.machine, task.id, { model: role.model, note: role.modelNote ?? '' })
       message = await insertMessage(db, userId, session.id, runId, 'user', text)
       await linkSession(db, userId, task.id, session.id)
       saved = await saveTask(db, userId, { status: 'doing' }, task.id)
@@ -583,9 +586,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!machine && dir?.machine) machine = dir.machine
     // 项目目录登记成「哪台都行」而又有多台在线：随便挑一台。否则会排进空机器名，永远等不到上线
     if (!machine && online.length) machine = online[0]
-    const agent = b.agent ?? role?.agent ?? task.agent
+    // WorkBuddy 只做会话监听，不进派活：老角色 / 老任务里存着 workbuddy 的落到 CodeBuddy
+    // （同一份 CLI，能自己 /login 的那份），免得历史数据一编辑就报「请选择有效的执行工具」。
+    const requested = b.agent ?? role?.agent ?? task.agent
+    const agent = requested === 'workbuddy' ? 'codebuddy' : requested
     if (agent === 'doubao') throw new TaskError('豆包只做状态监听，请在客户端里执行后把会话关联到任务')
-    if (!isDispatchAgent(agent)) throw new TaskError('请选择 Claude、Codex、WorkBuddy、ZCode 或 CodeBuddy')
+    if (!isDispatchAgent(agent)) throw new TaskError('请选择 Claude、Codex、ZCode 或 CodeBuddy')
     // 这台电脑上报过装了哪些工具：明确没装就别往里派，排到天亮也跑不起来。
     // 没上报过（老客户端）不拦，交给执行器自己报错。
     const caps = machine ? capsByMachine.get(execKey(userId, machine)) : undefined
@@ -657,7 +663,20 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       // 任务自己声明的边界：一开始就告诉它，省得做一半被卡住
       boundaryLine(task.constraints),
     ].filter(Boolean).join('\n\n')
-    const dispatch = { model: roleModel(role), instructions }
+    // 模型谁定：角色写了就听角色的；没写就由项目经理按任务的复杂度，在同工具里挑一档。
+    // 挑中的模型和理由一起落进 run，事后能回答「这轮为什么用 opus」。
+    const chosen = pickDispatchModel({
+      agent,
+      roleModel: roleModel(role),
+      task: {
+        title: task.title,
+        notes: filled || readableNotes(task.notes) || task.title,
+        checklist: task.checklist,
+        constraints: task.constraints,
+        priority: task.priority,
+      },
+    })
+    const dispatch = { model: chosen.model, instructions, modelNote: chosen.note }
     // 开跑方式只用一次：无论排队还是立刻开跑，也无论最后按 fork 还是 fresh 跑，
     // 都在这儿清掉——显式请求 fresh 时不清，重试就会又续回老上下文
     const settle = async () => {
@@ -671,7 +690,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       await settle()
       const queued = await saveTask(pool, userId, { agent, machine, cwd }, task.id)
       pushTask(userId, queued)
-      return { queued: true, task: queued, delivery: { mode, reason: deliveryReason } }
+      return { queued: true, task: queued, delivery: { mode, reason: deliveryReason }, model: chosen.model, modelNote: chosen.note }
     }
     // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
     if (await dequeueDispatch(pool, userId, task.id)) pushTask(userId, await getTask(pool, userId, task.id))
@@ -686,7 +705,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const degraded = !executors.get(execKey(userId, targetMachine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
     if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
     const delivery = { mode, reason: deliveryReason }
-    return degraded ? { ...res, queued: false, roleDegraded: true, delivery } : { ...res, queued: false, delivery }
+    const used = { queued: false, delivery, model: chosen.model, modelNote: chosen.note }
+    return degraded ? { ...res, ...used, roleDegraded: true } : { ...res, ...used }
   }
 
   // 电脑上线后把排队的活按入队顺序投递；失败累计次数，超过上限就放弃并记录
@@ -712,8 +732,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       let ok = false
       try {
         // 续写原会话不建新会话；其余方式照旧新建一个（fork / fresh）
-        if (resumeSrc) await resumeTaskSession(userId, await getTask(pool, userId, item.taskId), resumeSrc, item.text, { model: item.model, instructions: item.instructions })
-        else await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
+        if (resumeSrc) await resumeTaskSession(userId, await getTask(pool, userId, item.taskId), resumeSrc, item.text, { model: item.model, instructions: item.instructions, modelNote: item.modelNote })
+        else await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions, modelNote: item.modelNote })
         ok = true
       } catch (e) {
         const attempts = await bumpAttempts(pool, userId, item.taskId)

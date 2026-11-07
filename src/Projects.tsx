@@ -3,7 +3,8 @@ import type { Api, BriefEntry, Machine, Project, ProjectDir, ProjectInput } from
 import Markdown from "./Markdown";
 
 // 项目管理：一个代码库的身份与背景知识 + 它在各台电脑上的目录。
-// 列表默认收起成一行（跟角色页一个样子），点「编辑」才展开那一条——项目多了不会满屏表单。
+// 跟角色页一样分两级：列表只负责浏览和入口，点一条进详情页改，新建也走同一个详情页——
+// 配置可能有好几条、还有项目近况，摊在列表里会把别的项目挤出屏幕。
 // 「配置」(profile) = 一台电脑 + 这个项目在那台电脑上的目录：派活时按当前电脑自动挑对应那条，
 // 路径不会串设备；电脑留空 = 哪台都适用，同一台/同一种最多一条（服务端也校验）。
 
@@ -35,9 +36,12 @@ function ProfileRow({ index, dir, machines, taken, busy, onChange, onRemove }: {
   onChange(patch: Partial<ProjectDir>): void;
   onRemove(): void;
 }) {
-  // 清单里没有的名字（手填的、或机器改过名）直接落到输入框，别把人卡在没有对应选项的下拉里
-  const [typing, setTyping] = useState(() => !!dir.machine && !machines.some(m => m.name === dir.machine));
+  // 手填模式只由人点「其他电脑…」触发：电脑清单是异步加载的，
+  // 用「名字不在 machines 里」当初始条件会在加载完成前把所有人卡进输入框。
+  const [typing, setTyping] = useState(false);
   const anyTaken = taken.has(null);
+  // 清单里没有的名字（手填的、或机器改过名）仍然要显示出来，别把人卡在没有对应选项的下拉里
+  const unknown = !!dir.machine && !machines.some(m => m.name === dir.machine);
 
   return (
     <div className="profile-row">
@@ -47,7 +51,7 @@ function ProfileRow({ index, dir, machines, taken, busy, onChange, onRemove }: {
           <div className="profile-fallback">
             <input value={dir.machine ?? ""} maxLength={100} disabled={busy} placeholder="电脑名，例如 MACBOOK"
               onChange={e => onChange({ machine: e.target.value.trim() || null })} />
-            <button type="button" className="link" disabled={busy} onClick={() => setTyping(false)}>列表</button>
+            <button type="button" className="link" disabled={busy} onClick={() => { setTyping(false); onChange({ machine: null }); }}>列表</button>
           </div>
         ) : (
           <select value={dir.machine ?? ""} disabled={busy} onChange={e => {
@@ -61,6 +65,7 @@ function ProfileRow({ index, dir, machines, taken, busy, onChange, onRemove }: {
                 {m.name}{m.online ? "（在线）" : ""}
               </option>
             ))}
+            {unknown && <option value={dir.machine!}>{dir.machine}（清单里没有）</option>}
             <option value={OTHER}>其他电脑…</option>
           </select>
         )}
@@ -113,7 +118,7 @@ function Fields({ form, machines, busy, onChange }: {
   return (
     <>
       <div className="form-grid">
-        <label>项目名<input value={form.name} maxLength={60} disabled={busy} placeholder="例如 AgentHub" onChange={e => onChange({ name: e.target.value })} /></label>
+        <label>项目名（必填）<input value={form.name} maxLength={60} disabled={busy} placeholder="例如 AgentHub" onChange={e => onChange({ name: e.target.value })} /></label>
       </div>
       <Profiles form={form} machines={machines} busy={busy} onChange={onChange} />
       <label>项目说明（技术栈、约定、不能碰的东西；最多 4000 字）
@@ -164,100 +169,141 @@ function Brief({ api, projectId }: { api: Api; projectId: number }) {
   );
 }
 
-export default function Projects({ api }: { api: Api }) {
-  const [list, setList] = useState<Project[] | null>(null);
-  const [machines, setMachines] = useState<Machine[] | null>(null);
-  const [forms, setForms] = useState<Record<string, Form>>({});
-  // 一次只开一条：选中哪个项目才进入它的编辑
-  const [open, setOpen] = useState<number | null>(null);
-  const [adding, setAdding] = useState(false), [draft, setDraft] = useState<Form>(BLANK);
+/**
+ * 项目详情：独立一页，字段就地编辑 + 项目近况 + 删除。
+ * 新建也走这里（project = null）：建完不跳走，直接变成这个项目的详情页，接着配目录。
+ */
+export function ProjectEditor({ api, project: initial, onBack, onSaved, onDeleted }: {
+  api: Api;
+  /** null = 新建 */
+  project: Project | null;
+  onBack(): void;
+  /** 建好 / 保存后回传最新项目（外层用它的名字做页标题） */
+  onSaved(p: Project): void;
+  onDeleted(): void;
+}) {
+  const [project, setProject] = useState<Project | null>(initial);
+  const [form, setForm] = useState(() => (initial ? toForm(initial) : BLANK));
+  const [machines, setMachines] = useState<Machine[]>([]);
   const [busy, setBusy] = useState(false), [msg, setMsg] = useState(""), [err, setErr] = useState("");
 
-  const load = useCallback(() => {
-    api.projects().then(
-      (ps) => { setList(ps); setForms(Object.fromEntries(ps.map((p) => [String(p.id), toForm(p)]))); },
-      () => setList([]),
-    );
-    // 配置的电脑下拉项：拿不到就当没有候选，只留「任意 / 其他电脑」
-    api.machines().then(setMachines, () => setMachines([]));
-  }, [api]);
-  useEffect(() => { load(); }, [load]);
+  // 配置的电脑下拉项：拿不到就当没有候选，只留「任意 / 其他电脑」
+  useEffect(() => { api.machines().then(setMachines, () => setMachines([])); }, [api]);
 
-  const run = async (fn: () => Promise<unknown>, done: string) => {
+  // 与上次保存下来的那份比，才判断得出有没有改动
+  const dirty = JSON.stringify(form) !== JSON.stringify(project ? toForm(project) : BLANK);
+  const ready = !!form.name.trim();
+
+  const save = async () => {
     setBusy(true); setErr(""); setMsg("");
-    try { await fn(); setMsg(done); load(); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
+    const creating = !project;
+    try {
+      const p = creating
+        ? await api.createProject(toInput(form) as ProjectInput & { name: string })
+        : await api.updateProject(project.id, toInput(form));
+      setProject(p);
+      setForm(toForm(p));
+      onSaved(p);
+      setMsg(creating ? "项目已创建，接着配目录或直接返回" : "项目已保存");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    if (!project) return;
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      await api.deleteProject(project.id);
+      onDeleted();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
   };
 
   return (
+    <>
+      <section className="box">
+        <div className="box-head">
+          <h2>基本信息</h2>
+          {dirty && <span className="badge">未保存</span>}
+        </div>
+        <Fields form={form} machines={machines} busy={busy} onChange={(patch) => setForm(f => ({ ...f, ...patch }))} />
+        <div className="btns">
+          <button className="primary" disabled={busy || !dirty || !ready} onClick={() => void save()}>
+            {project ? "保存" : "创建项目"}
+          </button>
+          <button className="ghost" disabled={busy} onClick={onBack}>返回列表</button>
+          {!ready && <span className="dim">项目名必填，其余可以之后慢慢补。</span>}
+        </div>
+        {msg && <p className="msg">{msg}</p>}
+        {err && <p className="form-error" role="alert">{err}</p>}
+      </section>
+
+      {project && (
+        <section className="box">
+          <Brief api={api} projectId={project.id} />
+        </section>
+      )}
+
+      {project && (
+        <section className="box">
+          <div className="btns">
+            <button className="ghost" disabled={busy} onClick={() => void remove()}>删除项目</button>
+            <span className="dim">已经派出去的任务不会被删掉，只是不再带这个项目；当前有 {project.tasks} 个任务用过它。</span>
+          </div>
+        </section>
+      )}
+    </>
+  );
+}
+
+/** 项目列表：一条一行，点进去才是编辑页 */
+export default function Projects({ api, onEdit }: { api: Api; onEdit(project: Project | null): void }) {
+  const [list, setList] = useState<Project[] | null>(null);
+
+  const load = useCallback(() => {
+    api.projects().then(setList, () => setList([]));
+  }, [api]);
+  useEffect(() => { load(); }, [load]);
+
+  return (
     <section className="box">
-      <h2>项目</h2>
+      <div className="box-head">
+        <h2>项目</h2>
+      </div>
       <p className="hint">
         一个项目 = 一个代码库的身份、它的约定、以及它在你各台电脑上的目录。点项目进编辑，给它在每台电脑上配一条「配置」（电脑 + 目录）；
         派活时选中项目，说明随上下文下发、目录按当前那台电脑自动挑。角色在这个项目上的经验按项目分开记，换个项目不会带过去。
       </p>
-      {list === null || machines === null ? (
+      {list === null ? (
         <p className="hint">加载中…</p>
       ) : (
         <>
-          {list.length === 0 && !adding && <p className="hint">还没有项目。建一个之后，派活时选项目就能带上它的约定和对应目录。</p>}
-          {list.map((p) => {
-            const form = forms[String(p.id)] ?? toForm(p);
-            const dirty = JSON.stringify(form) !== JSON.stringify(toForm(p));
-            const expanded = open === p.id;
-            return (
-              <div key={p.id} className="profile-card">
-                <button type="button" className="role-head" aria-expanded={expanded}
-                  onClick={() => setOpen(expanded ? null : p.id)}>
-                  <strong>{p.name}</strong>
-                  <span className="role-title">
-                    {p.dirs.length
-                      ? p.dirs.map(d => `${d.machine ?? "任意电脑"} · ${d.cwd}`).join("　")
-                      : p.brief || "未登记配置"}
-                  </span>
-                  <span className="role-meta">
-                    <span>{p.dirs.length} 个配置</span>
-                    <span>{p.tasks} 个任务</span>
-                  </span>
-                  {dirty && <span className="badge">未保存</span>}
-                  <span className="role-toggle">{expanded ? "收起" : "编辑"}</span>
-                </button>
-                {expanded && (
-                  <>
-                    <Fields form={form} machines={machines} busy={busy}
-                      onChange={(patch) => setForms((m) => ({ ...m, [String(p.id)]: { ...(m[String(p.id)] ?? toForm(p)), ...patch } }))} />
-                    <Brief api={api} projectId={p.id} />
-                    <div className="btns">
-                      <button className="primary" disabled={busy || !dirty} onClick={() => void run(() => api.updateProject(p.id, toInput(form)), "项目已保存")}>保存</button>
-                      <button className="ghost" disabled={busy} onClick={() => void run(async () => { await api.deleteProject(p.id); setOpen(null); }, "项目已删除")}>删除</button>
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
-          {adding ? (
-            <div className="profile-card">
-              <div className="profile-head"><strong>新建项目</strong></div>
-              <Fields form={draft} machines={machines} busy={busy} onChange={(patch) => setDraft((f) => ({ ...f, ...patch }))} />
-              <div className="btns">
-                <button className="primary" disabled={busy || !draft.name.trim()} onClick={() => void run(async () => {
-                  const created = await api.createProject(toInput(draft) as ProjectInput & { name: string });
-                  setDraft(BLANK);
-                  setAdding(false);
-                  setOpen(created.id);
-                }, "项目已创建")}>创建</button>
-                <button className="ghost" onClick={() => { setAdding(false); setDraft(BLANK); }}>取消</button>
-              </div>
+          {list.length === 0 && <p className="hint">还没有项目。建一个之后，派活时选项目就能带上它的约定和对应目录。</p>}
+          {list.map((p) => (
+            <div key={p.id} className="profile-card">
+              <button type="button" className="role-head" onClick={() => onEdit(p)}>
+                <strong>{p.name}</strong>
+                <span className="dim role-title">
+                  {p.dirs.length
+                    ? p.dirs.map(d => `${d.machine ?? "任意电脑"} · ${d.cwd}`).join("　")
+                    : p.brief || "未登记配置"}
+                </span>
+                <span className="role-meta">
+                  <span>{p.dirs.length} 个配置</span>
+                  <span>{p.tasks} 个任务</span>
+                </span>
+                <span className="role-toggle">编辑</span>
+              </button>
             </div>
-          ) : (
-            <button className="ghost" onClick={() => setAdding(true)}>＋ 新建项目</button>
-          )}
+          ))}
+          <button className="ghost" onClick={() => onEdit(null)}>＋ 新建项目</button>
         </>
       )}
-      {err && <p className="form-error" role="alert">{err}</p>}
-      {msg && <p className="msg">{msg}</p>}
     </section>
   );
 }

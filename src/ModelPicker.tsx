@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
+import { autoModelRange, modelHints } from "./lib/models";
 import {
   CAN_LIST_MODELS,
   loadAgentModels,
-  modelHints,
   type ModelList,
   type ModelOption,
-} from "./lib/models";
+} from "./lib/agent-models";
 import { isDesktop } from "./lib/platform";
 
 const CUSTOM = "__custom__";
@@ -17,8 +17,10 @@ function optionText(o: ModelOption): string {
 }
 
 /**
- * 模型下拉：能读到清单的执行端（CodeBuddy / ZCode）自动列出来，读不到就退回手填。
- * - 「默认（留空）」= 交给执行端自己决定，换版本也不用回来改；
+ * 模型下拉：能读到清单的执行端（CodeBuddy / ZCode）自动列出来，其余用常用 id；
+ * 读不到就只剩「默认」和手填。
+ * - 「默认（留空）」= 不指定模型：项目经理能代挑的工具（Claude / Codex）派活时
+ *   按任务复杂度挑一档，其它工具就是执行端自己的默认；
  * - 清单外的值（历史数据、助手给的）仍会作为一项出现，不会被吞掉；
  * - 「其他…」留给清单还没收录的模型，手填完整 id。
  * 换执行工具时父组件会重置模型，记得给本组件加 key={agent} 让自定义态一并复位。
@@ -97,7 +99,9 @@ export default function ModelPicker({
           if (e.target.value === CUSTOM) { setCustom(true); return; }
           onChange(e.target.value);
         }}>
-        <option value="">默认（留空 = 执行端自己决定）</option>
+        <option value="">
+          {autoModelRange(agent).length ? "默认（留空 = 派活时由项目经理挑）" : "默认（留空 = 执行端自己决定）"}
+        </option>
         {options.map(o => (
           <option key={o.id} value={o.id} title={o.hint}>
             {optionText(o)}

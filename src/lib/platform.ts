@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ModelList } from "./models";
+import type { ModelList } from "./agent-models";
 
 export type Config = {
   serverUrl: string;

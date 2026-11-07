@@ -24,6 +24,9 @@ export type Draft = {
   model: string | null
   context: string
   tools: string[]
+  // 项目经理是组织上的安排，agent 不猜，留给人在草稿卡上勾；确认时一起落库
+  manager?: boolean
+  managerProjects?: number[]
   /** agent 自己交代的缺口或假设，不落库，只给人看 */
   note: string
 }
@@ -272,7 +275,7 @@ export async function markDraft(db: DB, user: number, id: number, status: 'creat
 export function draftPatch(raw: unknown): Record<string, unknown> {
   const b = object(raw ?? {})
   const out: Record<string, unknown> = {}
-  for (const key of ['name', 'title', 'agent', 'model', 'context', 'tools'] as const) {
+  for (const key of ['name', 'title', 'agent', 'model', 'context', 'tools', 'manager', 'managerProjects'] as const) {
     if (key in b) out[key] = b[key]
   }
   return out

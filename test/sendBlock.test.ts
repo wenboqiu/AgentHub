@@ -47,6 +47,7 @@ test('非 running 状态、以及其它阻塞原因不受影响', () => {
   assert.equal(sendBlockReason({ session: session({ state: 'done' }), agents: ['pc'], running: true }, now), '这个会话正在运行');
   // 电脑端不在线
   assert.equal(sendBlockReason({ session: session(), agents: [], running: false }, now), '电脑端不在线');
-  // 只监听的 agent 永远不给发（WorkBuddy 已支持派活，现在只剩豆包只读）
+  // 只监听的 agent 永远不给发：豆包只有状态上报，WorkBuddy 只有桌面端会话（内置 lite 版登不了录）
   assert.match(String(sendBlockReason({ session: session({ agent: 'doubao', id: 'doubao:x' }), agents: ['pc'], running: false }, now)), /状态监听/);
+  assert.match(String(sendBlockReason({ session: session({ agent: 'workbuddy', id: 'workbuddy:x' }), agents: ['pc'], running: false }, now)), /状态监听/);
 });
