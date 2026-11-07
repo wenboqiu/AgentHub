@@ -157,6 +157,16 @@ export function sessionKeyOf(sessionId: string): string {
   return sessionId.includes(':') ? sessionId.slice(sessionId.indexOf(':') + 1) : ''
 }
 
+/**
+ * 上一轮是不是因为「原会话在本机找不到了」而失败：transcript 被清掉、目录变了、换机回来，
+ * `--resume` 都会直接报这个。这种情况下次派发不能再续同一个会话，否则每次重派都撞同一堵墙。
+ */
+export function missingSessionError(msg: string): boolean {
+  const low = (msg ?? '').toLowerCase()
+  if (/no conversation found|session not found|could not find (session|conversation)/.test(low)) return true
+  return low.includes('会话') && (low.includes('找不到') || low.includes('不存在'))
+}
+
 /** 目录比较前先归一化：反斜杠、末尾斜杠、Windows 盘符大小写，否则同一目录会被误判成两个 */
 export function normalizeCwd(p: string): string {
   const p2 = (p ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '')

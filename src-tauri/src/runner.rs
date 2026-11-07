@@ -1292,8 +1292,6 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
     let mut approvals = Approvals::default();
     let mut finish: Option<Finish> = None;
     let mut session_reported = mode == Mode::Resume;
-    // 这一轮有没有真的产出正文：没有的话，续不上会话时整单重跑不会重复输出
-    let mut saw_text = false;
     while finish.is_none() {
         if start.elapsed() > RUN_TIMEOUT {
             run.message("system", "运行超过 2 小时，已强制停止");
@@ -1321,7 +1319,6 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
                 let parsed = parse_claude_line(&l);
                 let texts: Vec<_> = parsed.iter().filter_map(|m| if let ClaudeMsg::Text(t) = m { Some(t.as_str()) } else { None }).collect();
                 if !texts.is_empty() {
-                    saw_text = true;
                     let v: Value = serde_json::from_str(&l).unwrap_or(Value::Null);
                     let source = v["uuid"].as_str().filter(|s| valid_key(s));
                     let point = if matches!(v["message"]["stop_reason"].as_str(), Some("end_turn" | "stop_sequence")) { source } else { None };
@@ -1376,18 +1373,6 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
         }
     }
     let f = finish.unwrap();
-    // 续的会话在本机已经找不到了（transcript 被清、换过机器、目录不对）：不能就此卡死——
-    // 服务端认的「上次那个会话」已经废了，每次重派都会再续到它身上。直接退回新会话把这单跑完，
-    // 新的 session id 由 Fresh 那一轮重新上报，界面上就不会再挂着一个永远失败的会话。
-    if mode == Mode::Resume && !saw_text {
-        if let Finish::Failed(msg) = &f {
-            let low = msg.to_lowercase();
-            if low.contains("no conversation found") || (low.contains("session") && low.contains("not found")) {
-                run.message("system", "上次的会话在本机找不到了，改为新开一个对话重跑");
-                return run_claude(run, Mode::Fresh, "", cwd, text, images, "", model, instructions);
-            }
-        }
-    }
     let exited = matches!(&f, Finish::Failed(m) if m.starts_with("claude 进程异常退出"));
     let kill_now = matches!(f, Finish::Stopped | Finish::Silent);
     if kill_now {

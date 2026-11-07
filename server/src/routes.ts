@@ -90,6 +90,7 @@ import {
   listProposals,
   markProposal,
   markRefineRun,
+  missingSessionError,
   planDelivery,
   proposalPatch,
   recordRefine,
@@ -462,16 +463,54 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   /**
    * 这个任务上次派发落在哪个会话上。只认「本任务自己的 run 产生的真实会话」：
    * 手动关联进来的来源会话不算——那不是这个任务跑出来的对话。第一次派发返回 null。
+   * 连上一轮的状态一起带回来：上一轮就续不上（会话在本机已经没了）时不能再续它。
    */
-  async function lastDispatchSession(userId: number, taskId: number): Promise<Pick<Session, 'id' | 'agent' | 'machine' | 'cwd' | 'state'> | null> {
+  async function lastDispatchSession(userId: number, taskId: number): Promise<(Pick<Session, 'id' | 'agent' | 'machine' | 'cwd' | 'state'> & { status: string; error: string }) | null> {
     const r = await pool.query(
-      `SELECT s.id, s.agent, s.machine, s.cwd, s.state
+      `SELECT s.id, s.agent, s.machine, s.cwd, s.state, r.status, r.error
          FROM runs r JOIN sessions s ON s.user_id = r.user_id AND s.id = r.session_id
         WHERE r.user_id = $1 AND r.task_id = $2 AND r.session_id IS NOT NULL AND r.session_id NOT LIKE $3
         ORDER BY r.created_at DESC LIMIT 1`,
       [userId, taskId, `%${PENDING}%`],
     )
     return r.rows[0] ?? null
+  }
+
+  /**
+   * 接着这个任务上次派发的会话继续：不新建会话，直接在原对话里追加这一轮。
+   * 时间轴上还是同一个对话，不会又冒出一个同名的新会话。
+   * 与 startSession 的区别只在「落到哪条会话上」：这里 sessionId 是已经在用的真实会话，
+   * 不需要 pending 会话等待执行器回报 id。
+   */
+  async function resumeTaskSession(userId: number, task: Task, session: Pick<Session, 'id' | 'agent' | 'machine' | 'cwd'>, text: string, role: { model: string | null; instructions: string }) {
+    // 同一个会话同时只能有一个运行：在跑时再续就是双写
+    if (await activeRun(pool, userId, session.id)) throw new TaskError('这个会话还有一个运行没结束，等它跑完再继续', 409)
+    const runId = randomUUID()
+    const db = await pool.connect()
+    let run: Run, message: Message, saved: Task
+    try {
+      await db.query('BEGIN')
+      run = await createRun(db, userId, runId, session.id, session.machine, task.id)
+      message = await insertMessage(db, userId, session.id, runId, 'user', text)
+      await linkSession(db, userId, task.id, session.id)
+      saved = await saveTask(db, userId, { status: 'doing' }, task.id)
+      await db.query('COMMIT')
+    } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
+    pushRun(userId, run); pushMessage(userId, message); pushTask(userId, saved)
+    const sent = sendExecutor(userId, session.machine, {
+      type: 'run.start', runId, sessionId: session.id, agent: session.agent,
+      sessionKey: sessionKeyOf(session.id), cwd: session.cwd, text, mode: 'resume',
+      ...(role.model ? { model: role.model } : {}),
+      ...(role.instructions ? { instructions: role.instructions } : {}),
+    })
+    if (!sent) {
+      const failed = await setRunStatus(pool, userId, runId, 'failed', '电脑端不在线')
+      if (failed) pushRun(userId, failed)
+      const reverted = await saveTask(pool, userId, { status: 'todo' }, task.id).catch(() => undefined)
+      if (reverted) pushTask(userId, reverted)
+      throw new TaskError('电脑端不在线', 409)
+    }
+    return { runId, sessionId: session.id, task: saved }
   }
 
   // 派活编排：手动「开始」与项目经理自动派发共用这一条路径。
@@ -516,14 +555,21 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 每次都 fresh 会在本机多开一个同名对话，时间轴上看就像同一件事重复了好几遍。
     // 只在本该从零开跑时考虑；人明确要求新会话（delivery=fresh）就照办。
     // 没有目录就不续：执行器会落到 AgentHub 默认工作目录，claude 按目录存会话，肯定找不到原对话。
+    let resumeFrom: Pick<Session, 'id' | 'agent' | 'machine' | 'cwd' | 'state'> | null = null
     if (mode === 'fresh' && b.delivery !== 'fresh' && cwd) {
       const prev = await lastDispatchSession(userId, task.id)
-      if (prev) {
+      // 上一轮就续不上它（会话在本机已经没了）：别再撞同一堵墙，直接新开一个——
+      // 新会话会成为「上次派发的会话」，之后的派发再接着它继续。
+      if (prev && !(prev.status === 'failed' && missingSessionError(prev.error))) {
         const plan = planDelivery('resume', forkInfo(prev), { agent: agent ?? '', machine, cwd })
         mode = plan.mode
         deliveryReason = plan.reason
-        if (mode === 'resume') sessionKey = sessionKeyOf(prev.id)
-        if (!sessionKey) mode = 'fresh'
+        if (mode === 'resume') {
+          // 会话键是 agent 自己那半截 id：入队时也靠它找回这条会话
+          sessionKey = sessionKeyOf(prev.id)
+          if (sessionKey) resumeFrom = prev
+          else mode = 'fresh'
+        }
       }
     }
     // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
@@ -572,10 +618,15 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
     // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
     if (await dequeueDispatch(pool, userId, task.id)) pushTask(userId, await getTask(pool, userId, task.id))
-    const res = await startSession(userId, { agent, machine, cwd }, task.title, text, mode, sessionKey, task.id, undefined, dispatch)
+    // 续写原会话：没有新会话要建，直接进同一个对话。执行器太旧的判断按「这台电脑」来。
+    const resumeTarget = mode === 'resume' ? resumeFrom : null
+    const res = resumeTarget
+      ? await resumeTaskSession(userId, task, resumeTarget, text, dispatch)
+      : await startSession(userId, { agent, machine, cwd }, task.title, text, mode, sessionKey, task.id, undefined, dispatch)
     await settle()
     // 执行器太旧：模型和上下文会随 run.start 发过去但被忽略，得让用户知道角色没真正生效
-    const degraded = !executors.get(execKey(userId, machine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
+    const targetMachine = resumeTarget ? resumeTarget.machine : machine
+    const degraded = !executors.get(execKey(userId, targetMachine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
     if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
     const delivery = { mode, reason: deliveryReason }
     return degraded ? { ...res, queued: false, roleDegraded: true, delivery } : { ...res, queued: false, delivery }
@@ -587,6 +638,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!executors.has(execKey(userId, machine))) return
       // 入队时定的「接着原会话」到真投递可能隔了几小时：原会话可能又在跑或被删了，投递前重新判定
       let mode = item.mode as Delivery, sessionKey = item.sessionKey as string
+      let resumeSrc: Session | null = null
       if (mode === 'fork' || mode === 'resume') {
         const want = mode
         const src = sessionKey ? await getSession(pool, userId, `${item.agent}:${sessionKey}`).catch(() => null) : null
@@ -595,11 +647,16 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
           mode = 'fresh'; sessionKey = ''
           app.log.warn({ taskId: item.taskId, reason: plan.reason }, '排队投递复核：续不上原会话，退回新会话')
           await logAuto(pool, userId, item.taskId, 'dispatched', null, `排队复核退回新会话：${plan.reason}`)
-        } else if (src) sessionKey = sessionKeyOf(src.id)
+        } else if (src) {
+          sessionKey = sessionKeyOf(src.id)
+          if (mode === 'resume') resumeSrc = src
+        }
       }
       let ok = false
       try {
-        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
+        // 续写原会话不建新会话；其余方式照旧新建一个（fork / fresh）
+        if (resumeSrc) await resumeTaskSession(userId, await getTask(pool, userId, item.taskId), resumeSrc, item.text, { model: item.model, instructions: item.instructions })
+        else await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
         ok = true
       } catch (e) {
         const attempts = await bumpAttempts(pool, userId, item.taskId)

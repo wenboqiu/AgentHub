@@ -134,12 +134,16 @@ describe('目标与任务', () => {
     await call('PATCH',`/tasks/${t.id}`,{status:'doing'})
     ex.ws.send(JSON.stringify({type:'run.status',runId:r.runId,status:'done'}))
     await waitAsync(async()=>(await get(t.id)).status==='review')
-    const r2=(await call('POST',`/tasks/${t.id}/start`,{})).body,key2=randomUUID()
+    const r2=(await call('POST',`/tasks/${t.id}/start`,{})).body
+    // 第二次派发：同一任务默认接着上次派发的会话继续，不再新开一个对话（不产生 pending 会话）
+    assert.equal(r2.sessionId,sid)
+    assert.ok((await get(t.id)).sessionIds.includes(sid))
     ex.ws.send(JSON.stringify({type:'run.status',runId:r2.runId,status:'done'}))
-    ex.ws.send(JSON.stringify({type:'run.session',runId:r2.runId,sessionKey:key2}))
-    await waitAsync(async()=>(await get(t.id)).status==='review'&&(await get(t.id)).sessionIds.includes(`codex:${key2}`))
-    const r3=(await call('POST',`/tasks/${t.id}/start`,{})).body
+    await waitAsync(async()=>(await get(t.id)).status==='review')
+    // 显式要求新会话：仍走「pending → run.session 改名」这条老路径
+    const r3=(await call('POST',`/tasks/${t.id}/start`,{delivery:'fresh'})).body,key3=randomUUID()
     ex.ws.send(JSON.stringify({type:'run.status',runId:r3.runId,status:'failed',error:'测试失败'}))
+    ex.ws.send(JSON.stringify({type:'run.session',runId:r3.runId,sessionKey:key3}))
     await waitAsync(async()=>(await call('GET',`/sessions/${r3.sessionId}/messages`)).body.run.status==='failed')
     assert.equal((await get(t.id)).status,'doing')
     ex.ws.close();await waitAsync(async()=>!(await call('GET','/control/status')).body.agents.length)
