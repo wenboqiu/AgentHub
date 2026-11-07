@@ -518,7 +518,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       <main className="chat">
         {syncing && <p className="hint" role="status">正在同步电脑上的记录…</p>}
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。点右上角的刷新按钮从电脑上拉取 ${agentName(session.agent)} 的对话记录；继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
+        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。${session.machine} 上报状态时会把 ${agentName(session.agent)} 的对话正文一起带上来，不用手动同步；一直空就说明那台电脑还没连上。继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>

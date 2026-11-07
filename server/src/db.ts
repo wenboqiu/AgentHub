@@ -34,6 +34,12 @@ export type EventIn = {
   quiet?: boolean
   /** 只听不聊的 agent（WorkBuddy）从 transcript 报过来的活动桶，落 session_activity 供日历画跨度 */
   buckets?: { at: string; count: number }[]
+  /**
+   * 只读监听类（WorkBuddy）随事件顺路上报的正文。
+   * 正文只存在那台电脑的 transcript 里，而拉历史要走执行器通道——没开「允许手机远程执行」
+   * 的电脑永远拉不到；跟着状态事件上来就与通道无关。
+   */
+  messages?: { role: 'user' | 'assistant'; text: string; at?: string }[]
 }
 
 export type Session = {
@@ -760,10 +766,97 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
   return listMessages(pool, userId, sessionId, KEEP_MESSAGES)
 }
 
+/**
+ * 随事件上来的原生正文（目前只有 WorkBuddy）：按 (role, 正文, 时间) 去重后插入。
+ *
+ * 时间是原生日志带的，重发同一条消息时间不变，所以能认出来；用「秒」做粒度是为了容忍
+ * 快照替换时为排序把同刻消息错开的几毫秒。正文相同但时间不同的（「继续」说了两遍）
+ * 照常各自入库。
+ * 返回新插入的条数，0 表示这条事件带的内容库里已经有了。
+ */
+export async function appendEventMessages(
+  pool: pg.Pool,
+  userId: number,
+  sessionId: string,
+  items: { role: string; text: string; at?: string }[],
+  fallbackAt: Date,
+): Promise<number> {
+  const incoming = items
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({ role: m.role as MessageRole, text: cleanText(m.text ?? '', 4000), at: m.at && !Number.isNaN(Date.parse(m.at)) ? Date.parse(m.at) : null }))
+    .filter(m => m.text.trim())
+  if (!incoming.length) return 0
+
+  // 参照库里最近的消息（消息表本身也只留这么多条）：重发同一段正文不会变成重复消息
+  const existing = await pool.query<{ role: string; text: string; created_at: Date }>(
+    `SELECT role, text, created_at FROM messages WHERE user_id = $1 AND session_id = $2 ORDER BY created_at DESC, id DESC LIMIT $3`,
+    [userId, sessionId, KEEP_MESSAGES],
+  )
+  const seen = new Set<string>()
+  for (const r of existing.rows) seen.add(`${r.role}|${r.text}|${Math.round(r.created_at.getTime() / 1000)}`)
+
+  const now = Date.now()
+  const fresh: { role: MessageRole; text: string; at: Date }[] = []
+  for (const m of incoming) {
+    // 原生日志的时间是准的；但不能排到未来（机器时钟跑快时会把日历画到明天）
+    const at = new Date(Math.min(m.at ?? fallbackAt.getTime(), now))
+    const sec = Math.round(at.getTime() / 1000)
+    let hit: string | null = null
+    for (const d of [0, -1, 1]) {
+      const k = `${m.role}|${m.text}|${sec + d}`
+      if (seen.has(k)) {
+        hit = k
+        break
+      }
+    }
+    if (hit) {
+      // 用掉了就不再参与匹配，同一条事件里的重复行也只入一条
+      seen.delete(hit)
+      continue
+    }
+    seen.add(`${m.role}|${m.text}|${sec}`)
+    fresh.push({ role: m.role, text: m.text, at })
+  }
+  if (!fresh.length) return 0
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    for (const m of fresh) {
+      await client.query(
+        `INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
+         VALUES ($1, $2, null, $3, $4, $5::timestamptz)`,
+        [userId, sessionId, m.role, m.text, m.at],
+      )
+    }
+    // 活动计数按插入时间累加（日历的跨度靠它）；同一桶里合并成一行
+    const buckets = new Map<number, number>()
+    for (const m of fresh) {
+      const b = Math.floor(m.at.getTime() / 300_000) * 300_000
+      buckets.set(b, (buckets.get(b) ?? 0) + 1)
+    }
+    for (const [b, count] of buckets) {
+      await client.query(
+        `INSERT INTO session_activity (user_id, session_id, bucket, count)
+         VALUES ($1, $2, to_timestamp($3::bigint / 1000.0), $4)
+         ON CONFLICT (user_id, session_id, bucket) DO UPDATE SET count = session_activity.count + excluded.count`,
+        [userId, sessionId, b, count],
+      )
+    }
+    await client.query('COMMIT')
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+  await trimMessages(pool, userId, sessionId)
+  return fresh.length
+}
+
 export function nativeKey(value: unknown): string | null {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null
 }
-
 export async function getMessage(pool: pg.Pool,userId:number,sessionId:string,id:number):Promise<Message|null> {
   const r=await pool.query<MessageRow>('SELECT m.*,f.rating FROM messages m LEFT JOIN message_feedback f ON f.user_id=m.user_id AND f.session_id=m.session_id AND f.source_id=m.source_id WHERE m.user_id=$1 AND m.session_id=$2 AND m.id=$3',[userId,sessionId,id])
   return r.rows[0] ? toMessage(r.rows[0]) : null

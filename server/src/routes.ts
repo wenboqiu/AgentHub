@@ -10,6 +10,7 @@ import {
   ackSession,
   activeRun,
   activeTaskRun,
+  appendEventMessages,
   applyEvent,
   cleanText,
   closeTaskRuns,
@@ -175,6 +176,27 @@ function parseEvent(raw: unknown): EventIn | null {
       buckets.push({ at: o.at, count: typeof o.count === 'number' && Number.isInteger(o.count) && o.count > 0 && o.count <= 1000 ? o.count : 1 })
     }
   }
+  // 随事件上来的正文（可选，只读监听类用）：坏的条目丢掉，别让整条事件作废——
+  // 状态比正文重要，正文丢了下一轮还能补
+  let messages: { role: 'user' | 'assistant'; text: string; at?: string }[] | undefined
+  if (e.messages !== undefined) {
+    if (!Array.isArray(e.messages) || e.messages.length > 60) return null
+    const kept: { role: 'user' | 'assistant'; text: string; at?: string }[] = []
+    for (const m of e.messages) {
+      if (!m || typeof m !== 'object') continue
+      const o = m as Record<string, unknown>
+      if (o.role !== 'user' && o.role !== 'assistant') continue
+      if (typeof o.text !== 'string') continue
+      const text = clean(o.text)
+      if (!text.trim()) continue
+      kept.push({
+        role: o.role,
+        text,
+        at: typeof o.at === 'string' && !Number.isNaN(Date.parse(o.at)) ? o.at : undefined,
+      })
+    }
+    messages = kept.length ? kept : undefined
+  }
   return {
     agent: e.agent as EventIn['agent'],
     sessionId: clean(e.sessionId),
@@ -189,6 +211,7 @@ function parseEvent(raw: unknown): EventIn | null {
     expectedAt: e.expectedAt as string | undefined,
     readAt: e.readAt as string | undefined,
     buckets,
+    messages,
   }
 }
 
@@ -819,6 +842,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
             ? await evaluateNotify(pool, req.userId, { kind:'session', agent:r.session.agent, state:r.session.state as 'done'|'aborted'|'waiting', sessionId:r.session.id })
             : false
           pushSession(req.userId,r.session,notify)
+          // 正文跟着事件上来（WorkBuddy）：直接落库，不依赖「电脑端在线」。
+          // 插进去了才通知界面重载，重复上报不发多余广播。
+          if (ev.messages?.length) {
+            const added = await appendEventMessages(pool, req.userId, r.session.id, ev.messages, new Date(ev.at))
+              .catch(e => { app.log.error(e, '落库会话正文失败'); return 0 })
+            if (added) broadcast(req.userId, { type: 'session.history', sessionId: r.session.id })
+          }
           await syncTask(req.userId,r.session.id,r.session.state)
           // 会话跑完：只有挂了未完成任务的会话才攒处理意见（generateProposal 里把关），不挂任务的不产单。
           // 补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，否则「问角色」也会产出一条待办，

@@ -192,6 +192,7 @@ impl SessionState {
             pid: None,
             quiet,
             buckets,
+           messages: Vec::new(),
         }
     }
 }

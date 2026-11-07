@@ -89,7 +89,8 @@ impl Sessions {
             pid: None,
             quiet: quiet || metadata_only,
             buckets: Vec::new(),
-        };
+           messages: Vec::new(),
+    };
         self.latest.insert(id.into(), event.clone());
         Some(event)
     }

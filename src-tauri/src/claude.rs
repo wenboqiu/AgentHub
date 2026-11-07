@@ -94,6 +94,7 @@ pub fn hook_to_event(v: &Value, pid: Option<u32>) -> Option<Event> {
         pid: pid.filter(|p| *p > 0),
         quiet: false,
         buckets: Vec::new(),
+       messages: Vec::new(),
     };
     match name {
         "SessionStart" => ev.state = "idle".into(),

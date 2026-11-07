@@ -154,6 +154,7 @@ impl FileState {
             pid: None,
             quiet,
             buckets: Vec::new(),
+           messages: Vec::new(),
         }
     }
 }

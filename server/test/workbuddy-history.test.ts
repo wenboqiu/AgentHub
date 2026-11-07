@@ -82,11 +82,14 @@ describe('WorkBuddy 正文先同步再攒任务单', () => {
 
     const key = uniq('wb')
     const id = `workbuddy:${key}`
+    // 现在只有挂了未完成任务的会话才攒任务单：先把会话关联到一个任务上
+    const task = (await call('POST', '/tasks', { title: '补完农场场景', agent: 'workbuddy', machine })).body.task
     await call('POST', '/events', {
       events: [{ agent: 'workbuddy', sessionId: key, machine, cwd: 'D:\\Work2\\Demo', state: 'running', title: '整理农场场景', at: new Date(Date.now() - 60_000).toISOString() }],
     })
     // 库里只留下上一轮：这一轮的正文还在电脑上
     await insertMessage(pool, USER_ID, id, null, 'assistant', '上一轮的结论：先把麦田补齐，其它以后再说。')
+    await call('POST', `/tasks/${task.id}/sessions`, { sessionId: id })
 
     const doneAt = new Date().toISOString()
     await call('POST', '/events', {
@@ -118,5 +121,44 @@ describe('WorkBuddy 正文先同步再攒任务单', () => {
 
     // 任务单标题摘自最新回复里那句「下一步」，不是上一轮
     assert.match(proposal.proposal.title, /南瓜菜园/)
+  })
+
+  it('正文随事件上送：电脑端不在线也能落库，重复上报不产生重复消息', async () => {
+    // 故意不连执行器：这条链路不能依赖「电脑端在线」
+    const machine = uniq('offline')
+    const key = uniq('wb')
+    const id = `workbuddy:${key}`
+    const at = (s: number) => new Date(Date.now() - 60_000 + s * 1000).toISOString()
+    const ev = (state: string, s: number, messages: { role: string; text: string; at: string }[]) =>
+      call('POST', '/events', {
+        events: [{ agent: 'workbuddy', sessionId: key, machine, cwd: 'D:\\Work2\\Demo', state, at: at(s), title: '补场景', messages }],
+      })
+
+    await ev('running', 0, [
+      { role: 'user', text: '把农场场景补完', at: at(0) },
+      { role: 'assistant', text: '先看现在的场景', at: at(1) },
+    ])
+    // 第二轮把上一轮的正文又带了一遍（每轮都会重发最近几条），不能变成重复消息
+    await ev('done', 3, [
+      { role: 'user', text: '把农场场景补完', at: at(0) },
+      { role: 'assistant', text: '先看现在的场景', at: at(1) },
+      { role: 'assistant', text: '麦田和石砖烤炉都补齐了', at: at(3) },
+    ])
+
+    const rows = await listMessages(pool, USER_ID, id, 200)
+    assert.deepEqual(rows.map(r => [r.role, r.text]), [
+      ['user', '把农场场景补完'],
+      ['assistant', '先看现在的场景'],
+      ['assistant', '麦田和石砖烤炉都补齐了'],
+    ])
+
+    // 重复的文本是真实存在的（「继续」说了两遍）：时间不同就各自入库
+    await ev('done', 4, [
+      { role: 'assistant', text: '麦田和石砖烤炉都补齐了', at: at(3) },
+      { role: 'user', text: '继续', at: at(4) },
+    ])
+    await ev('done', 30, [{ role: 'user', text: '继续', at: at(30) }])
+    const again = await listMessages(pool, USER_ID, id, 200)
+    assert.deepEqual(again.map(r => r.text).slice(-2), ['继续', '继续'])
   })
 })

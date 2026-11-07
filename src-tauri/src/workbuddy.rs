@@ -15,7 +15,7 @@ use crate::{
     activity::buckets_of,
     claude::{home_dir, now_iso, truncate_chars},
     codex::complete_prefix_len,
-    forwarder::{Event, Forwarder},
+    forwarder::{Event, EventMessage, Forwarder},
 };
 use chrono::TimeZone;
 use serde_json::Value;
@@ -40,6 +40,12 @@ const QUIET_MS: i64 = 20_000;
 /// （下一行几乎都是 reasoning，思考期间文件完全静默）；60s 时「提前判完成」
 /// 占所有完成判定的 ~31%，提到 3 分钟后降到 ~5%。
 const TOOL_QUIET_MS: i64 = 180_000;
+/// 随手带上来的正文：单条文本上限（与服务端 cleanText 一致）
+const MSG_TEXT_MAX: usize = 4000;
+/// 一轮里最多带多少条正文（长回合别把事件撑爆，服务端也会裁剪）
+const TURN_MSGS_MAX: usize = 30;
+/// 启动登记时补的历史正文条数：老会话早先没同步过，库里是空的
+const REGISTER_MSGS: usize = 24;
 
 /// transcript 尾部结构：决定「安静下来」是否可以判定结束
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -79,6 +85,9 @@ pub struct FileState {
     user_turn: bool,
     /// 尚未随事件上报的活动时间戳（ms），发事件时聚合成 5 分钟桶带走
     pending: Vec<i64>,
+    /// 还没随事件上报的正文：正文只在本机 transcript 里，拉历史又要走执行器通道，
+    /// 所以顺路跟状态事件一起上送（服务端按 role+时间+正文去重）
+    msgs: Vec<EventMessage>,
 }
 
 fn iso(ms: i64) -> String {
@@ -229,9 +238,10 @@ impl FileState {
                         self.title = Some(truncate_chars(t, 40));
                     }
                 }
-                if real_input.is_some() {
+                if let Some(t) = &real_input {
                     self.open_ids.clear();
                     self.open_unknown = 0;
+                    self.record("user", t, v);
                 }
                 self.user_turn = true;
                 self.state = "running".into();
@@ -248,6 +258,7 @@ impl FileState {
                             if !flat.is_empty() {
                                 self.summary = Some(truncate_chars(&flat, 200));
                             }
+                            self.record("assistant", &t, v);
                         }
                     }
                     "incomplete" => self.tail = Tail::Incomplete,
@@ -255,6 +266,20 @@ impl FileState {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// 收一条可见正文（注入块已被 user_text / text_of 过滤掉）；带上原生日志时间戳
+    fn record(&mut self, role: &str, text: &str, v: &Value) {
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+        let at = v.get("timestamp").and_then(Value::as_i64).map(iso);
+        self.msgs.push(EventMessage { role: role.into(), text: truncate_chars(t, MSG_TEXT_MAX), at });
+        if self.msgs.len() > TURN_MSGS_MAX {
+            let cut = self.msgs.len() - TURN_MSGS_MAX;
+            self.msgs.drain(..cut);
         }
     }
 
@@ -322,6 +347,7 @@ impl FileState {
         self.emitted = Some((state.to_string(), self.last_at.clone()));
         let buckets = buckets_of(&self.pending);
         self.pending.clear();
+        let messages = std::mem::take(&mut self.msgs);
         Event {
             agent: "workbuddy".into(),
             session_id: self.session_id.clone().unwrap_or_default(),
@@ -334,6 +360,7 @@ impl FileState {
             pid: None,
             quiet,
             buckets,
+            messages,
         }
     }
 }
@@ -435,6 +462,17 @@ fn scan_buckets(path: &Path, since_ms: i64) -> Vec<i64> {
     out
 }
 
+/// 启动登记时补一份历史正文：这些老会话早先没同步过（那台电脑没开远程执行，拉不到），
+/// 服务端库里是空的；正文只在本机 transcript 里，只能趁这一刻顺路带上去。
+/// 服务端按 (role, 时间, 正文) 去重，重复带上不会变成重复消息。
+fn tail_messages(path: &Path, limit: usize) -> Vec<EventMessage> {
+    let Ok(text) = crate::runner::read_tail(path, 512 * 1024) else { return Vec::new() };
+    crate::message_history::parse("workbuddy", &text, limit)
+        .into_iter()
+        .map(|m| EventMessage { role: m.role, text: truncate_chars(&m.text, MSG_TEXT_MAX), at: m.at })
+        .collect()
+}
+
 pub fn spawn(fwd: Forwarder) {
     std::thread::spawn(move || {
         let Some(root) = home_dir().map(|h| h.join(".workbuddy").join("projects")) else { return };
@@ -492,8 +530,13 @@ pub fn spawn(fwd: Forwarder) {
                 for (path, st) in states.iter_mut() {
                     // feed 阶段的事件被丢弃但 pending 已被清空：登记前重新补齐历史活动桶
                     st.pending.extend(scan_buckets(path, now_ms - BACKFILL_MS));
+                    // 老会话的正文从没进过库：登记这一枪顺路带上最近几条，之后就能在详情页看到
+                    st.msgs = tail_messages(path, REGISTER_MSGS);
                     if let Some(ev) = st.register(now_ms) {
                         fwd.push(ev);
+                    } else {
+                        // 历史会话（跳过登记 / 没有会话 id）不推送，正文也别留着串到后面的事件里
+                        st.msgs.clear();
                     }
                 }
                 initial = false;
@@ -561,6 +604,49 @@ mod tests {
         let mut s = FileState::default();
         s.session_id = Some("abc".into());
         s
+    }
+
+    #[test]
+    fn events_carry_visible_messages() {
+        let mut s = live();
+        // 用户提问的那一枪就带上用户消息（详情页不用等这一轮跑完才有内容）
+        let started = s.feed(&[&msg("user", "completed", "把农场场景补完", T0)], T0);
+        assert_eq!(started[0].messages.len(), 1);
+        assert_eq!(started[0].messages[0].role, "user");
+        assert_eq!(started[0].messages[0].text, "把农场场景补完");
+        assert!(started[0].messages[0].at.as_deref().is_some_and(|t| t.starts_with("2026-")));
+        // 回复完成时只更新摘要，正文攒着等下一条事件
+        assert!(s.feed(&[&msg("assistant", "completed", "好的，先补麦田。", T0 + 5_000)], T0 + 5_000).is_empty());
+        let done = s.confirm_quiet(T0 + 5_000 + QUIET_MS).unwrap();
+        assert_eq!(done.messages.len(), 1);
+        assert_eq!(done.messages[0].role, "assistant");
+        assert_eq!(done.messages[0].text, "好的，先补麦田。");
+        // 上报过的不再重复带
+        assert!(s.msgs.is_empty());
+    }
+
+    #[test]
+    fn injected_blocks_are_not_reported_as_messages() {
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑后台任务", T0)], T0);
+        let evs = s.feed(&[&injected(T0 + 1_000, "task-notification")], T0 + 1_000);
+        // 注入行不代表新一轮，也不该变成消息
+        assert!(evs.iter().all(|e| e.messages.is_empty()));
+        assert!(s.msgs.is_empty());
+    }
+
+    #[test]
+    fn message_text_and_count_are_capped() {
+        let mut s = live();
+        let long = "字".repeat(MSG_TEXT_MAX * 2);
+        let evs = s.feed(&[&msg("user", "completed", &long, T0)], T0);
+        assert_eq!(evs[0].messages[0].text.chars().count(), MSG_TEXT_MAX);
+        for i in 0..(TURN_MSGS_MAX + 5) {
+            s.record("assistant", &format!("第 {i} 条"), &serde_json::json!({"timestamp": T0 + i as i64}));
+        }
+        assert_eq!(s.msgs.len(), TURN_MSGS_MAX);
+        // 留的是最近的
+        assert!(s.msgs.last().unwrap().text.ends_with(&format!("第 {} 条", TURN_MSGS_MAX + 4)));
     }
 
     #[test]
