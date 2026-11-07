@@ -15,6 +15,8 @@ export type QueuedDispatch = {
   text: string
   /** 角色带来的模型与上下文：入队时一并存下，否则电脑上线时角色可能已经被改掉 */
   model: string | null
+  /** 「这个模型是谁定的」：入队那一刻的理由，投递时原样带进执行记录 */
+  modelNote: string
   instructions: string
   /** 开跑方式也要存：人在确认任务单时选了「接着原会话」，排队不该把这件事吞掉；
    *  resume = 接着这个任务上次派发的会话继续，投递前要再复核一次还能不能续 */
@@ -33,6 +35,7 @@ export async function migrateQueue(db: DB) {
     cwd text NOT NULL DEFAULT '',
     text text NOT NULL,
     model text,
+    model_note text NOT NULL DEFAULT '',
     instructions text NOT NULL DEFAULT '',
     mode text NOT NULL DEFAULT 'fresh',
     session_key text NOT NULL DEFAULT '',
@@ -44,6 +47,7 @@ export async function migrateQueue(db: DB) {
   // 老库补列（新库建表时已经带了）
   await db.query(`ALTER TABLE task_dispatch_queue
     ADD COLUMN IF NOT EXISTS model text,
+    ADD COLUMN IF NOT EXISTS model_note text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS instructions text NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS mode text NOT NULL DEFAULT 'fresh',
     ADD COLUMN IF NOT EXISTS session_key text NOT NULL DEFAULT ''`)
@@ -58,6 +62,7 @@ const toQueued = (r: any): QueuedDispatch => ({
   cwd: r.cwd,
   text: r.text,
   model: r.model ?? null,
+  modelNote: r.model_note ?? '',
   instructions: r.instructions ?? '',
   mode: r.mode === 'fork' || r.mode === 'resume' ? r.mode : 'fresh',
   sessionKey: r.session_key ?? '',
@@ -66,16 +71,17 @@ const toQueued = (r: any): QueuedDispatch => ({
 })
 
 // 同一任务重复排队时覆盖旧的那次（用户改了第一条消息或换了电脑，以最新为准）
-export async function enqueueDispatch(db: DB, userId: number, taskId: number, d: { machine: string; agent: string; cwd: string; text: string; model?: string | null; instructions?: string; mode?: 'fork' | 'fresh' | 'resume'; sessionKey?: string }) {
+export async function enqueueDispatch(db: DB, userId: number, taskId: number, d: { machine: string; agent: string; cwd: string; text: string; model?: string | null; modelNote?: string; instructions?: string; mode?: 'fork' | 'fresh' | 'resume'; sessionKey?: string }) {
   await db.query(
-    `INSERT INTO task_dispatch_queue(user_id,task_id,machine,agent,cwd,text,model,instructions,mode,session_key)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    `INSERT INTO task_dispatch_queue(user_id,task_id,machine,agent,cwd,text,model,model_note,instructions,mode,session_key)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
      ON CONFLICT (user_id,task_id) DO UPDATE
        SET machine=excluded.machine,agent=excluded.agent,cwd=excluded.cwd,text=excluded.text,
-           model=excluded.model,instructions=excluded.instructions,mode=excluded.mode,
+           model=excluded.model,model_note=excluded.model_note,
+           instructions=excluded.instructions,mode=excluded.mode,
            session_key=excluded.session_key,
            attempts=0,created_at=now()`,
-    [userId, taskId, d.machine, d.agent, d.cwd, d.text, d.model ?? null, d.instructions ?? '', d.mode ?? 'fresh', d.sessionKey ?? ''],
+    [userId, taskId, d.machine, d.agent, d.cwd, d.text, d.model ?? null, (d.modelNote ?? '').slice(0, 500), d.instructions ?? '', d.mode ?? 'fresh', d.sessionKey ?? ''],
   )
 }
 

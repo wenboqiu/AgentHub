@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Api, type Device, type NotifyKind, type NotifySettings, type Role } from "./lib/api";
+import { Api, type Device, type NotifyKind, type NotifySettings, type Project, type Role } from "./lib/api";
 import Manager from "./Manager";
 import Roles, { RoleEditor } from "./Roles";
-import Projects from "./Projects";
+import Projects, { ProjectEditor } from "./Projects";
 import Icon from "./Icon";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
@@ -74,10 +74,10 @@ type Props = {
 };
 
 /** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
-type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "manager" | "desktop" | "android";
+type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "project" | "manager" | "desktop" | "android";
 
-/** role 页的标题跟着具体角色走，不在这里写死 */
-const PAGE_TITLE: Record<Exclude<Page, "root" | "role">, string> = {
+/** role / project 页的标题跟着那一条的名字走，不在这里写死 */
+const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
   account: "账号与安全",
   notify: "通知规则",
   roles: "角色",
@@ -92,6 +92,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   const [page, setPage] = useState<Page>("root");
   // 角色详情页的对象：{ role: null } = 新建；角色本身放在这里，标题和「保存」都要用
   const [roleEdit, setRoleEdit] = useState<{ role: Role | null } | null>(null);
+  // 项目详情页同理：{ project: null } = 新建
+  const [projectEdit, setProjectEdit] = useState<{ project: Project | null } | null>(null);
   const [form, setForm] = useState<Config>(cfg);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -385,13 +387,21 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   const countText = (n: number | undefined, unit: string) => (counts ? `${n} ${unit}` : "");
 
   // 返回固定在左边（和任务 / 会话详情页一致）：角色详情回角色列表，其它子页面回一级列表，一级列表回主界面
-  const title = page === "root" ? "设置" : page === "role" ? (roleEdit?.role?.name || "新建角色") : PAGE_TITLE[page];
+  const title = page === "root" ? "设置"
+    : page === "role" ? (roleEdit?.role?.name || "新建角色")
+    : page === "project" ? (projectEdit?.project?.name || "新建项目")
+    : PAGE_TITLE[page];
   const leave = () => {
     setMsg("");
     if (page === "root") return onClose();
     if (page === "role") {
       setRoleEdit(null);
       setPage("roles");
+      return;
+    }
+    if (page === "project") {
+      setProjectEdit(null);
+      setPage("projects");
       return;
     }
     setPage("root");
@@ -624,7 +634,29 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
           />
         )}
 
-        {page === "projects" && api && <Projects api={api} />}
+        {page === "projects" && api && (
+          <Projects
+            api={api}
+            onEdit={(project) => {
+              setProjectEdit({ project });
+              setMsg("");
+              setPage("project");
+            }}
+          />
+        )}
+
+        {page === "project" && api && (
+          <ProjectEditor
+            api={api}
+            project={projectEdit?.project ?? null}
+            onBack={leave}
+            onSaved={(p) => setProjectEdit({ project: p })}
+            onDeleted={() => {
+              setProjectEdit(null);
+              setPage("projects");
+            }}
+          />
+        )}
 
         {page === "manager" && api && <Manager api={api} />}
 

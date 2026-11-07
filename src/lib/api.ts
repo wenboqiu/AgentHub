@@ -65,6 +65,9 @@ export type AssistantDraftFields = {
   model: string | null;
   context: string;
   tools: string[];
+  /** 项目经理身份：agent 不会提这种组织上的事，只在草稿卡上由人勾，跟着确认一起落库 */
+  manager?: boolean;
+  managerProjects?: number[];
   /** agent 交代的缺口或假设，只给人看，不落库 */
   note: string;
 };
@@ -102,7 +105,7 @@ export type AssistantState = {
 
 /** 角色记忆：projectId 为空 = 跨项目的通用经验 */
 export type Memory = { id: number; roleId: number; projectId: number | null; content: string; source: "manual" | "review"; weight: number; uses: number; lastUsedAt: string | null; createdAt: string; updatedAt: string };
-export type RunBrief = { status: RunStatus; error: string; updatedAt: string };
+export type RunBrief = { status: RunStatus; error: string; /** 这一轮用的模型，空 = 执行端默认 */ model?: string | null; updatedAt: string };
 /** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
 export type EvidenceKind = "file" | "command" | "test" | "shot" | "log";
 export type Evidence = { kind: EvidenceKind; label: string; value: string; at: string | null };
@@ -249,7 +252,7 @@ export type Session = {
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 /** 一次运行的 token 用量（执行器上报，Claude / Codex 才有；cached 是命中缓存的输入） */
 export type RunUsage = { input: number; output: number; total: number; cached?: number; reasoning?: number; costUsd?: number };
-export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; createdAt: string; updatedAt: string };
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; /** 这一轮用的模型；空 = 执行端默认 */ model?: string | null; /** 谁定的、为什么 */ modelNote?: string; createdAt: string; updatedAt: string };
 /** 执行器实时上报的「正在做什么」：文字是 agent 自己的（思考原文 / 工具调用 / 正在写的正文） */
 export type RunActivity = { runId: string; sessionId: string; kind: "thinking" | "tool" | "text" | "idle"; text: string; at: string };
 /** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
@@ -427,7 +430,7 @@ export class Api {
   thread = (id: number, limit = 200) => this.call<{ events: ThreadEvent[] }>("GET", `/threads/task/${id}?limit=${limit}`);
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
   /** 派活：电脑在线时返回 runId/sessionId；离线时入队，返回 queued 和带 queuedAt 的任务 */
-  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task; /** 电脑端太旧：角色里的模型与上下文被忽略 */ roleDegraded?: boolean}>("POST", `/tasks/${id}/start`, input);
+  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task; /** 电脑端太旧：角色里的模型与上下文被忽略 */ roleDegraded?: boolean; /** 这一轮实际用的模型（角色写的或项目经理挑的），空 = 执行端默认 */ model?: string | null; /** 谁定的、为什么 */ modelNote?: string}>("POST", `/tasks/${id}/start`, input);
   /** 取消排队：不再等那台电脑上线 */
   unqueueTask = async (id: number) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/queue`)).task;
   /** 派活看板：排队中 / 在跑 / 卡住的任务聚合 */

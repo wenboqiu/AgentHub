@@ -787,6 +787,11 @@ header h1 { white-space: nowrap; }
 .assistant-actions { display: flex; gap: 8px; }
 .assistant-actions button { min-height: 36px; padding: 6px 14px; font-size: 13px; }
 .assistant-setup { margin: 12px 0 0; }
+/* 起草工具 + 会在哪台电脑上跑：一行说完，不再让人挑电脑 */
+.assistant-run { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.assistant-run label { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; width: auto; }
+.assistant-run label select { width: auto; min-width: 150px; }
+.assistant-run .dim { font-size: 12px; }
 .assistant-examples { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
 .assistant-examples .chip { min-height: 0; padding: 7px 12px; border-radius: 999px; border: 1px dashed var(--line); background: var(--card); color: var(--dim); font-size: 12px; font-weight: 500; text-align: left; }
 .assistant-msgs { display: flex; flex-direction: column; gap: 16px; margin: 16px 0 4px; padding: 2px; }

@@ -141,6 +141,10 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
   await pool.query("ALTER TABLE runs ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT ''")
   // 一次运行的 token 用量（执行器上报）：{input,output,cached,reasoning,total,costUsd}
   await pool.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS usage jsonb')
+  // 这一轮用的模型：角色写死的、还是项目经理按复杂度挑的，连理由一起记下来——
+  // 模型是花多少钱的关键变量，事后要能回答「这轮为什么用 opus」
+  await pool.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS model text')
+  await pool.query("ALTER TABLE runs ADD COLUMN IF NOT EXISTS model_note text NOT NULL DEFAULT ''")
   await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(user_id, task_id, created_at DESC)')
   await pool.query(`CREATE TABLE IF NOT EXISTS messages (
     id bigserial primary key,
@@ -472,7 +476,7 @@ export type MessageRole = (typeof MESSAGE_ROLES)[number]
 export const KEEP_MESSAGES = 200
 
 export type RunUsage = { input: number; output: number; cached?: number; reasoning?: number; total: number; costUsd?: number }
-export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage: RunUsage | null; createdAt: string; updatedAt: string }
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage: RunUsage | null; /** 这一轮用的模型；空 = 执行端默认 */ model: string | null; /** 谁定的、为什么，给界面和事后复盘看 */ modelNote: string; createdAt: string; updatedAt: string }
 export type MessageMeta = { sourceId?: string; branchPoint?: string }
 export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string }
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired'
@@ -494,7 +498,7 @@ export type Approval = {
   decidedAt: string | null
 }
 
-type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; created_at: Date; updated_at: Date }
+type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; model?: string | null; model_note?: string | null; created_at: Date; updated_at: Date }
 type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; images?: string[] | null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
 type ApprovalRow = {
   id: string
@@ -520,6 +524,8 @@ const toRun = (r: RunRow): Run => ({
   status: r.status,
   error: r.error,
   usage: r.usage ?? null,
+  model: r.model ?? null,
+  modelNote: r.model_note ?? '',
   createdAt: r.created_at.toISOString(),
   updatedAt: r.updated_at.toISOString(),
 })
@@ -554,8 +560,14 @@ export function cleanText(v: string, max: number) {
   return v.replaceAll('\0', '').slice(0, max)
 }
 
-export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string, taskId: number | null = null): Promise<Run> {
-  const r = await pool.query<RunRow>("INSERT INTO runs (id, user_id, session_id, machine, status, task_id, title) SELECT $1,$4,$2,$3,'queued',$5,COALESCE((SELECT title FROM tasks WHERE user_id=$4 AND id=$5),'') RETURNING *", [id, sessionId, machine, userId, taskId])
+/** 这一轮用的模型由调用方算好后一起落库：模型和「谁定的」是事后复盘的关键，不能只发不记 */
+export type RunModel = { model?: string | null; note?: string }
+
+export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string, taskId: number | null = null, model: RunModel = {}): Promise<Run> {
+  const r = await pool.query<RunRow>(
+    "INSERT INTO runs (id, user_id, session_id, machine, status, task_id, title, model, model_note) SELECT $1,$4,$2,$3,'queued',$5,COALESCE((SELECT title FROM tasks WHERE user_id=$4 AND id=$5),''),$6,$7 RETURNING *",
+    [id, sessionId, machine, userId, taskId, model.model ?? null, (model.note ?? '').slice(0, 500)],
+  )
   return toRun(r.rows[0])
 }
 
