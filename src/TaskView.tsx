@@ -10,6 +10,7 @@ import InlineField from "./InlineField";
 import Markdown from "./Markdown";
 import TaskNotes from "./TaskNotes";
 import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
+import { pickMachine } from "./lib/machines";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
@@ -211,23 +212,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const tool = currentRole?.agent ?? task.agent;
   const listenOnly = isListenOnly(tool);
   // 候选电脑：上报过能跑这个工具的，或者压根没上报过（老电脑端，当「不知道」放行）；
-  // 明确报过没装的直接不列——列出来也派不过去，服务端会拒
-  const candidates = machines.length
-    ? machines.map(m => ({ name: m.name, online: m.online, agents: m.agents }))
-    : [...new Set([...agents, ...(task.machine ? [task.machine] : [])])]
-      .map(name => ({ name, online: agents.includes(name), agents: [] as string[] }));
-  const usable = candidates.filter(c => !tool || c.agents.length === 0 || c.agents.includes(tool));
-  // 任务上已经存着的那台始终留在下拉里（哪怕它没装现在的工具），不然界面会静默清空
-  const options = task.machine && !usable.some(c => c.name === task.machine)
-    ? [...usable, ...candidates.filter(c => c.name === task.machine)]
-    : usable;
-  const usableOnline = usable.filter(c => c.online);
-  const machine = task.machine || (usableOnline.length === 1 ? usableOnline[0].name : "");
-  // 电脑离线不再拦住派活：改成入队，等那台电脑上线自动开始
-  const offline = !!machine && !agents.includes(machine);
-  // 选中的这台装没装现在的工具：上报过、且清单里没有它 = 明确没装
-  const machineCaps = candidates.find(c => c.name === machine)?.agents ?? [];
-  const machineLacks = !!tool && machineCaps.length > 0 && !machineCaps.includes(tool);
+  // 明确报过没装的直接不列——列出来也派不过去，服务端会拒。规则见 lib/machines.ts
+  const { usable, options, machine, offline, machineLacks } = pickMachine({ machines, online: agents, stored: task.machine, tool });
   const reason = !tool ? "请选择执行工具"
     : listenOnly ? `${agentName(tool)} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上`
       : !task.cwd ? "请填写项目目录"
