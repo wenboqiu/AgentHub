@@ -33,7 +33,7 @@
 - 豆包 Windows 客户端（实验性，已对照 2.32.6 本机日志）：只读 `%USERPROFILE%\AppData\Local\Doubao\User Data\sdk_storage\log\saman_YYYY.MMDD.N.log` 中的结构化生命周期事件，每 2 秒增量检查。按会话 ID 展示标题、回复中、完成和中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到豆包窗口，不能定位到指定聊天。没有该目录时自动等待，不需要 API Key。
 - WorkBuddy：只读 `%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`（`message` / `function_call` / `ai-title` / `custom-title`），每 2 秒增量检查。展示标题、项目目录、运行中／完成／中断状态，复用桌面／手机提醒和已处理操作；0.9.8 起会话详情支持只读历史同步；「跳转」切到 WorkBuddy 窗口，不能定位到指定会话。
 - ZCode：只读 `%USERPROFILE%\.zcode\v2\sessions\<工作区哈希>\sess_<uuid>.json`（`meta.status` 直接给出 running / completed / error，不用猜），每 2 秒检查文件改动。展示标题、项目目录、运行中／完成／失败状态，也支持派活、续聊、停止和读历史（走 CLI 的 app-server，见下面「ZCode 会话监听与派活」）；「跳转」切到 ZCode 窗口，不能定位到指定会话。
-- CodeBuddy（命令行版）：和 WorkBuddy 是同一份 CLI（npm 全局包 `@tencent-ai/codebuddy-code`），会话记录在 `%USERPROFILE%\.codebuddy\projects\<工作区>\<sessionId>.jsonl`，用同一套监听规则；同样支持派活／续聊／读历史（用本机 node 跑它的脚本，走它自己的登录态）。只有装了它的电脑才会出现在角色派活的候选里。
+- CodeBuddy（命令行版）：和 WorkBuddy 是同一份 CLI（npm 全局包 `@tencent-ai/codebuddy-code`），会话记录在 `%USERPROFILE%\.codebuddy\projects\<工作区>\<sessionId>.jsonl`，用同一套监听规则；同样支持派活／续聊／读历史（用本机 node 跑它的脚本，走它自己的登录态）。只有装了它的电脑才会出现在角色派活的候选里。角色里的模型下拉直接列**这个账号实际可用**的模型：CLI 把服务端下发的配置缓存在 `~/.codebuddy/local_storage/entry_*.info`，里面的 `agents[cli].models` 是白名单、`models` 带上下文窗口与计费倍率，读文件即可（新登账号或换套餐后点「刷新」重读）。
 
 豆包接入仅提供**会话状态监听**，暂不提供完整对话正文、等待授权、远程发消息、新建或分支。完成状态必须有会话结束成功事件，不通过日志停止增长猜测；初次加载今天和昨天每个日志末尾最多 8 MiB，静默登记已有状态，历史中未结束的运行显示为未知。日志轮换后继续读取新文件。豆包升级改变日志格式时可能无法采集，需要重新适配；此功能需同时更新服务端、桌面端与手机端。
 
@@ -60,6 +60,8 @@ ZCode（Z.ai 的编程工作台）没有 hook，但带一个可用的 CLI（`zco
 裸跑 CLI 时桌面端 Host 原本负责的三件事由执行器补齐：指向内置 provider 配置（`ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`）、下发账号权益（`provider/updateAccountConfig`，基础版本从 CLI 日志里的 `configRevision` 动态读取）、以及响应 `interaction/requestProviderRuntimeHeaders` 注入 Project Access Token（用本地登录凭证换取，只在内存里传递，不写日志）。
 
 **限制**：不支持按回复分叉（可以用同目录新开或直接续聊）；派活时不能附图；Agent 的提问（`interaction/requestUserInput`）在 AgentHub 里不能作答，会自动取消；默认模型 GLM-5.3，角色里写 `providerId/modelId` 可以覆盖；需要本机装好 ZCode 并已登录。协议是桌面端的私有协议，ZCode 升级后可能需要重新适配，细节见 [协议规格](docs/zcode-app-server.md)。
+
+模型下拉列的是 ZCode 安装包内置的 4 个 GLM（`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`）——账号实际可用哪些由套餐决定，裸跑 app-server 读不到账号级清单（registry 要桌面 Host 的 provider 流水线才填得上，实测记录见协议规格 §15），所以清单跟着 ZCode 版本走，换套餐后升级/重装即更新。
 
 ## 角色助手：一句话出草稿，确认才建角色
 

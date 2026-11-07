@@ -151,6 +151,25 @@ fn scan_revision(text: &str) -> Option<String> {
     None
 }
 
+/// 凭证解密密钥的派生串：与 ZCode 一致，
+/// `zcode-credential-fallback:<process.platform>:<homedir>:<userInfo().username>`。
+/// 平台写死 win32 会让 macOS / Linux 上直接解密失败（表现为换不到 Project Token）。
+fn credential_secret() -> String {
+    if let Ok(s) = std::env::var("ZCODE_CREDENTIAL_SECRET") {
+        return s;
+    }
+    let home = home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
+    let platform = if cfg!(windows) {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+    format!("zcode-credential-fallback:{platform}:{home}:{user}")
+}
+
 /// 凭证文件里的敏感值是 `enc:v1:<iv>.<tag>.<ciphertext>`（base64url、aes-256-gcm），
 /// 密钥是 sha256(secret)，secret 缺省由平台 + 用户名派生（与 ZCode 一致）。
 fn decrypt_credential(value: &str) -> Option<String> {
@@ -159,11 +178,7 @@ fn decrypt_credential(value: &str) -> Option<String> {
     let iv = parts.next()?;
     let tag = parts.next()?;
     let data = parts.next()?;
-    let secret = std::env::var("ZCODE_CREDENTIAL_SECRET").unwrap_or_else(|_| {
-        let home = home_dir().map(|h| h.to_string_lossy().into_owned()).unwrap_or_default();
-        let user = std::env::var("USERNAME").unwrap_or_default();
-        format!("zcode-credential-fallback:win32:{home}:{user}")
-    });
+    let secret = credential_secret();
     let key = Sha256::digest(secret.as_bytes());
     let cipher = Aes256Gcm::new(GenericArray::from_slice(&key));
     let iv = URL_SAFE_NO_PAD.decode(iv).ok()?;
@@ -443,6 +458,22 @@ mod tests {
     fn plain_values_pass_through_decrypt() {
         assert_eq!(decrypt_credential("bigmodel").as_deref(), Some("bigmodel"));
         assert!(decrypt_credential("enc:v1:bad").is_none());
+    }
+
+    #[test]
+    fn credential_secret_uses_real_platform() {
+        // 平台写死 win32 会让 macOS / Linux 解不开凭证文件
+        assert!(std::env::var("ZCODE_CREDENTIAL_SECRET").is_err(), "跳过：环境里已显式指定密钥");
+        let platform = if cfg!(windows) {
+            "win32"
+        } else if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            "linux"
+        };
+        let secret = credential_secret();
+        assert!(secret.starts_with(&format!("zcode-credential-fallback:{platform}:")), "{secret}");
+        assert!(!secret.ends_with(':'), "用户名不能是空串：{secret}");
     }
 
     #[test]

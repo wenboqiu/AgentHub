@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ModelList } from "./models";
 
 export type Config = {
   serverUrl: string;
@@ -101,5 +102,7 @@ export const desktop = {
   uninstallHooks: () => invoke<HooksStatus>("uninstall_claude_hooks"),
   focus: (pid: number | null, agent: string, sessionKey?: string) => invoke<void>("focus_session", { pid, agent, sessionKey }),
   openInTerminal: (agent: string, sessionKey: string, cwd: string) => invoke<string>("open_in_terminal", { agent, sessionKey, cwd }),
+  /** 读执行端的模型清单：CodeBuddy 读本机缓存，ZCode 解析安装包内置配置 */
+  agentModels: (agent: string, refresh = false) => invoke<ModelList>("agent_models", { agent, refresh }),
   setBadge: (count: number) => invoke<void>("set_badge", { count }),
 };

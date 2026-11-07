@@ -3,6 +3,8 @@
 #[cfg(desktop)]
 mod activity;
 #[cfg(desktop)]
+mod agent_models;
+#[cfg(desktop)]
 mod claude;
 #[cfg(desktop)]
 mod claude_live;
@@ -143,6 +145,17 @@ mod desktop {
         terminal::open_in_terminal(&agent, &session_key, &cwd)
     }
 
+    /// 拉某个执行端的模型清单（只读、毫秒级，不启动任何 agent 进程）：
+    /// CodeBuddy 读 CLI 缓存的账号配置，ZCode 解析安装包内置 provider 配置。
+    /// `refresh` = 重新读一遍来源（账号 / 套餐换过之后用）。
+    #[tauri::command]
+    async fn agent_models(agent: String, refresh: Option<bool>) -> Result<crate::agent_models::ModelList, String> {
+        let refresh = refresh.unwrap_or(false);
+        tauri::async_runtime::spawn_blocking(move || crate::agent_models::list(&agent, refresh))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     #[tauri::command]
     fn set_badge(app: AppHandle, count: u32) {
         let Some(t) = app.tray_by_id("main") else { return };
@@ -222,6 +235,7 @@ mod desktop {
                 uninstall_claude_hooks,
                 focus_session,
                 open_in_terminal,
+                agent_models,
                 set_badge,
                 show_main_window
             ])
