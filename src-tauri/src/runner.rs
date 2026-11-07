@@ -1276,24 +1276,73 @@ pub struct ClaudeLikeCli {
     envs: Vec<(String, String)>,
 }
 
-/// WorkBuddy 内置 CLI 定位：默认按各平台安装布局找，env `WORKBUDDY_CLI` 可覆盖（指向 cli/bin/codebuddy）
+/// WorkBuddy CLI 定位。优先级：env `WORKBUDDY_CLI` 覆盖 > npm 完整版（`@tencent-ai/codebuddy-code`）>
+/// 应用内置 lite-wb。优先 npm 完整版的原因：应用内置包结构性剔除 TUI，无法独立 `/login`，
+/// 而 CLI 独立运行时用不了桌面端的加密凭据（解密密钥只走 sidecar socket 通道），必须有登录态。
 pub fn workbuddy_cli() -> Option<ClaudeLikeCli> {
-    let script = match std::env::var_os("WORKBUDDY_CLI") {
-        Some(p) => PathBuf::from(p),
-        None => workbuddy_script_default()?,
-    };
-    if !script.is_file() {
-        return None;
+    // 1) 显式覆盖：指向任意 codebuddy CLI 入口（应用内置或 npm 版均可）
+    if let Some(p) = std::env::var_os("WORKBUDDY_CLI") {
+        let script = PathBuf::from(p);
+        if script.is_file() {
+            let mut envs = vec![("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string())];
+            if needs_lite_bundle(&script) {
+                // 应用内置只打包 lite-wb 一份 bundle，不设这个会去 require 不存在的 dist/codebuddy
+                envs.push(("CODEBUDDY_FORCE_LITE_WB_BUNDLE".to_string(), "1".to_string()));
+            }
+            return Some(ClaudeLikeCli {
+                program: workbuddy_electron(&script)?,
+                prefix: vec![script.to_string_lossy().into_owned()],
+                envs,
+            });
+        }
     }
-    let electron = workbuddy_electron(&script)?;
+    // 2) npm 完整版：有 TUI、可独立登录，宿主 Electron 当 node 跑（GUI 环境 PATH 无 node）
+    if let Some(cli) = npm_codebuddy_cli() {
+        return Some(cli);
+    }
+    // 3) 应用内置 lite-wb
+    let script = workbuddy_script_default()?;
     Some(ClaudeLikeCli {
-        program: electron,
+        program: workbuddy_electron(&script)?,
         prefix: vec![script.to_string_lossy().into_owned()],
         envs: vec![
             ("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string()),
-            // 应用只打包了 lite-wb 一份 bundle，不设这个会去 require 不存在的 dist/codebuddy
             ("CODEBUDDY_FORCE_LITE_WB_BUNDLE".to_string(), "1".to_string()),
         ],
+    })
+}
+
+/// 应用内置包只带 lite-wb bundle，需要强制；npm 完整版不用
+fn needs_lite_bundle(script: &Path) -> bool {
+    script.to_string_lossy().contains("app.asar.unpacked")
+}
+
+/// npm 安装的完整版 codebuddy 入口（node 脚本）。只认确定属于 @tencent-ai/codebuddy-code 的路径，
+/// 避免误命中其它同名命令。
+fn npm_codebuddy_script() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let candidates = [
+        // npm --prefix ~/.local 的真实入口（bin/codebuddy 被本项目的包装脚本占用）
+        home.join(".local/bin/codebuddy.real"),
+        home.join(".local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy"),
+        // 常规 npm -g 位置
+        home.join(".npm-global/bin/codebuddy"),
+        PathBuf::from("/usr/local/bin/codebuddy"),
+        PathBuf::from("/opt/homebrew/bin/codebuddy"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn npm_codebuddy_cli() -> Option<ClaudeLikeCli> {
+    if !cfg!(target_os = "macos") {
+        return None; // Windows/Linux 的定位待支持时再加
+    }
+    let electron = workbuddy_electron(&workbuddy_script_default()?)?;
+    let script = npm_codebuddy_script()?;
+    Some(ClaudeLikeCli {
+        program: electron,
+        prefix: vec![script.to_string_lossy().into_owned()],
+        envs: vec![("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string())],
     })
 }
 
@@ -1344,8 +1393,8 @@ fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &
 
 /// WorkBuddy 派活：协议与 claude 同构，仅两处退化——不支持 `--resume-session-at`
 /// （分叉退化为从末尾分叉），模型目录不同（角色里的模型 id 需配 WorkBuddy 的）。
-/// 独立跑需要 CLI 自己的登录态（桌面端的解密密钥只通过 sidecar 通道给子进程）：
-/// 终端里 `codebuddy` 进 TUI 执行一次 /login 即可。
+/// 登录态：应用内置 lite-wb 无 TUI 不能独立 /login，优先用 npm 完整版
+/// （`npm i -g --prefix ~/.local @tencent-ai/codebuddy-code` 后在终端 `codebuddy` 里 /login 一次）。
 fn run_workbuddy(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], _branch_point: &str, model: &str, instructions: &str) {
     match workbuddy_cli() {
         Some(cli) => {
@@ -2469,14 +2518,16 @@ mod tests {
 
     #[test]
     fn workbuddy_cli_layout() {
-        // 本机装了 WorkBuddy 才有意义：从 CLI 脚本反推宿主 Electron，并带上 node 模式与 lite 包环境
+        // 本机装了 WorkBuddy 才有意义：从 CLI 脚本反推宿主 Electron、node 模式；
+        // 优先 npm 完整版（无 lite 强制），回退应用内置 lite-wb（必须强制）
         let script = PathBuf::from("/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy");
         if !script.is_file() { return; }
-        let cli = workbuddy_cli().expect("装了 WorkBuddy 就应能定位内置 CLI");
+        let cli = workbuddy_cli().expect("装了 WorkBuddy 就应能定位 CLI");
         assert_eq!(cli.program, PathBuf::from("/Applications/WorkBuddy.app/Contents/MacOS/Electron"));
-        assert!(cli.prefix.iter().any(|a| a.ends_with("cli/bin/codebuddy")));
+        assert!(cli.prefix.iter().any(|a| a.ends_with("codebuddy") || a.ends_with("codebuddy.real")));
         assert!(cli.envs.iter().any(|(k, v)| k == "ELECTRON_RUN_AS_NODE" && v == "1"));
-        assert!(cli.envs.iter().any(|(k, v)| k == "CODEBUDDY_FORCE_LITE_WB_BUNDLE" && v == "1"));
+        let is_app_builtin = cli.prefix.iter().any(|a| a.ends_with("cli/bin/codebuddy") && !a.ends_with("codebuddy.real"));
+        assert_eq!(is_app_builtin, cli.envs.iter().any(|(k, v)| k == "CODEBUDDY_FORCE_LITE_WB_BUNDLE" && v == "1"));
     }
 
     #[test]

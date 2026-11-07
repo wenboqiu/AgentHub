@@ -29,7 +29,7 @@ const DEFAULT_CONFIG = {
   maxPerRun: 2,
   includeDoing: false,
   respectAgent: true,
-  // 执行者：workbuddy = 应用自带的 codebuddy CLI；claude = 本机 claude CLI
+  // 执行者：workbuddy = codebuddy CLI（优先 npm 完整版，回退应用内置 lite-wb）；claude = 本机 claude CLI
   executor: 'workbuddy',
   runTimeoutMinutes: 30,
 }
@@ -91,11 +91,18 @@ function watch(args) {
   return res.stdout ? JSON.parse(res.stdout) : null
 }
 
-/** 找 WorkBuddy 自带的 CLI：先看环境变量 / 配置，再按平台猜标准安装位置 */
+/** 找 WorkBuddy CLI：优先 npm 完整版（有独立登录态，应用内置 lite-wb 无 TUI 不能 /login），
+ *  再看环境变量 / 配置，最后按平台猜应用内置安装位置 */
 function workbuddyCli() {
   const candidates = [
     process.env.WORKBUDDY_CLI,
     config.workbuddyCli,
+    // npm 完整版（@tencent-ai/codebuddy-code）真实入口：bin/codebuddy 可能是包装脚本，优先 .real
+    join(HOME, '.local/bin/codebuddy.real'),
+    join(HOME, '.local/lib/node_modules/@tencent-ai/codebuddy-code/bin/codebuddy'),
+    join(HOME, '.npm-global/bin/codebuddy'),
+    '/usr/local/bin/codebuddy',
+    '/opt/homebrew/bin/codebuddy',
     ...(platform() === 'darwin'
       ? ['/Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy']
       : [
