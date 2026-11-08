@@ -39,6 +39,9 @@ function Entry({
     badge = e.machineOnline ? "排队中" : `等 ${e.machine} 上线`;
     if (e.attempts > 0) badge += ` · 已试 ${e.attempts} 次`;
     foot = `排队于 ${ago(e.queuedAt ?? e.updatedAt, now)}前`;
+  } else if (e.status === "review") {
+    badge = "待验收";
+    foot = `等你验收 · 更新于 ${ago(e.updatedAt, now)}前`;
   } else {
     badge = e.waitingApproval ? "待授权" : "运行中";
     foot = `${e.run ? `已跑 ${ago(e.run.startedAt, now)}` : "执行中"}${e.lastActivityAt ? ` · 最后活动 ${ago(e.lastActivityAt, now)}前` : ""}`;

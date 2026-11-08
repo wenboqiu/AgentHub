@@ -401,8 +401,9 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         </section>
         <section className="detail-section">
           <h3>执行边界<span className="dim"> · 超出范围的动作会停下来问你</span></h3>
-          <p className="hint">代批先按这份边界判：写在这里的动作直接放行，越界的交给人。留空 = 不限目录，联网 / 推远端 / 跑脚本都不预先授权。</p>
-          <BoundsEditor value={task.constraints ?? NO_CONSTRAINTS} disabled={busy} onChange={constraints => patch({ constraints })} />
+          <p className="hint">代批先按这份边界判：写在这里的动作直接放行，越界的交给人。留空 = 不限目录，联网 / 推远端 / 跑脚本都不预先授权。目录声明只是提示，不是安全隔离。</p>
+          {task.mandateFrozenAt && <p className="hint">授权范围已于 {new Date(task.mandateFrozenAt).toLocaleString()} 冻结，不能再改；要换范围请新开任务。</p>}
+          <BoundsEditor value={task.constraints ?? NO_CONSTRAINTS} disabled={busy || !!task.mandateFrozenAt} onChange={constraints => patch({ constraints })} />
         </section>
       </>}
 
@@ -509,6 +510,13 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
                 </li>
               ))}
             </ul>
+            {task.status === "review" && (
+              <div className="action-bar">
+                <button className="primary" disabled={busy || review.items.some(it => it.status !== "pass")} title={review.items.some(it => it.status !== "pass") ? "检查项全部通过后才能验收" : ""}
+                  onClick={() => void guard(async () => onSaved((await api.acceptTask(task.id)).task))}>验收通过</button>
+                <span className="dim">验收通过后任务才会完成；还有待处理的授权请求时会被拦下</span>
+              </div>
+            )}
             <form className="review-add" onSubmit={e => { e.preventDefault(); if (newItem.trim()) addItem(); }}>
               <input value={newItem} maxLength={500} placeholder="补一项检查…" onChange={e => setNewItem(e.target.value)} />
               <button disabled={busy || !newItem.trim()}>添加</button>

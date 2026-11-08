@@ -36,7 +36,7 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
     c.note,
   ].filter(Boolean);
 }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null };
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null; /** 授权范围冻结时间；非空 = 范围已签署，不能再改 */ mandateFrozenAt?: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | "autoDispatch" | keyof Schedule>>;
 /** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */
 export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; manager: boolean; managerProjects: number[]; createdAt: string; updatedAt: string };
@@ -216,7 +216,7 @@ export type BoardRun = { id: string; sessionId: string | null; status: "queued" 
 export type BoardEntry = {
   taskId: number;
   title: string;
-  status: "todo" | "doing";
+  status: "todo" | "doing" | "review";
   agent: Task["agent"];
   machine: string | null;
   cwd: string | null;
@@ -232,6 +232,9 @@ export type BoardEntry = {
   updatedAt: string;
 };
 export type Board = { entries: BoardEntry[]; agents: string[]; generatedAt: string };
+
+/** 授权模式：off 与旧版一致；observe 只留痕；auto 范围内自动放行 + 执行器按范围关掉 CLI 逐动作审批 */
+export type MandateMode = "off" | "observe" | "auto";
 
 export type Session = {
   id: string;
@@ -437,6 +440,10 @@ export class Api {
   unqueueTask = async (id: number) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/queue`)).task;
   /** 派活看板：排队中 / 在跑 / 卡住的任务聚合 */
   dispatchBoard = () => this.call<Board>("GET", "/dispatch/board");
+  mandateMode = () => this.call<{ mode: MandateMode }>("GET", "/mandate/settings");
+  setMandateMode = (mode: MandateMode) => this.call<{ mode: MandateMode }>("PUT", "/mandate/settings", { mode });
+  /** 验收通过：review → done 的唯一入口 */
+  acceptTask = (id: number) => this.call<{ task: Task }>("POST", `/tasks/${id}/accept`, {});
   /** 手动计时：不依赖会话，直接给任务记一次执行 */
   startTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/start`, {})).task;
   stopTimer = async (id: number) => (await this.call<{task: Task}>("POST", `/tasks/${id}/timer/stop`, {})).task;

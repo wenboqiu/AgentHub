@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Api, DispatchManager, ManagerState, Project } from "./lib/api";
+import type { Api, DispatchManager, MandateMode, ManagerState, Project } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 
 // 项目经理：可以有多位，谁当经理、管哪些项目都在「角色」里定义。
@@ -17,8 +17,10 @@ export default function Manager({ api }: { api: Api }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
   const [err, setErr] = useState("");
+  const [mandateMode, setMandateMode] = useState<MandateMode>("off");
 
   const load = useCallback(() => {
+    api.mandateMode().then(r => setMandateMode(r.mode), () => {});
     api.dispatchManager().then(setState, () => setState(null));
     api.projects().then(setProjects, () => setProjects([]));
   }, [api]);
@@ -162,6 +164,33 @@ export default function Manager({ api }: { api: Api }) {
         </p>
         {msg && <p className="msg">{msg}</p>}
         {err && <p className="msg bad">{err}</p>}
+      </section>
+
+      <section className="box">
+        <h2>一次授权</h2>
+        <p className="hint">
+          确认任务单 = 签署授权范围，签署后范围冻结、不能再改；任务做完要你「验收通过」才算完成。
+          这里决定执行中怎么用这份范围：
+        </p>
+        <div className="form-grid">
+          <label>授权模式
+            <select value={mandateMode} disabled={busy}
+              onChange={e => {
+                const mode = e.target.value as MandateMode;
+                setBusy(true); setErr(""); setMsg("");
+                api.setMandateMode(mode).then(r => { setMandateMode(r.mode); setMsg("已保存"); }, x => setErr(x instanceof Error ? x.message : String(x))).finally(() => setBusy(false));
+              }}>
+              <option value="off">关闭（和以前一样，逐条审批）</option>
+              <option value="observe">观察（只记录「本来会怎么判」，不改变流程）</option>
+              <option value="auto">自动（范围内不再询问，范围外交给你）</option>
+            </select>
+          </label>
+        </div>
+        <p className="hint">
+          自动档需要电脑端也升级到支持 mandate-v1 的版本，老版本会自动退回逐条审批。
+          目录声明只是提示，不是安全隔离：执行器跑在你自己的电脑上、用你的账户，真正的约束是工具白名单与沙箱。
+          建议先开「观察」跑一阵，看记录符合预期再开「自动」。
+        </p>
       </section>
     </>
   );

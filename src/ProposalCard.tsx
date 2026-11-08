@@ -209,13 +209,16 @@ export default function ProposalCard({
         </label>
       </div>
 
-      {/* 项目经理排任务单时一并定了「能碰哪」：建任务后就是代批的依据 */}
-      {constraintsSummary(proposal.constraints).length > 0 && (
+      {/* 确认 = 签署授权：范围从这一刻起冻结。没声明的能力（联网 / 推远端 / 跑脚本）就是不授权 */}
+      <>
         <p className="proposal-bounds">
-          <span className="dim">执行边界</span>
-          {constraintsSummary(proposal.constraints).map(c => <span key={c} className="bound-chip">{c}</span>)}
+          <span className="dim">本次授权范围</span>
+          {constraintsSummary(proposal.constraints).length > 0
+            ? constraintsSummary(proposal.constraints).map(c => <span key={c} className="bound-chip">{c}</span>)
+            : <span className="bound-chip">不限目录 · 不联网 · 不推远端 · 不跑脚本</span>}
         </p>
-      )}
+        <p className="hint">点确认即签署：范围一经确认不可撤销、不可再改，要改只能新开任务。目录声明只是提示，不是安全隔离。</p>
+      </>
 
       {proposal.evidence.length > 0 && (
         <details className="proposal-evidence">
