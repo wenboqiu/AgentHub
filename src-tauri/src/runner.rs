@@ -2,6 +2,7 @@
 //!
 //! - Claude：`claude -p --resume <sid> --input-format stream-json --output-format stream-json
 //!   --verbose --permission-prompt-tool stdio --permission-mode default`
+//! - CodeBuddy / WorkBuddy：同上但**不带** `--permission-prompt-tool`（同源 CLI 2.x 不认该参数）
 //! - Codex：Desktop 自带 codex.exe 的 `app-server`，走 JSON-RPC（stdio）
 //!
 //! 纯函数（解析、目录黑名单、路径查找）都单独写出来并有单测；进程管理在 `Runner` 里。
@@ -180,8 +181,10 @@ pub fn codex_model_args(model: &str) -> Vec<String> {
     if model.is_empty() { vec![] } else { vec!["-c".into(), format!("model=\"{model}\"")] }
 }
 
-/// claude 命令行参数
-pub fn claude_args(mode: Mode, key: &str) -> Vec<String> {
+/// claude 命令行参数。`permission_tool`：是否带 `--permission-prompt-tool stdio`——
+/// 只有 Claude Code 支持该参数；CodeBuddy / WorkBuddy（同源 CLI）2.x 没有它，
+/// 传了会直接 `error: unknown option` 退出（codebuddy 进程异常退出(1) 的根因）。
+pub fn claude_args(mode: Mode, key: &str, permission_tool: bool) -> Vec<String> {
     let mut a: Vec<String> = vec!["-p".into()];
     if mode != Mode::Fresh {
         a.push("--resume".into());
@@ -190,9 +193,18 @@ pub fn claude_args(mode: Mode, key: &str) -> Vec<String> {
             a.push("--fork-session".into());
         }
     }
-    for s in ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--permission-mode", "default"] {
-        a.push(s.into());
-    }
+    let tail: &[&str] = if permission_tool {
+        &[
+            "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+            "--permission-prompt-tool", "stdio", "--permission-mode", "default",
+        ]
+    } else {
+        &[
+            "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+            "--permission-mode", "default",
+        ]
+    };
+    a.extend(tail.iter().map(|s| s.to_string()));
     a
 }
 
@@ -234,8 +246,8 @@ pub fn codex_thread_request(id: i64, mode: Mode, key: &str, cwd: &str) -> String
 }
 
 /// 从 thread/fork、thread/start 的响应里取新线程 id
-pub fn claude_branch_args(mode: Mode, key: &str, point: &str) -> Vec<String> {
-    let mut args = claude_args(mode, key);
+pub fn claude_branch_args(mode: Mode, key: &str, point: &str, permission_tool: bool) -> Vec<String> {
+    let mut args = claude_args(mode, key, permission_tool);
     if mode == Mode::Fork && !point.is_empty() { args.extend(["--resume-session-at".into(), point.into()]); }
     args
 }
@@ -1280,6 +1292,8 @@ pub struct ClaudeLikeCli {
     /// 插在真正参数前面的（如 CLI 脚本路径）
     prefix: Vec<String>,
     envs: Vec<(String, String)>,
+    /// 是否带 `--permission-prompt-tool stdio`：真 Claude 才认，codebuddy 系传了就崩
+    permission_prompt_tool: bool,
 }
 
 /// WorkBuddy CLI 定位。优先级：env `WORKBUDDY_CLI` 覆盖 > npm 完整版（`@tencent-ai/codebuddy-code`）>
@@ -1299,6 +1313,7 @@ pub fn workbuddy_cli() -> Option<ClaudeLikeCli> {
                 program: workbuddy_electron(&script)?,
                 prefix: vec![script.to_string_lossy().into_owned()],
                 envs,
+                permission_prompt_tool: false,
             });
         }
     }
@@ -1315,6 +1330,7 @@ pub fn workbuddy_cli() -> Option<ClaudeLikeCli> {
             ("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string()),
             ("CODEBUDDY_FORCE_LITE_WB_BUNDLE".to_string(), "1".to_string()),
         ],
+        permission_prompt_tool: false,
     })
 }
 
@@ -1361,6 +1377,7 @@ fn npm_codebuddy_cli() -> Option<ClaudeLikeCli> {
         program: electron,
         prefix: vec![script.to_string_lossy().into_owned()],
         envs: vec![("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string())],
+        permission_prompt_tool: false,
     })
 }
 
@@ -1406,7 +1423,7 @@ fn workbuddy_cli_port() -> String {
 }
 
 fn run_claude(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
-    run_claude_like(run, &ClaudeLikeCli { program: PathBuf::from("claude"), prefix: Vec::new(), envs: Vec::new() }, "claude", mode, key, cwd, text, images, branch_point, model, instructions, &[])
+    run_claude_like(run, &ClaudeLikeCli { program: PathBuf::from("claude"), prefix: Vec::new(), envs: Vec::new(), permission_prompt_tool: true }, "claude", mode, key, cwd, text, images, branch_point, model, instructions, &[])
 }
 
 /// WorkBuddy 派活：协议与 claude 同构，仅两处退化——不支持 `--resume-session-at`
@@ -1475,7 +1492,7 @@ fn codebuddy_cli() -> Option<ClaudeLikeCli> {
     let script = codebuddy_script()?;
     let script_arg = script.to_string_lossy().into_owned();
     if let Some(node) = node_exe() {
-        return Some(ClaudeLikeCli { program: node, prefix: vec![script_arg], envs: Vec::new() });
+        return Some(ClaudeLikeCli { program: node, prefix: vec![script_arg], envs: Vec::new(), permission_prompt_tool: false });
     }
     // 没有 node：WorkBuddy 的 Electron 也能当 node 用（只在其安装目录下有）
     let electron = workbuddy_electron(&script)?;
@@ -1483,6 +1500,7 @@ fn codebuddy_cli() -> Option<ClaudeLikeCli> {
         program: electron,
         prefix: vec![script_arg],
         envs: vec![("ELECTRON_RUN_AS_NODE".to_string(), "1".to_string())],
+        permission_prompt_tool: false,
     })
 }
 
@@ -1635,7 +1653,7 @@ fn codebuddy_cli_port() -> String {
 fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str, extra_args: &[String]) {
     let mut cmd = Command::new(&cli.program);
     let mut args = cli.prefix.clone();
-    args.extend(claude_branch_args(mode, key, branch_point));
+    args.extend(claude_branch_args(mode, key, branch_point, cli.permission_prompt_tool));
     claude_role_args(&mut args, model, instructions);
     args.extend_from_slice(extra_args);
     cmd.args(args)
@@ -2665,7 +2683,7 @@ mod tests {
 
     #[test]
     fn selected_reply_branch_uses_native_boundary() {
-        let args=claude_branch_args(Mode::Fork,"original","reply-uuid");
+        let args=claude_branch_args(Mode::Fork,"original","reply-uuid",true);
         assert!(args.windows(2).any(|p|p==["--resume-session-at","reply-uuid"]));
         assert!(args.iter().any(|p|p=="--fork-session"));
         let request:Value=serde_json::from_str(&codex_branch_request(2,Mode::Fork,"original","cwd","turn-one")).unwrap();
@@ -2766,13 +2784,24 @@ mod tests {
         let tail = ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--permission-prompt-tool", "stdio", "--permission-mode", "default"];
         let mut resume = vec!["-p", "--resume", "k1"];
         resume.extend(tail);
-        assert_eq!(claude_args(Mode::Resume, "k1"), resume);
+        assert_eq!(claude_args(Mode::Resume, "k1", true), resume);
         let mut fork = vec!["-p", "--resume", "k1", "--fork-session"];
         fork.extend(tail);
-        assert_eq!(claude_args(Mode::Fork, "k1"), fork);
+        assert_eq!(claude_args(Mode::Fork, "k1", true), fork);
         let mut fresh = vec!["-p"];
         fresh.extend(tail);
-        assert_eq!(claude_args(Mode::Fresh, "k1"), fresh);
+        assert_eq!(claude_args(Mode::Fresh, "k1", true), fresh);
+    }
+
+    #[test]
+    fn codebuddy_args_omit_permission_prompt_tool() {
+        // codebuddy 2.x 不认 `--permission-prompt-tool`，传了直接报错退出
+        let a = claude_args(Mode::Resume, "k1", false);
+        assert!(!a.contains(&"--permission-prompt-tool".to_string()), "{a:?}");
+        assert!(a.windows(2).any(|p| p == ["--resume", "k1"]));
+        assert!(a.contains(&"--permission-mode".to_string()) && a.contains(&"--input-format".to_string()));
+        // true 时带（Claude 通道行为不变）
+        assert!(claude_args(Mode::Fresh, "", true).contains(&"--permission-prompt-tool".to_string()));
     }
 
     #[test]
@@ -2902,13 +2931,13 @@ mod tests {
     #[test]
     fn role_args_ride_along_with_the_rest() {
         // 空角色不改变任何命令行：行为和没有角色时完全一致
-        let mut none = claude_args(Mode::Fresh, "k1");
+        let mut none = claude_args(Mode::Fresh, "k1", true);
         let before = none.clone();
         claude_role_args(&mut none, "", "");
         assert_eq!(none, before);
 
         // 有角色：模型和系统提示追加在末尾，原有参数一个不少
-        let mut with = claude_args(Mode::Fresh, "k1");
+        let mut with = claude_args(Mode::Fresh, "k1", true);
         claude_role_args(&mut with, "opus", "只改测试，不动实现");
         let tail = &with[with.len() - 4..];
         assert_eq!(tail, ["--model", "opus", "--append-system-prompt", "只改测试，不动实现"]);
