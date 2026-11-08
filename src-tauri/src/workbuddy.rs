@@ -42,6 +42,12 @@ const QUIET_MS: i64 = 20_000;
 /// （下一行几乎都是 reasoning，思考期间文件完全静默）；60s 时「提前判完成」
 /// 占所有完成判定的 ~31%，提到 3 分钟后降到 ~5%。
 const TOOL_QUIET_MS: i64 = 180_000;
+/// 结构给不出结论时的兜底窗口：尾部是用户消息 / 仍在 generating / 还有未归的调用，
+/// 都可能是「进程已经不在了」，可静默又必须能收尾（否则会话永远停在 running）。
+/// 跑很久的单次工具调用会在这条线上被先判死一次，但结果落盘后会自己回到 running，
+/// 且兜底收尾是静默的（不补通知），代价只是一次状态回摆。与前端 sendBlock / 服务端 routes
+/// 的 STALE_RUNNING_MS 保持同一口径：30 分钟没有新东西就不再当它还在跑。
+const STALE_MS: i64 = 30 * 60_000;
 /// 随手带上来的正文：单条文本上限（与服务端 cleanText 一致）
 const MSG_TEXT_MAX: usize = 4000;
 /// 一轮里最多带多少条正文（长回合别把事件撑爆，服务端也会裁剪）
@@ -265,7 +271,14 @@ impl FileState {
                             self.record("assistant", &t, v);
                         }
                     }
-                    "incomplete" => self.tail = Tail::Incomplete,
+                    "incomplete" => {
+                        self.tail = Tail::Incomplete;
+                        // 被用户中断：这批还在飞的调用不会有结果回来了。
+                        // 留着会让「中断→aborted」也走不到（confirm_quiet 第一关就要求未归调用为 0），
+                        // 状态就永远停在 running。
+                        self.open_ids.clear();
+                        self.open_unknown = 0;
+                    }
                     _ => {}
                 }
             }
@@ -314,14 +327,17 @@ impl FileState {
 
     /// 文件安静下来后确认本轮是否结束；不满足条件返回 None
     pub fn confirm_quiet(&mut self, now_ms: i64) -> Option<Event> {
-        if self.skipped || self.session_id.is_none() || self.state != "running" || self.open_calls() > 0 {
+        if self.skipped || self.session_id.is_none() || self.state != "running" {
             return None;
         }
-        let (state, window) = match self.tail {
-            Tail::Reply => ("done", QUIET_MS),
-            Tail::ToolResult => ("done", TOOL_QUIET_MS),
-            Tail::Incomplete => ("aborted", QUIET_MS),
-            _ => return None,
+        // 结构能定性就按结构判（这种结束有把握，照常提醒）；
+        // 结构不能定性（尾部是用户消息 / 仍在 generating / 还有未归的调用）只能等「久到不可能还在动」，
+        // 那种收尾是兜底推断，静默处理：别让一个半夜就死掉的会话在早上弹一条「已中断」。
+        let (state, window, stale) = match (self.open_calls() == 0, self.tail) {
+            (true, Tail::Reply) => ("done", QUIET_MS, false),
+            (true, Tail::ToolResult) => ("done", TOOL_QUIET_MS, false),
+            (true, Tail::Incomplete) => ("aborted", QUIET_MS, false),
+            _ => ("aborted", STALE_MS, true),
         };
         if now_ms - self.last_ms < window {
             return None;
@@ -330,8 +346,13 @@ impl FileState {
             return None;
         }
         self.state = state.to_string();
+        if stale {
+            // 这些调用已经判死：下一轮开始时不能再被它们挡住
+            self.open_ids.clear();
+            self.open_unknown = 0;
+        }
         let summary = if state == "done" { self.summary.clone() } else { None };
-        Some(self.event(state, summary, false))
+        Some(self.event(state, summary, stale))
     }
 
     /// 未归的工具调用总数（按 callId 配对 + 无 callId 的计数兜底）
@@ -746,9 +767,9 @@ mod tests {
             &[&call_id(T0 + 1_000, "call_x"), &result_id(T0 + 2_000, "call_before_window"), &call_id(T0 + 2_100, "call_y")],
             T0 + 2_100,
         );
-        assert!(s.confirm_quiet(T0 + 2_100 + 10 * TOOL_QUIET_MS).is_none(), "call_y 仍在飞，不能判结束");
+        assert!(s.confirm_quiet(T0 + 2_100 + 4 * TOOL_QUIET_MS).is_none(), "call_y 仍在飞，不能判结束");
         s.feed(&[&result_id(T0 + 3_000, "call_x")], T0 + 3_000);
-        assert!(s.confirm_quiet(T0 + 3_000 + 10 * TOOL_QUIET_MS).is_none(), "call_y 仍未归还");
+        assert!(s.confirm_quiet(T0 + 3_000 + 4 * TOOL_QUIET_MS).is_none(), "call_y 仍未归还");
         s.feed(&[&result_id(T0 + 4_000, "call_y")], T0 + 4_000);
         assert_eq!(s.confirm_quiet(T0 + 4_000 + TOOL_QUIET_MS).unwrap().state, "done");
     }
@@ -760,7 +781,7 @@ mod tests {
         let no_id_call = serde_json::json!({"type":"function_call","timestamp":T0+1_000,"name":"Read"}).to_string();
         let no_id_result = serde_json::json!({"type":"function_call_result","timestamp":T0+2_000}).to_string();
         s.feed(&[&no_id_call], T0 + 1_000);
-        assert!(s.confirm_quiet(T0 + 1_000 + 10 * TOOL_QUIET_MS).is_none());
+        assert!(s.confirm_quiet(T0 + 1_000 + 4 * TOOL_QUIET_MS).is_none());
         s.feed(&[&no_id_result], T0 + 2_000);
         assert_eq!(s.confirm_quiet(T0 + 2_000 + TOOL_QUIET_MS).unwrap().state, "done");
     }
@@ -774,11 +795,58 @@ mod tests {
     }
 
     #[test]
-    fn generating_tail_never_finishes() {
+    fn interrupted_round_releases_open_calls() {
+        // 用户在工具还在飞的时候按了中断：这批调用不会有结果回来了，
+        // 不能拿它们把这一轮永久钉在 running（线上就是卡了 15 小时那种）
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑起来", T0)], T0);
+        s.feed(&[&call_id(T0 + 1_000, "call_a"), &call_id(T0 + 1_001, "call_b")], T0 + 1_001);
+        s.feed(&[&msg("assistant", "incomplete", "Interrupted by user", T0 + 2_000)], T0 + 2_000);
+        assert_eq!(s.open_calls(), 0, "中断即放弃在飞的调用");
+        // 中断是明确的结构，按 REPLY 的静默窗口收尾，照常提醒
+        let ev = s.confirm_quiet(T0 + 2_000 + QUIET_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert!(!ev.quiet);
+    }
+
+    #[test]
+    fn generating_tail_closes_only_when_stale() {
+        // 停在 generating（进程没了）没有结构可依据：只有久到不可能还在动才收尾
         let mut s = live();
         s.feed(&[&msg("user", "completed", "写长文", T0)], T0);
         s.feed(&[&msg("assistant", "generating", "", T0 + 1_000)], T0 + 1_000);
-        assert!(s.confirm_quiet(T0 + 10 * QUIET_MS).is_none());
+        assert!(s.confirm_quiet(T0 + 1_000 + STALE_MS - 1).is_none());
+        let ev = s.confirm_quiet(T0 + 1_000 + STALE_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert!(ev.quiet, "兜底收尾不补通知");
+    }
+
+    #[test]
+    fn stale_running_without_structure_is_closed() {
+        // 用户消息之后进程就没了：尾部只剩用户消息，同样只能靠兜底收尾
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "开工", T0)], T0);
+        assert!(s.confirm_quiet(T0 + STALE_MS - 1).is_none());
+        let ev = s.confirm_quiet(T0 + STALE_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert!(ev.quiet);
+        // 收过一次就不再重复
+        assert!(s.confirm_quiet(T0 + 10 * STALE_MS).is_none());
+    }
+
+    #[test]
+    fn long_tool_call_survives_short_noise_but_not_stale() {
+        // 单次工具跑 20 分钟还在飞：不能提前判死
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑个长构建", T0)], T0);
+        s.feed(&[&call_id(T0 + 1_000, "call_long")], T0 + 1_000);
+        assert!(s.confirm_quiet(T0 + 1_000 + 20 * 60_000).is_none());
+        let ev = s.confirm_quiet(T0 + 1_000 + STALE_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert_eq!(s.open_calls(), 0, "判死的调用要清掉，别挡住下一轮");
+        // 结果后来还是落盘了：下一轮照常从 running 起算
+        let again = s.feed(&[&msg("user", "completed", "继续", T0 + 2 * STALE_MS)], T0 + 2 * STALE_MS);
+        assert_eq!(again[0].state, "running");
     }
 
     #[test]
