@@ -1425,7 +1425,7 @@ fn run_workbuddy(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, images
 }
 
 /// CodeBuddy CLI 入口（`@tencent-ai/codebuddy-code/bin/codebuddy`，node 脚本）。
-/// 三种装法都认：env 覆盖 > npm 全局包 > PATH 上各 prefix（含 WorkBuddy 自带的 node 分发）里的包。
+/// 四种装法都认：env 覆盖 > npm 全局包 > WorkBuddy 自带 node 运行时里的包 > PATH 上各 prefix。
 fn codebuddy_script() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("CODEBUDDY_CLI") {
         let p = PathBuf::from(p);
@@ -1436,12 +1436,31 @@ fn codebuddy_script() -> Option<PathBuf> {
     if let Some(p) = npm_codebuddy_script() {
         return Some(p);
     }
+    if let Some(p) = workbuddy_node_codebuddy_script() {
+        return Some(p);
+    }
     // PATH 上的 `codebuddy` 只是 shim（sh / .cmd），跑不了 `node shim`，
     // 所以按 prefix 反查真实入口：<dir>\node_modules\@tencent-ai\codebuddy-code\bin\codebuddy
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
         .map(|d| d.join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin").join("codebuddy"))
         .find(|p| p.is_file())
+}
+
+/// WorkBuddy 桌面端自带的 node 运行时（`~/.workbuddy/binaries/node/versions/<版本>/`）里
+/// 往往同层装着一份 @tencent-ai/codebuddy-code。这个目录只出现在 WorkBuddy 自己注入的
+/// PATH 里，AgentHub GUI 进程看不到（开始菜单 / 自启启动拿不到），所以单独扫一遍；
+/// 版本目录取字典序最大的。root 参数化是为了测试。
+fn workbuddy_node_codebuddy_script_in(root: &Path) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    dirs.sort();
+    dirs.into_iter().rev()
+        .map(|d| d.join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin").join("codebuddy"))
+        .find(|p| p.is_file())
+}
+
+fn workbuddy_node_codebuddy_script() -> Option<PathBuf> {
+    workbuddy_node_codebuddy_script_in(&crate::claude::home_dir()?.join(".workbuddy").join("binaries").join("node").join("versions"))
 }
 
 /// CodeBuddy CLI 是否装了：给执行器上报能力用，装了才会出现在角色的候选电脑里
@@ -2768,6 +2787,28 @@ mod tests {
         assert!(cli.envs.iter().any(|(k, v)| k == "ELECTRON_RUN_AS_NODE" && v == "1"));
         let is_app_builtin = cli.prefix.iter().any(|a| a.ends_with("cli/bin/codebuddy") && !a.ends_with("codebuddy.real"));
         assert_eq!(is_app_builtin, cli.envs.iter().any(|(k, v)| k == "CODEBUDDY_FORCE_LITE_WB_BUNDLE" && v == "1"));
+    }
+
+    #[test]
+    fn workbuddy_node_runtime_codebuddy_is_found_newest_first() {
+        let base = std::env::temp_dir().join(format!("agenthub-cb-{}", std::process::id()));
+        let entry = |v: &str| {
+            let p = base.join(v).join("node_modules").join("@tencent-ai").join("codebuddy-code").join("bin");
+            std::fs::create_dir_all(&p).unwrap();
+            let f = p.join("codebuddy");
+            std::fs::write(&f, "").unwrap();
+            f
+        };
+        let old = entry("22.20.0");
+        let new = entry("22.22.2-6");
+        assert_eq!(workbuddy_node_codebuddy_script_in(&base).as_ref(), Some(&new), "取字典序最大的版本");
+        std::fs::remove_file(&new).unwrap();
+        assert_eq!(workbuddy_node_codebuddy_script_in(&base).as_ref(), Some(&old), "新版本没有包时回退旧版本");
+        std::fs::remove_file(&old).unwrap();
+        assert!(workbuddy_node_codebuddy_script_in(&base).is_none(), "都没有包时不误报");
+        // 目录不存在也不 panic
+        assert!(workbuddy_node_codebuddy_script_in(&base.join("missing")).is_none());
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
