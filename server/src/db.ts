@@ -14,6 +14,7 @@ import { migrateArtifacts } from './artifacts.ts'
 import { migrateAttachments } from './attachments.ts'
 import { migrateReferee } from './referee.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
+import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -767,8 +768,10 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
     const keepRun = active.rows[0]?.id ?? null
     // 正在跑的 run 关联的消息要保留（流式正文可能还没落进 transcript），但 transcript
     // 快照里同一条消息会再来一份——刚才发的那条 user 消息、已落盘的助手回复都算，
-    // 不去重的话界面上就是「发送的消息等一会又出现一条」。按 (role, 正文前 400 字)
-    // 多重集匹配：快照里与保留消息对得上的副本跳过，对不上的（真正新增的）照常插入。
+    // 不去重的话界面上就是「发送的消息等一会又出现一条」。按 (role, 归一化后正文前 400 字)
+    // 多重集匹配（transcript 会把多行用户输入折成一行，得先归一化才认得出是同一句）：
+    // 快照里与保留消息对得上的副本跳过，对不上的（真正新增的）照常插入。
+    const key = (role: string, text: string) => `${role}|${sameKey(text)}`
     const keptCounts = new Map<string, number>()
     if (keepRun) {
       const kept = await client.query<{ role: string; text: string }>(
@@ -776,12 +779,12 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
         [userId, sessionId, keepRun],
       )
       for (const r of kept.rows) {
-        const k = `${r.role}|${r.text.trim().slice(0, 400)}`
+        const k = key(r.role, r.text)
         keptCounts.set(k, (keptCounts.get(k) ?? 0) + 1)
       }
     }
     const deduped = snapshot.filter(it => {
-      const k = `${it.role}|${it.text.trim().slice(0, 400)}`
+      const k = key(it.role, it.text)
       const n = keptCounts.get(k) ?? 0
       if (n > 0) {
         keptCounts.set(k, n - 1)
@@ -821,11 +824,11 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
 }
 
 /**
- * 随事件上来的原生正文（目前只有 WorkBuddy）：按 (role, 正文, 时间) 去重后插入。
+ * 随事件上来的原生正文（WorkBuddy / CodeBuddy 这类只读监听通道）：去重后插入。
  *
- * 时间是原生日志带的，重发同一条消息时间不变，所以能认出来；用「秒」做粒度是为了容忍
- * 快照替换时为排序把同刻消息错开的几毫秒。正文相同但时间不同的（「继续」说了两遍）
- * 照常各自入库。
+ * 去重口径见 `message-merge.ts`：正文按空白归一化（transcript 会把多行折成一行），
+ * 时间只容忍毫秒级抖动；本次 run 自己发出去的用户消息按正文认回显——不这么做，
+ * 用户从 AgentHub 发进 CodeBuddy 会话的那句话会在 transcript 回显后变成两条。
  * 返回新插入的条数，0 表示这条事件带的内容库里已经有了。
  */
 export async function appendEventMessages(
@@ -841,36 +844,32 @@ export async function appendEventMessages(
     .filter(m => m.text.trim())
   if (!incoming.length) return 0
 
-  // 参照库里最近的消息（消息表本身也只留这么多条）：重发同一段正文不会变成重复消息
-  const existing = await pool.query<{ role: string; text: string; created_at: Date }>(
-    `SELECT role, text, created_at FROM messages WHERE user_id = $1 AND session_id = $2 ORDER BY created_at DESC, id DESC LIMIT $3`,
-    [userId, sessionId, KEEP_MESSAGES],
-  )
-  const seen = new Set<string>()
-  for (const r of existing.rows) seen.add(`${r.role}|${r.text}|${Math.round(r.created_at.getTime() / 1000)}`)
-
   const now = Date.now()
-  const fresh: { role: MessageRole; text: string; at: Date }[] = []
-  for (const m of incoming) {
-    // 原生日志的时间是准的；但不能排到未来（机器时钟跑快时会把日历画到明天）
-    const at = new Date(Math.min(m.at ?? fallbackAt.getTime(), now))
-    const sec = Math.round(at.getTime() / 1000)
-    let hit: string | null = null
-    for (const d of [0, -1, 1]) {
-      const k = `${m.role}|${m.text}|${sec + d}`
-      if (seen.has(k)) {
-        hit = k
-        break
-      }
-    }
-    if (hit) {
-      // 用掉了就不再参与匹配，同一条事件里的重复行也只入一条
-      seen.delete(hit)
-      continue
-    }
-    seen.add(`${m.role}|${m.text}|${sec}`)
-    fresh.push({ role: m.role, text: m.text, at })
-  }
+  // 原生日志的时间是准的；但不能排到未来（机器时钟跑快时会把日历画到明天）
+  const rows = incoming.map(m => ({ role: m.role as string, text: m.text, at: Math.min(m.at ?? fallbackAt.getTime(), now) }))
+  const from = new Date(Math.min(...rows.map(r => r.at)) - EVENT_DEDUPE_MS)
+  const to = new Date(Math.max(...rows.map(r => r.at)) + EVENT_DEDUPE_MS)
+
+  // 只取时间相近的那一段，不按「最近 N 条」：重发一条很旧的消息原本会落到窗口外，
+  // 于是同一段正文被再插一次（界面上一段回复连着两遍）。
+  const [known, active] = await Promise.all([
+    pool.query<{ role: string; text: string; created_at: Date }>(
+      `SELECT role, text, created_at FROM messages
+       WHERE user_id = $1 AND session_id = $2 AND created_at BETWEEN $3 AND $4`,
+      [userId, sessionId, from, to],
+    ),
+    // 这轮 run 自己发出去的用户消息：transcript 里那条回显要认出来，别当新消息再插一遍
+    pool.query<{ text: string }>(
+      `SELECT m.text FROM messages m JOIN runs r ON r.id = m.run_id
+       WHERE m.user_id = $1 AND m.session_id = $2 AND m.role = 'user' AND r.status IN ('queued', 'running')`,
+      [userId, sessionId],
+    ),
+  ])
+  const fresh: { role: MessageRole; text: string; at: Date }[] = mergeEventMessages(
+    rows,
+    known.rows.map(r => ({ role: r.role, text: r.text, at: r.created_at.getTime() })),
+    active.rows.map(r => r.text),
+  ).map(m => ({ role: m.role as MessageRole, text: m.text, at: new Date(m.at) }))
   if (!fresh.length) return 0
 
   const client = await pool.connect()

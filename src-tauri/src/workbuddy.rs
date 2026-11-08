@@ -123,13 +123,13 @@ fn text_of(v: &Value, kind: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-/// 用户消息剥掉注入块后剩下的可见文本；纯注入块（摘要 / 通知 / reminder）返回 None，不当标题
+/// 用户消息剥掉注入块后剩下的可见文本（保留换行，用户可能贴的是多行内容）；
+/// 纯注入块（摘要 / 通知 / reminder）返回 None，不当标题。
+/// 只在做标题时压成一行——正文压平了就和服务端存的原文对不上，去重会漏。
 fn user_text(v: &Value) -> Option<String> {
     let raw = text_of(v, "input_text")?;
-    let mut visible = match raw.rfind("</system-reminder>") {
-        Some(i) => &raw[i + "</system-reminder>".len()..],
-        None => raw.as_str(),
-    };
+    // 只剥开头那几段 system-reminder；整段找最后一个会把摘要从中间切开
+    let mut visible = crate::message_history::strip_leading_reminders(&raw);
     // `> ` 引用前缀和 <user_query> 包裹是派发格式残留
     visible = visible.trim_start_matches(['>', ' ', '\n', '\t']);
     if let Some(rest) = visible.strip_prefix("<user_query>") {
@@ -137,9 +137,9 @@ fn user_text(v: &Value) -> Option<String> {
             visible = &rest[..end];
         }
     }
-    let flat = one_line(visible);
-    // 剩下的还是注入块（<cb_summary>、<task-notification> 等）就不当标题
-    (!flat.is_empty() && !flat.starts_with('<')).then_some(flat)
+    let text = visible.trim();
+    // 剩下的还是注入块（<cb_summary>、<task-notification> 等）就不当用户消息
+    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
 }
 
 impl FileState {
@@ -244,8 +244,9 @@ impl FileState {
                 // 不代表新一轮开始，更不能清掉仍在飞的未归工具调用，否则会提前误判完成
                 let real_input = user_text(v);
                 if self.title.is_none() {
+                    // 标题压成一行；正文照原样（多行就是多行）
                     if let Some(t) = &real_input {
-                        self.title = Some(truncate_chars(t, 40));
+                        self.title = Some(truncate_chars(&one_line(t), 40));
                     }
                 }
                 if let Some(t) = &real_input {
@@ -677,6 +678,15 @@ mod tests {
     }
 
     #[test]
+    fn multiline_user_input_keeps_its_lines_but_title_is_one_line() {
+        // 正文压平了就和服务端存的原文对不上：去重按正文比，压平会多出一条一样的消息
+        let mut s = live();
+        let evs = s.feed(&[&msg("user", "completed", "第一行\n第二行", T0)], T0);
+        assert_eq!(evs[0].messages[0].text, "第一行\n第二行");
+        assert_eq!(evs[0].title.as_deref(), Some("第一行 第二行"));
+    }
+
+    #[test]
     fn injected_blocks_are_not_reported_as_messages() {
         let mut s = live();
         s.feed(&[&msg("user", "completed", "跑后台任务", T0)], T0);
@@ -684,6 +694,21 @@ mod tests {
         // 注入行不代表新一轮，也不该变成消息
         assert!(evs.iter().all(|e| e.messages.is_empty()));
         assert!(s.msgs.is_empty());
+    }
+
+    #[test]
+    fn summary_quoting_a_reminder_tag_does_not_leak_into_the_chat() {
+        // 压缩摘要正文里会引用代码和旧对话，中间就带着 </system-reminder>。
+        // 早先按「最后一个」切，摘要被从半腰切开当成了用户输入（本机实测吐过一条 4000 字代码碎片）
+        let mut s = live();
+        let summary = msg("user", "completed", "<cb_summary>\n… rfind(\"</system-reminder>\") …\n</cb_summary>", T0);
+        let evs = s.feed(&[&summary], T0);
+        assert!(evs[0].messages.is_empty(), "{:?}", evs[0].messages);
+        assert!(s.msgs.is_empty());
+        // 真正的用户输入（reminder 包一层）照样要认出来
+        let typed = msg("user", "completed", "<system-reminder data-role=\"user-context\">上下文</system-reminder>\n> <user_query>确认一下</user_query>", T0 + 1_000);
+        let evs = s.feed(&[&typed], T0 + 1_000);
+        assert_eq!(evs[0].messages[0].text, "确认一下");
     }
 
     #[test]
