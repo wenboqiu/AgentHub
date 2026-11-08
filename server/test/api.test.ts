@@ -209,6 +209,25 @@ describe('AgentHub 服务端', () => {
     }
   })
 
+  it('内部会话的标题由服务端钉住，不被本机 transcript 的契约原文顶掉', async () => {
+    const key = sid(), id = `codebuddy:${key}`
+    await send([ev(key, 'running', { agent: 'codebuddy', at: iso(-3000), title: '意见细化：把会话列表里的提示词原文收起来' })])
+    assert.equal((await get(id)).title, '意见细化：把会话列表里的提示词原文收起来')
+    // 电脑端报上来的标题是「首条用户消息截 40 字」，而这类会话的首条正是 AgentHub 写的契约：不许覆盖
+    await send([ev(key, 'done', {
+      agent: 'codebuddy', at: iso(-2000),
+      title: '你在 AgentHub 里当项目经理，读完一段刚结束的会话，写一张能直接开工的任',
+    })])
+    const done = await get(id)
+    assert.equal(done.state, 'done')
+    assert.equal(done.title, '意见细化：把会话列表里的提示词原文收起来')
+    // 普通的活照旧跟着 transcript 走，这条规矩不能外溢
+    const plain = sid()
+    await send([ev(plain, 'running', { agent: 'codebuddy', at: iso(-3000), title: '第一句' })])
+    await send([ev(plain, 'done', { agent: 'codebuddy', at: iso(-2000), title: '第二句' })])
+    assert.equal((await get(`codebuddy:${plain}`)).title, '第二句')
+  })
+
   it('WorkBuddy 事件支持状态与标题，拒绝远程执行，但历史可以读', async () => {
     const key = sid(), id = `workbuddy:${key}`
     const first = await send([ev(key, 'running', { agent: 'workbuddy', cwd: 'D:\\Work2\\AgentHub', title: '分析 agenthub 能否支持 workbuddy 的消息' })])

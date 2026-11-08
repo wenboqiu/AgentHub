@@ -10,6 +10,7 @@ import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import SessionSidebar from "./SessionSidebar";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
+import { isInternalSession } from "./lib/internal";
 import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
@@ -491,6 +492,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       <div className="app session-view">
       {session.title && <div className="title wrap">{session.title}</div>}
+      {/* 内部会话的首条气泡是 AgentHub 写的契约提示词（角色助手 / 意见细化），先说明白，别让人以为是自己发的 */}
+      {isInternalSession(session) && <p className="hint">AgentHub 自动开的会话：首条消息是发给执行工具的指令原文，不是人写的对话。跑完的结果会回到对应的角色草稿或任务单上。</p>}
       {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => { setErr(""); desktop.focus(null, session.agent).catch((e) => setErr(e instanceof Error ? e.message : String(e))); }}>打开 {agentName(session.agent)} 客户端</button></div>}
       {/* 会话级操作合并为一行：任务关联、新建会话、终端打开 */}
       <div className="task-links">

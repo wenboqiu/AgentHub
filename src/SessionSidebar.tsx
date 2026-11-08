@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AGENT_LABEL } from "./lib/agents";
 import type { Session } from "./lib/api";
 import { ago } from "./lib/time";
+import { isInternalSession, sessionPreview } from "./lib/internal";
 import Icon from "./Icon";
 
 type Props = {
@@ -26,7 +27,7 @@ const STATE_DOT: Record<string, string> = {
   done: "ok",
 };
 
-type Section = { key: "pending" | "running" | "rest"; label: string; hint: string; items: Session[] };
+type Section = { key: "pending" | "running" | "rest" | "internal"; label: string; hint: string; items: Session[] };
 
 const FOLD_KEY = "agenthub.sidebarSections";
 /** 侧栏宽度：拖动分隔条调整，记住到本机 */
@@ -55,8 +56,11 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
     const pending: Session[] = [];
     const running: Session[] = [];
     const rest: Session[] = [];
+    const internal: Session[] = [];
     for (const s of sessions) {
-      if (attention.has(s.id)) pending.push(s);
+      // 内部会话（角色助手 / 意见细化）先挑走：它们的首条消息是契约提示词，混在「待处理」里只会让人误点
+      if (isInternalSession(s)) internal.push(s);
+      else if (attention.has(s.id)) pending.push(s);
       else if (s.state === "running") running.push(s);
       else rest.push(s);
     }
@@ -64,11 +68,12 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
       { key: "pending", label: "待处理", hint: "等你处理", items: pending },
       { key: "running", label: "进行中", hint: "在跑", items: running },
       { key: "rest", label: "已处理", hint: "历史", items: rest },
+      { key: "internal", label: "内部会话", hint: "AgentHub 自己开的", items: internal },
     ];
     return all.filter((g) => g.items.length > 0);
   }, [sessions, attention]);
 
-  // 折叠状态记在本机，下次进来保持一致；没记录过的按默认（已处理收起）
+  // 折叠状态记在本机，下次进来保持一致；没记录过的按默认（已处理、内部会话收起）
   const [openMap, setOpenMap] = useState<Record<string, boolean>>(() => {
     try {
       return JSON.parse(localStorage.getItem(FOLD_KEY) || "{}") as Record<string, boolean>;
@@ -82,13 +87,15 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
     } catch {}
   }, [openMap]);
 
-  const isOpen = (g: Section) => openMap[g.key] ?? g.key !== "rest";
+  /** 默认展开待处理与进行中；已处理、内部会话默认收起（收着也要能点开看，所以是折叠不是隐藏） */
+  const defaultOpen = (key: Section["key"]) => key !== "rest" && key !== "internal";
+  const isOpen = (g: Section) => openMap[g.key] ?? defaultOpen(g.key);
 
   // 当前会话若落在收起的段里（比如从别处跳进一个已处理的会话），自动展开那一段
   useEffect(() => {
     if (!currentId) return;
     const hit = sections.find((g) => g.items.some((s) => s.id === currentId));
-    if (hit && !(openMap[hit.key] ?? hit.key !== "rest")) setOpenMap((m) => ({ ...m, [hit.key]: true }));
+    if (hit && !(openMap[hit.key] ?? defaultOpen(hit.key))) setOpenMap((m) => ({ ...m, [hit.key]: true }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentId, sections]);
 
@@ -209,6 +216,7 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
               <ul className="sidebar-list">
                 {g.items.map((s) => {
                   const needsAttention = attention.has(s.id);
+                  const preview = sessionPreview(s);
                   return (
                     <li key={s.id}>
                       <button
@@ -223,7 +231,7 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
                           {needsAttention && <span className="si-badge">待处理</span>}
                           <span className="si-time">{ago(s.updatedAt, now)}</span>
                         </span>
-                        {(s.title || s.summary) && <span className="si-sub">{s.title || s.summary}</span>}
+                        {preview && <span className="si-sub">{preview}</span>}
                         <span className="si-meta">{AGENT_LABEL[s.agent]} · {s.machine}</span>
                       </button>
                     </li>

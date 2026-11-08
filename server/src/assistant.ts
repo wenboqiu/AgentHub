@@ -55,8 +55,8 @@ export type AssistantThread = {
 // 一个账号只留一条助手对话：换工具/换电脑就重开，不留历史包袱
 export const MAX_MESSAGE = 4000
 export const MAX_DRAFT_CONTEXT = 1500
-/** 助手会话的标题前缀：会话列表里能认出来，通知也按它静音 */
-export const ASSISTANT_TITLE = '角色助手：'
+/** 助手会话的标题前缀：会话列表里能认出来，通知也按它静音（定义在 session-kind.ts，与意见细化共用） */
+export { ASSISTANT_TITLE } from './session-kind.ts'
 const MAX_TOOLS = 10
 const ASSISTANTS: Agent[] = ['claude', 'codex', 'zcode']
 

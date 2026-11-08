@@ -6,6 +6,7 @@ import { readableNotes } from './attachments.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
 import { NO_CONSTRAINTS, normalizeConstraints, hasConstraints, boundaryLine, type TaskConstraints } from './referee.ts'
 import type { ProjectDir } from './projects.ts'
+import { ASSISTANT_TITLE, CONTRACT_HEADS, PROPOSAL_TITLE } from './session-kind.ts'
 
 // 处理意见（Proposal）：一个会话跑完后，先替人把「接下来该做什么」想好，放在会话上等人确认。
 //
@@ -127,7 +128,7 @@ const MAX_EVIDENCE = 6
 /** 没声明去向时的默认：接着做 / 回去修沿用上下文，新的一段工作（含人直接发的单）从零开始 */
 const defaultDelivery = (kind: ProposalKind): Delivery => (kind === 'followup' || kind === 'ticket' ? 'fresh' : 'fork')
 /** 细化会话的标题前缀：这类会话不再生成新的处理意见（否则会无限套娃），也不弹通知 */
-export const PROPOSAL_TITLE = '意见细化：'
+export { PROPOSAL_TITLE }
 
 const EMPTY_ASSIGNEE: Assignee = {
   roleId: null, roleName: '', roleTitle: '', agent: '', machine: '', cwd: '',
@@ -247,6 +248,15 @@ export async function migrateProposals(db: DB) {
     WHERE status='pending' AND task_id IS NULL AND kind <> 'ticket'`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_pending ON session_proposals(user_id,status,created_at DESC)')
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_session ON session_proposals(user_id,session_id)')
+  // 历史数据修复：内部会话的标题曾被本机 transcript 的契约提示词顶掉，会话列表里就露出一大段提示词原文。
+  // 细化会话能按 refine_run_id 找回当时的任务单标题；助手会话没有可还原的名字，统一收成「角色助手」。
+  // 只改标题仍是契约原文的那批（人自己改过的不动），改完不再命中，重复启动无副作用。
+  await db.query(`UPDATE sessions s SET title = $2 || left(p.title, 40)
+    FROM session_proposals p JOIN runs r ON r.id = p.refine_run_id AND r.user_id = p.user_id
+   WHERE s.user_id = p.user_id AND s.id = r.session_id AND s.title LIKE $1 || '%'`,
+    [CONTRACT_HEADS[0], PROPOSAL_TITLE])
+  await db.query("UPDATE sessions SET title = $2 WHERE title LIKE $1 || '%'",
+    [CONTRACT_HEADS[1], ASSISTANT_TITLE.replace(/：$/, '')])
 }
 
 const row = (r: any): Proposal => ({

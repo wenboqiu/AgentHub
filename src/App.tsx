@@ -19,6 +19,7 @@ import Icon from "./Icon";
 import Markdown from "./Markdown";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
+import { isInternalSession } from "./lib/internal";
 // proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
 type Detail = {kind:"session";id:string} | {kind:"proposal";id:string} | {kind:"task"|"goal";id:number} | null;
 type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar";
@@ -345,9 +346,13 @@ export default function App() {
   const approvalSessions = useMemo(() => new Set([...approvals.values()].map((a) => a.sessionId)), [approvals]);
   const needsAttention = (s: Session) => isPending(s) || approvalSessions.has(s.id);
   const attention = useMemo(() => new Set(list.filter(needsAttention).map((s) => s.id)), [list, approvalSessions]);
-  const pending = list.filter(needsAttention);
-  const running = list.filter((s) => !needsAttention(s) && s.state === "running");
-  const others = list.filter((s) => !needsAttention(s) && s.state !== "running");
+  // 内部会话（角色助手 / 意见细化）单独一段：它们的首条消息是 AgentHub 写的契约提示词，不是人说的话，
+  // 混在待处理里只会让人误点，也把真人的活挤下去。
+  const visible = useMemo(() => list.filter((s) => !isInternalSession(s)), [list]);
+  const internalSessions = useMemo(() => list.filter(isInternalSession), [list]);
+  const pending = visible.filter(needsAttention);
+  const running = visible.filter((s) => !needsAttention(s) && s.state === "running");
+  const others = visible.filter((s) => !needsAttention(s) && s.state !== "running");
 
   useEffect(() => {
     if (isDesktop) desktop.setBadge(pending.length).catch(() => {});
@@ -595,6 +600,13 @@ export default function App() {
               {others.length ? renderList(others) : <p className="empty">空</p>}
             </details>
           </>
+        )}
+        {internalSessions.length > 0 && (
+          <details>
+            <summary>内部会话（{internalSessions.length}）</summary>
+            <p className="hint">AgentHub 自己开的：角色助手造角色、意见细化写任务单。点开能看到发给 agent 的指令原文。</p>
+            {renderList(internalSessions)}
+          </details>
         )}
         <details onToggle={(e) => {
           const open = (e.currentTarget as HTMLDetailsElement).open;

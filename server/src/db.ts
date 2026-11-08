@@ -15,6 +15,7 @@ import { migrateAttachments } from './attachments.ts'
 import { migrateReferee } from './referee.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
 import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
+import { isInternalTitle } from './session-kind.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -315,7 +316,12 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const notify = alert && !quiet && !duplicate
   const stateSince = !cur || cur.state !== ev.state || notify ? at : cur.state_since
   const cwd = ev.cwd || cur?.cwd || ''
-  const title = (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
+  // 内部会话（角色助手 / 意见细化）的标题是 startSession 起的名字，钉住不放：本机 transcript 里的
+  // 标题是「首条用户消息截 40 字」，而这轮的首条消息正是 AgentHub 写的契约提示词，顶上去就成了提示词原文。
+  const pinned = isInternalTitle(cur?.title ?? '')
+  const title = pinned
+    ? cur!.title
+    : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
   const row = (
@@ -422,7 +428,10 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
       out = (await client.query<Row>('UPDATE sessions SET id = $3, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING *', [userId, from, to])).rows[0]
     } else {
       out = real
-      if (!real.title && pending.title) {
+      // 真实行多半是 hook / 轮询抢先上报的，标题来自 transcript 首条消息（内部会话就是契约提示词原文）。
+      // 临时行上的标题才是服务端特意起的名字，这种情况下让它赢；真实行本来没标题时也照旧沿用。
+      const keepPending = !!pending.title && (isInternalTitle(pending.title) || !real.title)
+      if (keepPending && real.title !== pending.title) {
         out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
       }
       await client.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, from])
