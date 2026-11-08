@@ -251,7 +251,7 @@ export type Session = {
 
 export type RunStatus = "queued" | "running" | "done" | "failed" | "stopped";
 /** 一次运行的 token 用量（执行器上报，Claude / Codex 才有；cached 是命中缓存的输入） */
-export type RunUsage = { input: number; output: number; total: number; cached?: number; reasoning?: number; costUsd?: number };
+export type RunUsage = { input: number; output: number; total: number; cached?: number; reasoning?: number; costUsd?: number; credits?: number };
 export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; /** 这一轮用的模型；空 = 执行端默认 */ model?: string | null; /** 谁定的、为什么 */ modelNote?: string; createdAt: string; updatedAt: string };
 /** 执行器实时上报的「正在做什么」：文字是 agent 自己的（思考原文 / 工具调用 / 正在写的正文） */
 export type RunActivity = { runId: string; sessionId: string; kind: "thinking" | "tool" | "text" | "idle"; text: string; at: string };

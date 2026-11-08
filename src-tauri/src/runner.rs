@@ -24,7 +24,7 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 const HISTORY_COUNT: usize = 50;
-const TEXT_MAX: usize = 4000;
+const TEXT_MAX: usize = 16000;
 /// 「正在做什么」那行只显示尾巴：思考原文截到 200 字，也不往 WS 上传大段文字
 const ACTIVITY_MAX: usize = 200;
 /// request_user_input 的消息图片太大就放弃附带（base64 后约 5.3MB，WS 和移动端都能承受）
@@ -314,6 +314,11 @@ pub struct Usage {
     pub total: u64,
     /// 只有 Claude 给美元成本
     pub cost_usd: f64,
+    /// 积分用量（ZCode / CodeBuddy 系）：事件里带了才填，没有就是 0
+    pub credits: f64,
+    /// 实测模型 id（Claude 的 result 事件自带 model；ZCode 从 state 变更捕获）——
+    /// 随用量事件一起上报，比「角色配的模型」更真
+    pub model: String,
 }
 
 impl Usage {
@@ -328,6 +333,12 @@ impl Usage {
         if self.cost_usd > 0.0 {
             m["costUsd"] = json!(self.cost_usd);
         }
+        if self.credits > 0.0 {
+            m["credits"] = json!(self.credits);
+        }
+        if !self.model.is_empty() {
+            m["model"] = json!(self.model);
+        }
         m
     }
 }
@@ -339,11 +350,27 @@ fn number(v: &Value, keys: &[&str]) -> u64 {
         .unwrap_or(0)
 }
 
-/// 认一份用量对象；连 input/output 都没有就当「不是用量」（有些事件的 usage 是空壳）
+/// 积分用量：数值字段或字符串（"12.5"）都认；对不上就是 0
+fn credits_of(v: &Value) -> f64 {
+    ["credits", "creditsUsed", "creditUsage", "pointsUsed", "points"]
+        .iter()
+        .find_map(|k| v.get(*k))
+        .and_then(|x| match x {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        })
+        .filter(|f| *f > 0.0)
+        .unwrap_or(0.0)
+}
+
+/// 认一份用量对象；连 input/output 都没有就当「不是用量」（有些事件的 usage 是空壳），
+/// 但只有积分也算——积分制计费的通道可能不给 token 数。
 fn usage_of(v: &Value) -> Option<Usage> {
     let input = number(v, &["input_tokens", "inputTokens", "prompt_tokens", "promptTokens", "input"]);
     let output = number(v, &["output_tokens", "outputTokens", "completion_tokens", "completionTokens", "output"]);
-    if input == 0 && output == 0 {
+    let credits = credits_of(v);
+    if input == 0 && output == 0 && credits == 0.0 {
         return None;
     }
     let cached = number(v, &["cache_read_input_tokens", "cacheReadInputTokens", "cached_input_tokens", "cachedInputTokens", "cached"]);
@@ -352,7 +379,7 @@ fn usage_of(v: &Value) -> Option<Usage> {
         0 => input + output + cached,
         n => n,
     };
-    Some(Usage { input, output, cached, reasoning, total, cost_usd: 0.0 })
+    Some(Usage { input, output, cached, reasoning, total, cost_usd: 0.0, credits, model: String::new() })
 }
 
 /// 从任意事件里找用量：先按已知协议位置逐个试，再在浅层里兜底搜一个像用量的对象。
@@ -401,7 +428,7 @@ pub enum ClaudeMsg {
     Thinking(String),
     Tool { name: String, summary: String },
     Approval { request_id: String, tool: String, detail: String, input: Value },
-    Result { subtype: String, usage: Option<Usage> },
+    Result { subtype: String, usage: Option<Usage>, model: String },
 }
 
 /// 解析 claude stream-json 的一行；不关心的类型返回空
@@ -450,7 +477,9 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeMsg> {
         }
         Some("result") => {
             let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
-            out.push(ClaudeMsg::Result { subtype, usage: usage_from(&v) });
+            // result 事件自带实测模型 id（比角色配的更真），随用量一起上报
+            let model = v.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+            out.push(ClaudeMsg::Result { subtype, usage: usage_from(&v), model });
         }
         _ => {}
     }
@@ -1199,7 +1228,16 @@ impl Run {
 
     /// 这次的 token 用量：界面在对话流末尾显示「输入 / 输出 / 缓存 / 花费」
     fn usage(&self, u: &Usage) {
-        let _ = self.out.send(json!({"type":"run.usage","runId":self.run_id,"usage":u.to_json()}));
+        self.usage_model(u, "");
+    }
+
+    /// 带实测模型 id 的用量上报：模型为空时和 usage 等价
+    fn usage_model(&self, u: &Usage, model: &str) {
+        let mut v = u.to_json();
+        if !model.is_empty() {
+            v["model"] = json!(model);
+        }
+        let _ = self.out.send(json!({"type":"run.usage","runId":self.run_id,"usage":v}));
     }
 
     /// 运行中的一句话状态，文字全部来自 agent 自己（思考原文 / 工具调用），不在这里编。
@@ -1724,9 +1762,9 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
                         ClaudeMsg::Approval { request_id, tool, detail, input } => {
                             approvals.add(&run.out, &run.run_id, &tool, &detail, json!(request_id), "", input)
                         }
-                        ClaudeMsg::Result { subtype, usage } => {
+                        ClaudeMsg::Result { subtype, usage, model } => {
                             if let Some(u) = usage {
-                                run.usage(&u);
+                                run.usage_model(&u, &model);
                             }
                             stdin = None; // 关闭 stdin，进程自己退出
                             finish = Some(if subtype == "success" { Finish::Done } else { Finish::Failed(format!("运行结束：{subtype}")) });
@@ -2161,6 +2199,8 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
     let mut finish: Option<Finish> = None;
     let mut project_token: Option<(String, String)> = None;
     let mut reply = String::new();
+    // 会话实测模型：state.updated 捕获，随用量事件上报（没有就是空）
+    let mut model_seen = String::new();
     // 正在做什么：model.streaming 的增量拼成一句话
     let mut live = Live::default();
     while finish.is_none() {
@@ -2240,7 +2280,7 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                 "turn.completed" => {
                                     // 有 token 统计就一起报（这套 CLI 不一定给，给了就显示）
                                     if let Some(u) = usage_from(p) {
-                                        run.usage(&u);
+                                        run.usage_model(&u, &model_seen);
                                     }
                                     let content = p
                                         .pointer("/payload/content")
@@ -2283,6 +2323,16 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                 finish = Some(Finish::Failed(format!("ZCode 会话启动失败：{msg}")));
                             }
                         }
+                        // 会话配置变更：model 换了就记下来，用量上报时带上实测模型
+                        "state.updated" => {
+                            if v.pointer("/params/scope").and_then(Value::as_str) == Some("session") {
+                                if let Some(m) = v.pointer("/params/patch/model").and_then(Value::as_str) {
+                                    if !m.is_empty() {
+                                        model_seen = m.to_string();
+                                    }
+                                }
+                            }
+                        }
                         // 存储就绪就可以发 create，不必等满 3 秒
                         "startup/storageState" => {
                             if v.pointer("/params/phase").and_then(Value::as_str) == Some("ready") && !create_sent {
@@ -2301,7 +2351,7 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                         "v4/telemetry/event" => {
                             if v.pointer("/params/kind").and_then(Value::as_str) == Some("turn.terminal") {
                                 if let Some(u) = usage_from(&v["params"]) {
-                                    run.usage(&u);
+                                    run.usage_model(&u, &model_seen);
                                 }
                                 let status = v.pointer("/params/status").and_then(Value::as_str).unwrap_or("");
                                 if !reply.trim().is_empty() {
@@ -2987,8 +3037,8 @@ mod tests {
             [ClaudeMsg::Approval { detail, .. }] => assert_eq!(detail, r#"{"pattern":"*.rs"}"#),
             o => panic!("{o:?}"),
         }
-        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","session_id":"s"}"#), vec![ClaudeMsg::Result { subtype: "success".into(), usage: None }]);
-        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"error_max_turns"}"#), vec![ClaudeMsg::Result { subtype: "error_max_turns".into(), usage: None }]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","session_id":"s"}"#), vec![ClaudeMsg::Result { subtype: "success".into(), usage: None, model: String::new() }]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"error_max_turns"}"#), vec![ClaudeMsg::Result { subtype: "error_max_turns".into(), usage: None, model: String::new() }]);
     }
 
     #[test]
@@ -3007,7 +3057,29 @@ mod tests {
             o => panic!("{o:?}"),
         }
         // 空 usage 不能当成「用了 0 个 token」
-        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","usage":{}}"#), vec![ClaudeMsg::Result { subtype: "success".into(), usage: None }]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","usage":{}}"#), vec![ClaudeMsg::Result { subtype: "success".into(), usage: None, model: String::new() }]);
+    }
+
+    #[test]
+    fn usage_from_result_carries_model_and_credits() {
+        // Claude result 自带实测模型 id；用量对象里的积分（字符串或数字）都认
+        let l = r#"{"type":"result","subtype":"success","model":"glm-5.3",
+          "usage":{"input_tokens":100,"output_tokens":20,"credits":12.5}}"#;
+        match &parse_claude_line(l)[..] {
+            [ClaudeMsg::Result { usage: Some(u), model, .. }] => {
+                assert_eq!(model, "glm-5.3");
+                assert!((u.credits - 12.5).abs() < 1e-9);
+                let j = u.to_json();
+                assert_eq!(j["credits"], 12.5);
+                // model 不在 to_json 里，由 run.usage_model 加到事件层
+                assert!(j.get("model").is_none());
+            }
+            o => panic!("{o:?}"),
+        }
+        // 只有积分没有 token 也算有效用量（积分制通道）
+        let u = usage_from(&serde_json::json!({"usage": {"credits": "3.2"}})).expect("credits-only usage");
+        assert!((u.credits - 3.2).abs() < 1e-9);
+        assert_eq!((u.input, u.output), (0, 0));
     }
 
     #[test]

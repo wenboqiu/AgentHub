@@ -474,8 +474,10 @@ export type RunStatus = (typeof RUN_STATUSES)[number]
 export const MESSAGE_ROLES = ['user', 'assistant', 'tool', 'approval', 'system'] as const
 export type MessageRole = (typeof MESSAGE_ROLES)[number]
 export const KEEP_MESSAGES = 200
+/** 消息正文入库上限：执行器侧 TEXT_MAX 同步（16000），两边不一致会导致历史同步时再截一次 */
+export const MESSAGE_TEXT_MAX = 16000
 
-export type RunUsage = { input: number; output: number; cached?: number; reasoning?: number; total: number; costUsd?: number }
+export type RunUsage = { input: number; output: number; cached?: number; reasoning?: number; total: number; costUsd?: number; credits?: number }
 export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage: RunUsage | null; /** 这一轮用的模型；空 = 执行端默认 */ model: string | null; /** 谁定的、为什么，给界面和事后复盘看 */ modelNote: string; createdAt: string; updatedAt: string }
 export type MessageMeta = { sourceId?: string; branchPoint?: string }
 export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string }
@@ -623,6 +625,15 @@ export async function setRunUsage(pool: pg.Pool, userId: number, id: string, usa
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 
+/** 执行端报上来的实测模型：只在 run 还没记过模型时填（角色配的不覆盖） */
+export async function setRunModelIfEmpty(pool: pg.Pool, userId: number, id: string, model: string): Promise<Run | null> {
+  const r = await pool.query<RunRow>(
+    "UPDATE runs SET model = $2, updated_at = now() WHERE user_id = $3 AND id = $1 AND (model IS NULL OR model = '') RETURNING *",
+    [id, model.slice(0, 200), userId],
+  )
+  return r.rows[0] ? toRun(r.rows[0]) : null
+}
+
 // 执行器断线：它名下 queued/running 的 run 全部标 failed
 export async function failActiveRuns(pool: pg.Pool, userId: number, machine: string, error: string): Promise<Run[]> {
   const r = await pool.query<RunRow>(
@@ -681,7 +692,7 @@ export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number
     sessionId,
     runId,
     role,
-    cleanText(text, 4000),
+    cleanText(text, MESSAGE_TEXT_MAX),
     userId,
     nativeKey(meta.sourceId),
     nativeKey(meta.branchPoint),
@@ -736,7 +747,7 @@ export function historyTimes(items: { at: number | null; sourceId: string | null
 
 export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string; at?: string } & MessageMeta)[]): Promise<Message[]> {
   const snapshot = items
-    .map(it => ({ role: it.role, text: cleanText(it.text, 4000), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null }))
+    .map(it => ({ role: it.role, text: cleanText(it.text, MESSAGE_TEXT_MAX), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null }))
     .filter(it => it.text)
     .slice(-KEEP_MESSAGES)
   const client = await pool.connect()
@@ -826,7 +837,7 @@ export async function appendEventMessages(
 ): Promise<number> {
   const incoming = items
     .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({ role: m.role as MessageRole, text: cleanText(m.text ?? '', 4000), at: m.at && !Number.isNaN(Date.parse(m.at)) ? Date.parse(m.at) : null }))
+    .map(m => ({ role: m.role as MessageRole, text: cleanText(m.text ?? '', MESSAGE_TEXT_MAX), at: m.at && !Number.isNaN(Date.parse(m.at)) ? Date.parse(m.at) : null }))
     .filter(m => m.text.trim())
   if (!incoming.length) return 0
 

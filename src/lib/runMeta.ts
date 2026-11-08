@@ -29,12 +29,17 @@ export function runElapsed(run: Run, now = Date.now()): number {
 /** 花费：小额多给一位小数，免得 0.004 全被抹成 0.00 */
 const money = (usd: number) => `$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`;
 
-/** 用量说明：输入 1.2k · 输出 345 · 缓存 8k tokens · $0.031 */
+/** 积分：整数不加小数点，小数给两位 */
+const fmtCredits = (c: number) => (Number.isInteger(c) ? String(c) : c.toFixed(2));
+
+/** 用量说明：输入 1.2k · 输出 345 · 缓存 8k tokens · $0.031 · 12.5 积分 */
 export function usageText(u: RunUsage): string {
   const parts = [`输入 ${shortTokens(u.input)}`, `输出 ${shortTokens(u.output)}`];
   if (u.cached) parts.push(`缓存 ${shortTokens(u.cached)}`);
-  const text = `${parts.join(" · ")} tokens`;
-  return u.costUsd ? `${text} · ${money(u.costUsd)}` : text;
+  let text = `${parts.join(" · ")} tokens`;
+  if (u.costUsd) text += ` · ${money(u.costUsd)}`;
+  if (u.credits) text += ` · ${fmtCredits(u.credits)} 积分`;
+  return text;
 }
 
 /** 跑完之后那行结尾说明：本次完成 · 用时 1 分 20 秒 · 输入… */
@@ -45,6 +50,7 @@ export function runSummary(run: Run, now = Date.now()): string {
     : run.status === "done" ? "本次完成"
     : "运行中";
   const parts = [state, `用时 ${formatElapsed(runElapsed(run, now))}`];
+  if (run.model) parts.push(`模型 ${run.model}`);
   if (run.usage) parts.push(usageText(run.usage));
   return parts.join(" · ");
 }

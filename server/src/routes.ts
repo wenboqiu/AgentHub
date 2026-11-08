@@ -45,6 +45,7 @@ import {
   renamePendingSession,
   setRunStatus,
   setRunUsage,
+  setRunModelIfEmpty,
   stopTaskRun,
   type Approval,
   type EventIn,
@@ -293,8 +294,10 @@ function cleanUsage(raw: unknown): RunUsage | null {
   const cached = num('cached'), reasoning = num('reasoning')
   const total = num('total') || input + output + cached
   const cost = typeof o.costUsd === 'number' && Number.isFinite(o.costUsd) && o.costUsd > 0 ? Math.min(o.costUsd, 1000) : 0
-  if (!input && !output && !cached) return null
-  return { input, output, total, ...(cached ? { cached } : {}), ...(reasoning ? { reasoning } : {}), ...(cost ? { costUsd: cost } : {}) }
+  // 积分制计费（ZCode 系）可能只有积分没有 token 数，也算有效用量
+  const credits = typeof o.credits === 'number' && Number.isFinite(o.credits) && o.credits > 0 ? o.credits : 0
+  if (!input && !output && !cached && !credits) return null
+  return { input, output, total, ...(cached ? { cached } : {}), ...(reasoning ? { reasoning } : {}), ...(cost ? { costUsd: cost } : {}), ...(credits ? { credits } : {}) }
 }
 
 /** 执行器上报的「正在做什么」：kind 为 idle 表示这轮没有在说的话，界面回到中性提示 */
@@ -1818,10 +1821,18 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       case 'run.usage': {
         const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine) return
-        const usage = cleanUsage(m.usage)
-        if (!usage) return
-        const updated = await setRunUsage(pool, userId, run.id, usage)
-        if (updated) pushRun(userId, updated)
+        const usageRaw = (m.usage && typeof m.usage === 'object' ? m.usage : null) as Record<string, unknown> | null
+        const usage = cleanUsage(usageRaw)
+        if (usage) {
+          const updated = await setRunUsage(pool, userId, run.id, usage)
+          if (updated) pushRun(userId, updated)
+        }
+        // 执行端报上来的实测模型（在 usage 对象里）：run 还没记过模型才填，不覆盖角色配的
+        const actualModel = typeof usageRaw?.model === 'string' ? usageRaw.model.trim().slice(0, 200) : ''
+        if (actualModel && !run.model) {
+          const withModel = await setRunModelIfEmpty(pool, userId, run.id, actualModel)
+          if (withModel) pushRun(userId, withModel)
+        }
         return
       }
       case 'run.approval': {
