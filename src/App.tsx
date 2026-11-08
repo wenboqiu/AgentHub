@@ -255,7 +255,13 @@ export default function App() {
       onAuthExpired: expire,
       onSnapshot: (list, ag, aps, gs, ts, rs) => {
         setReminders(new Map(rs.map(r=>[r.id,r])));
-        rs.forEach(receiveReminder);
+        // 快照里的提醒是「所有未 ack 的」，大多是历史欠账：全弹的话每次启动/重连都会重放旧通知。
+        // 只把刚到期（5 分钟内，覆盖短暂离线窗口）的当新事件弹，其余标记已通知（列表里仍可见，等 ack）。
+        const freshSince = Date.now() - 5 * 60 * 1000;
+        rs.forEach(r => {
+          if (Date.parse(r.scheduledAt) >= freshSince) receiveReminder(r);
+          else notifiedReminders.current.add(r.id);
+        });
         setSessions(new Map(list.map((s) => [s.id, s])));
         setAgents(ag);
         setApprovals(new Map(aps.filter((a) => a.status === "pending").map((a) => [a.id, a])));
