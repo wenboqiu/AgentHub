@@ -675,7 +675,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               return (
                 <div key={a.id} className="approval-card user-input-card">
                   <div className="approval-head">
-                    <span>Codex 提问</span>
+                    <span>提问待回答</span>
                     <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
                   </div>
                   {qs.map((q) => (
@@ -710,7 +710,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                       {deciding === a.id ? "处理中…" : "跳过"}
                     </button>
                   </div>
-                  <p className="hint">不选直接提交会把空答案告诉 Codex；跳过后它会按自己的默认继续。</p>
+                  <p className="hint">不选直接提交等于跳过：它拿不到答案，会按自己的默认继续。</p>
                 </div>
               );
             })}

@@ -720,6 +720,85 @@ pub fn permission_response(request_id: &str, allow: bool, input: &Value, sdk_sty
     }
 }
 
+/// 提问工具（Claude Code / CodeBuddy 同源）：也走 `can_use_tool`，但光 allow 不算数——
+/// CLI 校验 `updatedInput.answers` 非空，缺了直接判错("allowed AskUserQuestion without answers")。
+pub const ASK_TOOL: &str = "AskUserQuestion";
+
+/// 工具入参里的 questions → 服务端和界面认的数组（id 用 `q_0`/`q_1`，和 CLI 自己的编号一致）
+pub fn ask_questions(input: &Value) -> Value {
+    let items = input.get("questions").and_then(|q| q.as_array()).cloned().unwrap_or_default();
+    let out: Vec<Value> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, q)| {
+            let question = q.get("question").and_then(|v| v.as_str())?.trim().to_string();
+            if question.is_empty() {
+                return None;
+            }
+            Some(json!({
+                "id": format!("q_{i}"),
+                "question": question,
+                "header": q.get("header").and_then(|v| v.as_str()).unwrap_or(""),
+                "options": q.get("options").cloned().unwrap_or_else(|| json!([])),
+                "multiSelect": q.get("multiSelect").and_then(|v| v.as_bool()).unwrap_or(false),
+            }))
+        })
+        .collect();
+    Value::Array(out)
+}
+
+/// 界面选回来的 `{"q_0": ["A","B"]}` → CLI 要的 `{"题目原文": "A, B"}`。
+/// 键必须换成题目原文，值必须是字符串（CLI 用 `requireAnswers` 卡：值不是字符串就抛错）；
+/// 多选按英文逗号拼，一条都没选返回 None——空 answers 送过去照样被 CLI 判错。
+pub fn ask_answers(input: &Value, answers: &Value) -> Option<Value> {
+    let items = input.get("questions").and_then(|q| q.as_array())?;
+    let picked = answers.as_object()?;
+    let mut out = serde_json::Map::new();
+    for (i, q) in items.iter().enumerate() {
+        let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        if question.is_empty() {
+            continue;
+        }
+        let labels: Vec<String> = picked
+            .get(&format!("q_{i}"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+        if labels.is_empty() {
+            continue;
+        }
+        out.insert(question, Value::String(labels.join(", ")));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(Value::Object(out))
+    }
+}
+
+/// 带答案的 allow：原工具入参 + answers，两种格式各自包装
+pub fn ask_response(request_id: &str, input: &Value, answers: &Value, sdk_style: bool) -> String {
+    let mut merged = input.clone();
+    if let Value::Object(o) = &mut merged {
+        o.insert("answers".into(), answers.clone());
+    }
+    if sdk_style {
+        sdk_control_response(request_id, true, &merged)
+    } else {
+        claude_control_response(request_id, true, &merged)
+    }
+}
+
+/// 拒绝 / 没选答案：带上能看懂的理由（CLI 会把 reason/message 原样当 tool_result 给模型）
+pub fn ask_deny(request_id: &str, reason: &str, sdk_style: bool) -> String {
+    let inner = if sdk_style {
+        json!({"allowed":false,"reason":reason})
+    } else {
+        json!({"behavior":"deny","message":reason})
+    };
+    json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":inner}}).to_string()
+}
+
 #[derive(Debug, PartialEq)]
 pub enum CodexIn {
     Response { id: i64, error: Option<String>, result: Value },
@@ -1273,6 +1352,13 @@ impl Approvals {
         self.add(out, run_id, "userInput", &questions.to_string(), key, USER_INPUT_METHOD, Value::Null);
     }
 
+    /// 提问（Claude / CodeBuddy 的 AskUserQuestion）：和 Codex 的提问共用一张卡片，
+    /// 但**保留原始工具入参**——答完要把它连 answers 一起回给 CLI，缺了就被判错。
+    fn add_ask(&mut self, out: &Sender<Value>, run_id: &str, input: &Value, key: Value) {
+        let questions = ask_questions(input);
+        self.add(out, run_id, "userInput", &questions.to_string(), key, USER_INPUT_METHOD, input.clone());
+    }
+
     fn created(&mut self, local_id: u64, approval_id: String, out: &Sender<Value>, run_id: &str) -> Option<(Pending, bool)> {
         if self.expired_local.remove(&local_id) {
             self.early.remove(&approval_id);
@@ -1305,6 +1391,12 @@ impl Approvals {
             p.input = answers.clone();
             p
         })
+    }
+
+    /// 取走待答的提问，**不动 `input`**：调用方要拿原始工具入参拼 updatedInput
+    fn take_answer(&mut self, approval_id: &str) -> Option<Pending> {
+        let local = self.by_local.iter().find(|(_, p)| p.approval_id.as_deref() == Some(approval_id) && p.method == USER_INPUT_METHOD).map(|(k, _)| *k);
+        local.and_then(|l| self.by_local.remove(&l))
     }
 
     fn report_expired(out: &Sender<Value>, run_id: &str, approval_id: &str) {
@@ -1897,7 +1989,12 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
                             run.activity("tool", &format!("{name} {summary}"));
                         }
                         ClaudeMsg::Approval { request_id, tool, detail, input } => {
-                            approvals.add(&run.out, &run.run_id, &tool, &detail, json!(request_id), "", input)
+                            // 提问走「用户输入」那张卡：光 allow 不带 answers，CLI 会直接判错
+                            if tool == ASK_TOOL {
+                                approvals.add_ask(&run.out, &run.run_id, &input, json!(request_id))
+                            } else {
+                                approvals.add(&run.out, &run.run_id, &tool, &detail, json!(request_id), "", input)
+                            }
                         }
                         ClaudeMsg::Result { subtype, usage, model } => {
                             if let Some(u) = usage {
@@ -1917,16 +2014,29 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
             Ok(RunMsg::Shutdown) => finish = Some(Finish::Silent),
             Ok(RunMsg::Created { local_id, approval_id }) => {
                 if let Some((p, allow)) = approvals.created(local_id, approval_id, &run.out, &run.run_id) {
-                    answer_claude(&mut stdin, &p, allow, sdk_style);
+                    // 提前到的决定不可能带答案：提问按跳过处理，别把空 allow 送给 CLI 换一条报错
+                    if p.method == USER_INPUT_METHOD {
+                        answer_ask(&mut stdin, &p, None, sdk_style);
+                    } else {
+                        answer_claude(&mut stdin, &p, allow, sdk_style);
+                    }
                 }
             }
             Ok(RunMsg::Decide { approval_id, allow }) => {
                 if let Some((p, allow)) = approvals.decide(&approval_id, allow) {
-                    answer_claude(&mut stdin, &p, allow, sdk_style);
+                    if p.method == USER_INPUT_METHOD {
+                        answer_ask(&mut stdin, &p, None, sdk_style);
+                    } else {
+                        answer_claude(&mut stdin, &p, allow, sdk_style);
+                    }
                 }
             }
-            // Claude 没有用户输入请求；答案只会派给 Codex 运行
-            Ok(RunMsg::Answer { .. }) => {}
+            // 提问的答案：原样拼进 updatedInput.answers（值必须是字符串）
+            Ok(RunMsg::Answer { approval_id, answers }) => {
+                if let Some(p) = approvals.take_answer(&approval_id) {
+                    answer_ask(&mut stdin, &p, Some(&answers), sdk_style);
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => finish = Some(Finish::Silent),
         }
@@ -1997,6 +2107,17 @@ fn run_claude_terminal(run: &Run, key: &str, endpoint: &crate::claude_live::Endp
 fn answer_claude(stdin: &mut Option<ChildStdin>, p: &Pending, allow: bool, sdk_style: bool) {
     let id = p.key.as_str().unwrap_or("");
     write_line(stdin, &permission_response(id, allow, &p.input, sdk_style));
+}
+
+/// 提问的答复：有答案就把 `updatedInput.answers` 一起回；一条都没选就拒——
+/// CLI 的 `requireAnswers` 不接受空对象，硬送会把一条看得懂的拒绝变成一条看不懂的报错。
+fn answer_ask(stdin: &mut Option<ChildStdin>, p: &Pending, answers: Option<&Value>, sdk_style: bool) {
+    let id = p.key.as_str().unwrap_or("");
+    let line = match answers.and_then(|a| ask_answers(&p.input, a)) {
+        Some(a) => ask_response(id, &p.input, &a, sdk_style),
+        None => ask_deny(id, "AgentHub 这边没拿到有效答案，这次提问按跳过处理", sdk_style),
+    };
+    write_line(stdin, &line);
 }
 
 /// 等进程自己退出；超时就杀
@@ -3385,6 +3506,37 @@ mod tests {
         // 分发：有 --permission-prompt-tool 的是真 Claude，没有的是 CodeBuddy 系
         assert_eq!(permission_response("r", true, &json!({}), false), claude_control_response("r", true, &json!({})));
         assert_eq!(permission_response("r", true, &json!({}), true), sdk_control_response("r", true, &json!({})));
+    }
+
+    /// 提问：入参 → 卡片用的 questions；选择 → CLI 要的 {"题目原文":"A, B"}。
+    /// 键换成题目原文、值必须是字符串，是 CLI `requireAnswers` 的硬要求。
+    #[test]
+    fn ask_question_roundtrip() {
+        let input = json!({"questions":[
+            {"question":"选哪个目录？","header":"目录","options":[{"label":"src","description":"源码"},{"label":"docs"}],"multiSelect":false},
+            {"question":"要跑测试吗？","options":[{"label":"要"},{"label":"不要"}],"multiSelect":true}
+        ]});
+        let qs = ask_questions(&input);
+        assert_eq!(qs[0]["id"], "q_0");
+        assert_eq!(qs[0]["question"], "选哪个目录？");
+        assert_eq!(qs[1]["id"], "q_1");
+        assert_eq!(qs[1]["multiSelect"], true);
+
+        let a = ask_answers(&input, &json!({"q_0":["docs"],"q_1":["要","不要"]})).unwrap();
+        assert_eq!(a["选哪个目录？"], "docs");
+        assert_eq!(a["要跑测试吗？"], "要, 不要");
+        assert!(ask_answers(&input, &json!({"q_0":[],"q_1":[]})).is_none(), "空答案不给 CLI，改为拒绝");
+        assert!(ask_answers(&input, &json!({})).is_none());
+
+        let line: Value = serde_json::from_str(&ask_response("perm_2", &input, &a, true)).unwrap();
+        assert_eq!(line["response"]["response"]["allowed"], true);
+        assert_eq!(line["response"]["response"]["updatedInput"]["answers"]["选哪个目录？"], "docs");
+        assert_eq!(line["response"]["response"]["updatedInput"]["questions"].as_array().unwrap().len(), 2, "原入参不能丢");
+        let deny: Value = serde_json::from_str(&ask_deny("perm_2", "没选", true)).unwrap();
+        assert_eq!(deny["response"]["response"]["allowed"], false);
+        assert_eq!(deny["response"]["response"]["reason"], "没选");
+        let claude: Value = serde_json::from_str(&ask_response("r", &input, &a, false)).unwrap();
+        assert_eq!(claude["response"]["response"]["behavior"], "allow");
     }
 
     #[test]
