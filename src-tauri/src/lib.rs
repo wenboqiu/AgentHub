@@ -220,9 +220,18 @@ mod desktop {
         // 第一件事：补齐 PATH。GUI 启动的 PATH 很窄（mac 尤其），
         // claude / codex 既探测不到也 exec 不起来，晚一步漏的就是「没装这个工具」。
         crate::runner::widen_path();
+        crate::boot_log(&format!(
+            "start pid={} args={:?}",
+            std::process::id(),
+            std::env::args().collect::<Vec<_>>()
+        ));
+        std::panic::set_hook(Box::new(|info| crate::boot_log(&format!("PANIC: {info}"))));
         let silent = std::env::args().any(|a| a == "--silent");
         tauri::Builder::default()
-            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+            .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+                crate::boot_log(&format!("second-instance 连入（说明有另一个进程刚被拉起又退出）: {args:?}"));
+                show_main(app);
+            }))
             .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--silent"])))
             .plugin(tauri_plugin_notification::init())
             .invoke_handler(tauri::generate_handler![
@@ -273,6 +282,7 @@ mod desktop {
                 let remote_status = remote::spawn(shared.clone());
                 app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
                 build_tray(app.handle())?;
+                crate::boot_log("setup done（托盘已建，进入事件循环）");
                 if silent {
                     if let Some(w) = app.get_webview_window("main") {
                         let _ = w.hide();
@@ -287,8 +297,33 @@ mod desktop {
                     let _ = w.hide();
                 }
             })
-            .run(tauri::generate_context!())
-            .expect("error while running tauri application");
+            .build(tauri::generate_context!())
+            .expect("error while building tauri application")
+            .run(|_app, event| match event {
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    crate::boot_log(&format!("ExitRequested: code={code:?}"));
+                }
+                tauri::RunEvent::Exit => crate::boot_log("exit（进程即将退出）"),
+                _ => {}
+            });
+    }
+}
+
+/// 启动/退出诊断日志：装完自动拉起时若进程闪退，这里留下最后一步的证据。
+/// 写 %LOCALAPPDATA%\AgentHub\boot.log；环境不全（NSIS RunAsUser 降权启动的已知坑）
+/// 时依次退到 TEMP、exe 同目录——连写哪个位置都记在首行，本身就是线索。
+pub fn boot_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::var_os("LOCALAPPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("AgentHub").join("boot.log"))
+        .or_else(|| std::env::var_os("TEMP").map(|d| std::path::PathBuf::from(d).join("agenthub-boot.log")))
+        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_extension("boot.log"));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let _ = writeln!(f, "[{now}] {msg}");
     }
 }
 
