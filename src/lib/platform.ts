@@ -19,6 +19,9 @@ export type Config = {
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
 
+/** 豆包客户端不落盘正文，只能读它窗口里已经渲染出来的消息 */
+export type DoubaoVisible = { title: string; messages: { role: "user" | "assistant"; text: string }[] };
+
 export type HooksStatus = { installed: boolean; scriptExists: boolean; settingsExists: boolean };
 export type CollectorInfo = {
   collectorError: string | null;
@@ -106,5 +109,7 @@ export const desktop = {
   openInTerminal: (agent: string, sessionKey: string, cwd: string) => invoke<string>("open_in_terminal", { agent, sessionKey, cwd }),
   /** 读执行端的模型清单：CodeBuddy 读本机缓存，ZCode 解析安装包内置配置 */
   agentModels: (agent: string, refresh = false) => invoke<ModelList>("agent_models", { agent, refresh }),
+  /** 读豆包窗口里当前渲染出来的消息（UIA，只读；豆包没开就会报错） */
+  doubaoVisible: () => invoke<DoubaoVisible>("doubao_visible"),
   setBadge: (count: number) => invoke<void>("set_badge", { count }),
 };

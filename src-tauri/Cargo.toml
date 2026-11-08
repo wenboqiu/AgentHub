@@ -1,6 +1,6 @@
 [package]
 name = "agenthub"
-version = "0.11.28"
+version = "0.11.29"
 description = "Claude Code / Codex 会话状态集中监控"
 authors = ["wenbo"]
 edition = "2021"
@@ -41,6 +41,14 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Pipes",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_UI_WindowsAndMessaging",
+] }
+# 读豆包窗口里已经渲染出来的对话（UI Automation，只读）
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
 ] }
 
 [profile.release]

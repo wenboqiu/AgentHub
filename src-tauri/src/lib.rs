@@ -14,6 +14,8 @@ mod codex;
 mod codex_read;
 #[cfg(desktop)]
 mod doubao;
+#[cfg(all(desktop, windows))]
+mod doubao_ui;
 #[cfg(desktop)]
 mod workbuddy;
 #[cfg(desktop)]
@@ -156,6 +158,21 @@ mod desktop {
             .map_err(|e| e.to_string())
     }
 
+    /// 豆包客户端不把正文落盘，只能读它窗口里已经渲染出来的消息（UIA，只读）。
+    /// 返回 `{ title, messages: [{ role, text }] }`；豆包没开 / 不在对话页时给错误。
+    #[tauri::command]
+    async fn doubao_visible() -> Result<serde_json::Value, String> {
+        #[cfg(windows)]
+        {
+            let window = tauri::async_runtime::spawn_blocking(crate::doubao_ui::read)
+                .await
+                .map_err(|e| e.to_string())??;
+            return serde_json::to_value(window).map_err(|e| e.to_string());
+        }
+        #[cfg(not(windows))]
+        Err("只有 Windows 桌面端能读豆包窗口".into())
+    }
+
     #[tauri::command]
     fn set_badge(app: AppHandle, count: u32) {
         let Some(t) = app.tray_by_id("main") else { return };
@@ -245,6 +262,7 @@ mod desktop {
                 focus_session,
                 open_in_terminal,
                 agent_models,
+                doubao_visible,
                 set_badge,
                 show_main_window
             ])

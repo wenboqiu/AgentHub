@@ -30,12 +30,12 @@
 
 - Claude Code：hook（`SessionStart` / `UserPromptSubmit` / `Notification` / `Stop` / `SessionEnd`）。`idle_prompt` 不接。
 - Codex：只读 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`（`task_started` / `task_complete` / `turn_aborted`），不碰 `config.toml`（`notify` 已被 Codex Desktop 占用）。第一版没有 Codex 的「等待授权」状态。
-- 豆包 Windows 客户端（实验性，已对照 2.32.6 本机日志）：只读 `%USERPROFILE%\AppData\Local\Doubao\User Data\sdk_storage\log\saman_YYYY.MMDD.N.log` 中的结构化生命周期事件，每 2 秒增量检查。按会话 ID 展示标题、回复中、完成和中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到豆包窗口，不能定位到指定聊天。没有该目录时自动等待，不需要 API Key。
+- 豆包 Windows 客户端（实验性，已对照 2.32.6 / 2.34.6 本机日志）：只读 `%USERPROFILE%\AppData\Local\Doubao\User Data\sdk_storage\log\saman_YYYY.MMDD.N.log` 中的结构化生命周期事件，每 2 秒增量检查。按会话 ID 展示标题、回复中、完成和中断状态，复用桌面／手机提醒和已处理操作；「跳转」切到豆包窗口，不能定位到指定聊天。没有该目录时自动等待，不需要 API Key。
 - WorkBuddy：只读 `%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`（`message` / `function_call` / `ai-title` / `custom-title`），每 2 秒增量检查。展示标题、项目目录、运行中／完成／中断状态，复用桌面／手机提醒和已处理操作；0.9.8 起会话详情支持只读历史同步；「跳转」切到 WorkBuddy 窗口，不能定位到指定会话。**只做监听，不进派活候选**：桌面端内置的 lite-wb bundle 没有独立登录态（实测 `-p` 直接 `Authentication required`），能自己 `/login` 的那份就是 npm 完整版，也就是 CodeBuddy；0.11.16 起老角色 / 老任务里存着 workbuddy 的，派发时自动落到 CodeBuddy。
 - ZCode：只读 `%USERPROFILE%\.zcode\v2\sessions\<工作区哈希>\sess_<uuid>.json`（`meta.status` 直接给出 running / completed / error，不用猜），每 2 秒检查文件改动。展示标题、项目目录、运行中／完成／失败状态，也支持派活、续聊、停止和读历史（走 CLI 的 app-server，见下面「ZCode 会话监听与派活」）；「跳转」切到 ZCode 窗口，不能定位到指定会话。
 - CodeBuddy（命令行版）：和 WorkBuddy 是同一份 CLI（npm 全局包 `@tencent-ai/codebuddy-code`），会话记录在 `%USERPROFILE%\.codebuddy\projects\<工作区>\<sessionId>.jsonl`，用同一套监听规则；同样支持派活／续聊／读历史（用本机 node 跑它的脚本，走它自己的登录态）。只有装了它的电脑才会出现在角色派活的候选里。角色里的模型下拉直接列**这个账号实际可用**的模型：CLI 把服务端下发的配置缓存在 `~/.codebuddy/local_storage/entry_*.info`，里面的 `agents[cli].models` 是白名单、`models` 带上下文窗口与计费倍率，读文件即可（新登账号或换套餐后点「刷新」重读）。
 
-豆包接入仅提供**会话状态监听**，暂不提供完整对话正文、等待授权、远程发消息、新建或分支。完成状态必须有会话结束成功事件，不通过日志停止增长猜测；初次加载今天和昨天每个日志末尾最多 8 MiB，静默登记已有状态，历史中未结束的运行显示为未知。日志轮换后继续读取新文件。豆包升级改变日志格式时可能无法采集，需要重新适配；此功能需同时更新服务端、桌面端与手机端。
+豆包接入只做**状态监听 + 只读正文**，不提供等待授权、远程发消息、新建或分支：正文在客户端里不落盘（`sdk_storage\log` 只有生命周期，`IndexedDB` 只有配置和 persona），所以桌面端改用 **UI Automation 读豆包窗口里已经渲染出来的消息**（`src-tauri/src/doubao_ui.rs`，每 3 秒一次、只读、不点按钮不碰 cookie）。因此详情页里看到的是「当前窗口挂着的那几条」：更早的、已经滚出视野的消息拿不到；窗口停在别的对话上时，页面会提示标题对不上。发给豆包只能回客户端。完成状态必须有会话结束成功事件，不通过日志停止增长猜测；初次加载今天和昨天每个日志末尾最多 8 MiB，静默登记已有状态，历史中未结束的运行显示为未知。日志轮换后继续读取新文件。豆包升级改变日志格式时可能无法采集，需要重新适配；此功能需同时更新服务端、桌面端与手机端。
 
 ## WorkBuddy 会话监听
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isPending, isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
-import { desktop, isAndroid, isDesktop } from "./lib/platform";
+import { desktop, isAndroid, isDesktop, type DoubaoVisible } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
@@ -87,6 +87,9 @@ const parseQuestions = (detail: string): UserQuestion[] | null => {
 
 export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals, onAck }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
+  /** 豆包客户端不把正文落盘，只能读它窗口里已经渲染出来的消息（只读、能滚到哪算哪） */
+  const [doubaoWin, setDoubaoWin] = useState<DoubaoVisible | null>(null);
+  const [doubaoErr, setDoubaoErr] = useState("");
   const [run, setRun] = useState<Run | null>(null);
   /** 运行中：执行器刚上报的「正在做什么」（agent 自己的话），不是本地编的状态 */
   const [activity, setActivity] = useState<RunActivity | null>(null);
@@ -180,8 +183,31 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const online = !!session && agents.includes(session.machine);
   const [syncing, setSyncing] = useState(false);
   const autoLoaded = useRef("");
+  const isDoubao = session?.agent === "doubao";
+  // 豆包：正文只在它自己的窗口里（日志和 IndexedDB 都没有），只能读界面。
+  // 每 3 秒抓一次虚拟列表里当前挂着的消息（一次读约 0.7 秒，别把 UIA 走太频）；
+  // 窗口切到别的对话时连标题一起带回来提醒。
   useEffect(() => {
-    if (!id || !online || isPendingSession(id) || autoLoaded.current === id) return;
+    if (!isDesktop || !isDoubao || !id) return;
+    let gone = false;
+    let timer = 0;
+    const tick = () => {
+      if (document.hidden) {
+        timer = window.setTimeout(tick, 3000);
+        return;
+      }
+      desktop
+        .doubaoVisible()
+        .then((v) => { if (!gone) { setDoubaoWin(v); setDoubaoErr(""); } })
+        .catch((e) => { if (!gone) { setDoubaoWin(null); setDoubaoErr(e instanceof Error ? e.message : String(e)); } })
+        .finally(() => { if (!gone) timer = window.setTimeout(tick, 3000); });
+    };
+    tick();
+    return () => { gone = true; window.clearTimeout(timer); };
+  }, [id, isDoubao]);
+  useEffect(() => {
+    // 豆包没有可拉的历史（服务端直接 409），内容靠上面的窗口抓取，别在这里白跑一次
+    if (!id || !online || isDoubao || isPendingSession(id) || autoLoaded.current === id) return;
     autoLoaded.current = id;
     let gone = false;
     setSyncing(true);
@@ -196,7 +222,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       gone = true;
       setSyncing(false);
     };
-  }, [api, id, online]);
+  }, [api, id, online, isDoubao]);
 
   // 会话暂时不在列表里（刚新开、广播还没到）：先显示「加载中」，等够 5 秒才判定不存在
   const exists = !!session;
@@ -264,7 +290,9 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   }, [active, listenLive, run?.id]);
   // 内容指纹：条数 + 总字数。回复是流式长出来的（同一条消息变长、条数不变），
   // 只盯条数会在回复变长时漏掉跟随，末尾就会滑到输入框后面。
-  const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0);
+  // 豆包的消息不在 messages 里，指纹要把窗口抓到的也算进去，否则新内容长出来不跟随滚动
+  const doubaoFlow = doubaoWin?.messages.reduce((n, m) => n + m.text.length, doubaoWin.messages.length) ?? 0;
+  const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0) + "|" + doubaoFlow;
   useEffect(() => {
     // 不能用 endRef.scrollIntoView({block:"end"})：输入框是 sticky 悬浮在视口底部的，
     // 那样只会把"末尾"对齐到视口底，最后一条消息 / 授权卡片正好被输入框盖住
@@ -439,6 +467,11 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       return { ...p, [qid]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
     });
 
+  // ---- 豆包：窗口里抓到的那几条消息（只读，不参与发送 / 分支 / 评价） ----
+  const doubaoMsgs = isDoubao && doubaoWin ? doubaoWin.messages : [];
+  const doubaoConv = (doubaoWin?.title ?? "").replace(/\s*-\s*豆包\s*$/, "").trim();
+  const doubaoOther = !!doubaoConv && !!session.title && doubaoConv !== session.title;
+
   return (
     <div ref={pageRef} className={`session-page${docked && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
       <header ref={headerRef}>
@@ -465,7 +498,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <span className="spacer" />
         <span className="machine">
           <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
-          {!pendingSession && (
+          {!pendingSession && !isDoubao && (
             <button
               className={`icon-button${syncing ? " spin" : ""}`}
               aria-label="刷新电脑上的记录"
@@ -498,6 +531,15 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       {/* 内部会话的首条气泡是 AgentHub 写的契约提示词（角色助手 / 意见细化），先说明白，别让人以为是自己发的 */}
       {isInternalSession(session) && <p className="hint">AgentHub 自动开的会话：首条消息是发给执行工具的指令原文，不是人写的对话。跑完的结果会回到对应的角色草稿或任务单上。</p>}
       {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => { setErr(""); desktop.focus(null, session.agent).catch((e) => setErr(e instanceof Error ? e.message : String(e))); }}>打开 {agentName(session.agent)} 客户端</button></div>}
+      {isDesktop && isDoubao && (
+        <p className="hint">
+          {doubaoErr
+            ? `读不到豆包窗口：${doubaoErr}`
+            : doubaoMsgs.length
+              ? `只读：下面是豆包窗口里当前渲染出来的 ${doubaoMsgs.length} 条消息${doubaoOther ? `，但窗口停在「${doubaoConv}」，不是本会话` : ""}；更早的、已经滚出视野的消息拿不到。`
+              : "只读：豆包不把对话正文写到磁盘，只能读它窗口里已经渲染出来的消息。把豆包窗口开着并停在要看的对话上，这里会自动跟随。"}
+        </p>
+      )}
       {/* 会话级操作合并为一行：任务关联、新建会话、终端打开 */}
       <div className="task-links">
         {tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}
@@ -535,7 +577,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       <main className="chat">
         {syncing && <p className="hint" role="status">正在同步电脑上的记录…</p>}
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。${session.machine} 上报状态时会把 ${agentName(session.agent)} 的对话正文一起带上来，不用手动同步；一直空就说明那台电脑还没连上。继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
+        {!loading && messages.length === 0 && !syncing && !isDoubao && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。${session.machine} 上报状态时会把 ${agentName(session.agent)} 的对话正文一起带上来，不用手动同步；一直空就说明那台电脑还没连上。继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
+        {!loading && isDoubao && !doubaoMsgs.length && doubaoErr && (
+          <p className="empty">读不到豆包窗口：{doubaoErr}</p>
+        )}
         <ul className="msgs">
           {messages.map((m) => (
             <li key={m.id} className={`message-entry ${m.role}`}>
@@ -551,6 +596,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                 rateReason={isListenOnly(session.agent) && !m.sourceId ? "只读会话的记录暂不支持评价" : undefined}
                 onRated={updated=>setMessages(items=>items.map(item=>item.id===updated.id ? updated : item))}
                 onBranch={()=>{setBranchMessage(m);setSpawnText("");setSpawnOpen(true);window.scrollTo({top:0,behavior:"auto"});}}/>}
+            </li>
+          ))}
+          {/* 豆包：窗口里抓到的消息，只读——没有时间、不能分支 / 评价 / 重发 */}
+          {doubaoMsgs.map((m, i) => (
+            <li key={`doubao-${i}`} className={`message-entry ${m.role}`}>
+              <div className={`msg ${m.role}`}><Markdown text={m.text} /></div>
             </li>
           ))}
         </ul>
@@ -678,7 +729,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           <button className="toast-close" aria-label="关闭提示" onClick={() => { setErr(""); setNote(""); }}><Icon name="close" /></button>
         </div>
       )}
-      {!spawnOpen && <footer className="composer">
+      {/* 只读 agent（豆包 / WorkBuddy）没有发送能力，底部的输入框整块不放出来 */}
+      {!spawnOpen && !isListenOnly(session.agent) && <footer className="composer">
         {reason && <p className="hint">{reason}</p>}
         {images.length > 0 && (
           <div className="composer-images">

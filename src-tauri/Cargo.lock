@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "agenthub"
-version = "0.11.28"
+version = "0.11.29"
 dependencies = [
  "ab_glyph",
  "aes-gcm",
@@ -80,6 +80,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tiny_http",
  "tungstenite",
+ "windows 0.61.3",
  "windows-sys 0.59.0",
 ]
 
