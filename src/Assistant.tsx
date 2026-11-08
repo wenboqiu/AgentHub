@@ -279,8 +279,8 @@ export default function Assistant({
             const draft = draftOf(m.id);
             return (
               <div key={m.id} className={`assistant-msg ${m.role === "user" ? "me" : ""}`}>
-                {/* 助手回复按 markdown 排版；自己的消息保持原文 */}
-                <div className="assistant-bubble">{m.role === "user" ? m.text : <Markdown text={m.text} />}</div>
+                {/* 两边都按 markdown 排版：表格、代码、列表都常见 */}
+                <div className="assistant-bubble"><Markdown text={m.text} /></div>
                 <span className="dim assistant-time">{m.role === "user" ? "你" : AGENT_LABEL[thread?.agent ?? ""] ?? "助手"} · {clock(m.createdAt)}</span>
                 {draft && (
                   <DraftCard api={api} draft={draft} projects={projects} busy={busy}

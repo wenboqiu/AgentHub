@@ -1816,20 +1816,19 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
 }
 
 /// The terminal owns this process. We only deliver and observe; stop/disconnect never kills it.
-fn run_claude_terminal(run: &Run, key: &str, cwd: &str, text: &str) {
+fn run_claude_terminal(run: &Run, key: &str, endpoint: &crate::claude_live::Endpoint, cwd: &str, text: &str) {
     let prepare = || -> Result<_,String> {
-        let endpoint=crate::claude_live::discover(key,cwd)?;
         let path=crate::claude_live::transcript(key,cwd)?;
         let offset=std::fs::metadata(&path).map_err(|_|"无法读取原终端记录")?.len();
-        Ok((endpoint,path,offset))
+        Ok((path,offset))
     };
-    let (endpoint,path,mut offset)=match prepare(){Ok(v)=>v,Err(e)=>return run.fail(&e)};
+    let (path,mut offset)=match prepare(){Ok(v)=>v,Err(e)=>return run.fail(&e)};
     match run.rx.try_recv() {
         Ok(RunMsg::Stop)=>{run.status("stopped","");return;},
         Ok(RunMsg::Shutdown)=>return,
         _=>{}
     }
-    if let Err(e)=crate::claude_live::send(&endpoint,key,&run.run_id,text){return run.fail(&e);}
+    if let Err(e)=crate::claude_live::send(endpoint,key,&run.run_id,text){return run.fail(&e);}
     run.message("system","已连接原终端，消息已投递；等待终端接收。授权和中断请在原终端处理。");
     let start=Instant::now();let mut turn=crate::claude_live::ObservedTurn::new(&run.run_id);
     loop {
@@ -2654,16 +2653,29 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
     }
     match agent {
         "claude" if !mode.checks_open() => run_claude(run, mode, key, cwd, text, images, branch_point, model, instructions),
-        "claude" => match claude_open_sessions() {
-            Ok(open) if open.iter().any(|s| s == key) => {
+        // 「还开着吗」和「投递到哪」用同一次本机登记表读取判定，避免两次快照互相打架
+        "claude" => match crate::claude_live::locate(key, cwd) {
+            Ok(channels) if !channels.is_empty() => {
                 // 终端里开着的会话只能投递文字，图片没有通道，明确报错而不是悄悄丢掉
                 if !images.is_empty() {
                     return run.fail("这个会话开在终端里，没法附带图片；请在终端关掉它，或换成文字发送");
                 }
-                run_claude_terminal(run, key, cwd, text)
+                // 同一会话在多个终端里开着时，投给管道真的在监听的那个（关掉的终端不会读）
+                let Some(ch) = channels.iter().find(|c| crate::claude_live::ready(&c.endpoint.socket)) else {
+                    return run.fail("原终端的收件通道不可用，请确认终端仍然打开后重试");
+                };
+                let live_cwd = if ch.cwd.trim().is_empty() { cwd } else { ch.cwd.as_str() };
+                run_claude_terminal(run, key, &ch.endpoint, live_cwd, text)
             }
-            Ok(_) => run_claude(run, mode, key, cwd, text, images, branch_point, model, instructions),
-            Err(e) => run.fail(&format!("无法确认这个会话是否还开在终端里（claude agents --json：{e}）")),
+            // 本机没有活着的持有者：可能真关了，也可能是后台任务或旧版 CLI 占着但没有收件通道
+            Ok(_) => match claude_open_sessions() {
+                Ok(open) if open.iter().any(|s| s == key) => run.fail(
+                    "这个会话仍被 Claude 占着，但没有可用的本机收件通道（后台任务或过旧的 CLI）。请在原终端结束它后重试，或改用「复制会话」另起一份",
+                ),
+                Ok(_) => run_claude(run, mode, key, cwd, text, images, branch_point, model, instructions),
+                Err(e) => run.fail(&format!("无法确认这个会话是否还开在终端里（claude agents --json：{e}）")),
+            },
+            Err(e) => run.fail(&e),
         },
         "codex" => match default_codex_bin_dir().and_then(|d| find_codex_exe(&d)) {
             Some(exe) => run_codex(run, mode, &exe, key, cwd, text, images, branch_point, model, instructions),

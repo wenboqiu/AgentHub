@@ -2,10 +2,13 @@
 use crate::{claude::home_dir, runner::{norm_path, valid_key}};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{io::{BufRead, BufReader, Seek, SeekFrom, Write}, path::{Path, PathBuf}};
+use std::{collections::HashSet, io::{BufRead, BufReader, Seek, SeekFrom, Write}, path::{Path, PathBuf}, time::Duration};
 
 // Intentionally no Debug/Serialize: the peer token must remain on this machine.
 pub struct Endpoint { pub socket: String, token: String }
+
+/// 原终端的本机收件通道，以及终端那边的真实工作目录（AgentHub 记的目录可能已经过时）
+pub struct Channel { pub endpoint: Endpoint, pub cwd: String }
 
 fn pipe_path(path: &str) -> bool {
     path.to_ascii_lowercase().starts_with(r"\\.\pipe\") && !path.contains(['\n','\r','\0'])
@@ -16,22 +19,38 @@ pub fn key_name(pid: u32, socket: &str) -> Result<String,String> {
     Ok(format!("{pid}.{:x}.key",Sha256::digest(socket.to_ascii_lowercase().as_bytes())))
 }
 
-pub fn discover_in(home: &Path, key: &str, cwd: &str, live_pids: &[u32]) -> Result<Endpoint,String> {
-    if !valid_key(key) { return Err("会话 id 格式不对".into()); }
-    let sessions=home.join(".claude/sessions");
-    let mut matches=Vec::new();
-    for pid in live_pids {
-        let path=sessions.join(format!("{pid}.json"));
-        let Some(v)=std::fs::read_to_string(path).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()) else {continue};
-        if v["sessionId"]!=key || v["pid"].as_u64()!=Some(*pid as u64) { continue; }
-        if v["cwd"].as_str().is_none_or(|p|norm_path(p)!=norm_path(cwd)) { continue; }
+/// 还活着的进程号。只信这一份快照，不给每个会话再跑一次 `claude agents --json`：
+/// 两次调用的结果可能不同（会话正在切换状态），那正是旧版「无法唯一确认」的来源。
+#[cfg(windows)]
+fn live_pids() -> HashSet<u32> { crate::focus::win::snapshot().into_keys().collect() }
+#[cfg(not(windows))]
+fn live_pids() -> HashSet<u32> { HashSet::new() }
+
+struct Holder { pid: u32, cwd: String, socket: String, updated: u64 }
+
+/// `~/.claude/sessions/<pid>.json` 里登记、进程仍存活、且认这个会话的持有者。
+/// 这些文件由 Claude Code 常驻更新，可能正写到一半：读不出来就下一轮重试，不当作「没有」。
+fn holders_in(sessions: &Path, key: &str, alive: &HashSet<u32>) -> Vec<Holder> {
+    let mut out=Vec::new();
+    let Ok(rd)=std::fs::read_dir(sessions) else { return out };
+    for entry in rd.flatten() {
+        // 只认 `<pid>.json`；`<pid>.<hex>.key` 是认证文件，不是登记项
+        let path=entry.path();
+        let Some(stem)=path.file_name().and_then(|s|s.to_str()).and_then(|s|s.strip_suffix(".json")) else {continue};
+        let Ok(pid)=stem.parse::<u32>() else {continue};
+        if !alive.contains(&pid) { continue; }
+        let Some(v)=std::fs::read_to_string(&path).ok().and_then(|s|serde_json::from_str::<Value>(&s).ok()) else {continue};
+        if v["sessionId"].as_str()!=Some(key) || v["pid"].as_u64()!=Some(pid as u64) { continue; }
         if let Some(socket)=v["messagingSocketPath"].as_str().filter(|p|pipe_path(p)) {
-            matches.push((*pid,socket.to_owned()));
+            out.push(Holder{pid,cwd:v["cwd"].as_str().unwrap_or("").to_owned(),socket:socket.to_owned(),
+                updated:v["updatedAt"].as_u64().unwrap_or(0)});
         }
     }
-    if matches.len()!=1 { return Err("无法唯一确认原终端的收件通道，请确认 Claude Code 支持本机会话消息并刷新会话".into()); }
-    let (pid,socket)=matches.pop().unwrap();
-    let key_file=sessions.join(key_name(pid,&socket)?);
+    out
+}
+
+fn channel_of(sessions: &Path, holder: Holder) -> Result<Channel,String> {
+    let key_file=sessions.join(key_name(holder.pid,&holder.socket)?);
     if std::fs::symlink_metadata(&key_file).map_err(|_|"原终端的消息认证信息不可用")?.file_type().is_symlink() {
         return Err("原终端的消息认证文件不能是符号链接".into());
     }
@@ -39,14 +58,50 @@ pub fn discover_in(home: &Path, key: &str, cwd: &str, live_pids: &[u32]) -> Resu
         .map_err(|_|"原终端的消息认证信息格式不正确")?;
     let token=auth["peerToken"].as_str().filter(|s|s.len()==32 && s.bytes().all(|b|b.is_ascii_hexdigit()))
         .ok_or("原终端的消息认证信息不完整")?.to_owned();
-    Ok(Endpoint{socket,token})
+    Ok(Channel{endpoint:Endpoint{socket:holder.socket,token},cwd:holder.cwd})
 }
 
-pub fn discover(key: &str, cwd: &str) -> Result<Endpoint,String> {
+/// 本机还认这个会话的收件通道，按「能用的可能性」排好序：目录一致优先，其次登记表最近更新的那个。
+/// 空表示终端已经关了、可以 resume。会话 id 全球唯一，所以目录对不上不算错——
+/// 终端可能在别的目录 resume 过，记录按终端那边的目录读即可。
+pub fn locate_in(sessions: &Path, key: &str, cwd: &str, alive: &HashSet<u32>) -> Result<Vec<Channel>,String> {
+    if !valid_key(key) { return Err("会话 id 格式不对".into()); }
+    let mut all=Vec::new();
+    for attempt in 0..3 {
+        all=holders_in(sessions,key,alive);
+        if !all.is_empty() { break; }
+        if attempt<2 { std::thread::sleep(Duration::from_millis(60)); }
+    }
+    if all.is_empty() { return Ok(Vec::new()); }
+    all.sort_by_key(|h| (norm_path(&h.cwd)!=norm_path(cwd), std::cmp::Reverse(h.updated)));
+    let mut out=Vec::new();
+    let mut first_err=None;
+    for holder in all {
+        match channel_of(sessions,holder) {
+            Ok(ch)=>out.push(ch),
+            Err(e)=>{ first_err.get_or_insert(e); }
+        }
+    }
+    match (out.is_empty(), first_err) {
+        (true, Some(e)) => Err(e),
+        _ => Ok(out),
+    }
+}
+
+pub fn locate(key: &str, cwd: &str) -> Result<Vec<Channel>,String> {
     let home=home_dir().ok_or("找不到用户目录")?;
-    let entries=crate::runner::claude_open_entries()?;
-    let pids:Vec<_>=entries.into_iter().filter(|(id,_)|id==key).filter_map(|(_,pid)|pid).collect();
-    discover_in(&home,key,cwd,&pids)
+    locate_in(&home.join(".claude").join("sessions"), key, cwd, &live_pids())
+}
+
+/// 这条命名管道现在有没有监听方。多终端持有同一会话时，用它挑出真正还在跑的那个。
+pub fn ready(socket: &str) -> bool {
+    #[cfg(windows)] {
+        use std::os::windows::ffi::OsStrExt;
+        if !pipe_path(socket) { return false; }
+        let wide:Vec<u16>=std::ffi::OsStr::new(socket).encode_wide().chain(Some(0)).collect();
+        unsafe { windows_sys::Win32::System::Pipes::WaitNamedPipeW(wide.as_ptr(),500)!=0 }
+    }
+    #[cfg(not(windows))] { let _=socket; false }
 }
 
 pub fn frames(token: &str, key: &str, message_id: &str, text: &str) -> String {
@@ -102,7 +157,10 @@ impl ObservedTurn {
             self.delivered=true;return vec![Observed::Delivered];
         }
         if !self.delivered{return vec![];}
-        if row["type"]=="user" && row["isMeta"]!=true && row["parent_tool_use_id"].is_null() {
+        // 只把「人打的字」当另一条输入：后台任务完成通知（task-notification）、
+        // 别的会话发来的 peer 消息也是 user 行，它们出现不代表终端里有人在插话
+        if row["type"]=="user" && row["isMeta"]!=true && row["parent_tool_use_id"].is_null()
+            && crate::message_history::claude_human_input(row) {
             let is_tool=row["message"]["content"].as_array().is_some_and(|a|a.iter().any(|p|p["type"]=="tool_result"));
             if !is_tool{return vec![Observed::OtherInput];}
         }
@@ -132,16 +190,40 @@ mod tests {
         assert!(key_name(0,r"\\.\pipe\claude").is_err());
     }
     #[test]
-    fn registry_must_match_live_pid_session_and_project() {
+    fn registry_must_match_live_pid_and_session() {
         let dir=std::env::temp_dir().join(format!("agenthub-live-discovery-{}",std::process::id()));
         let sessions=dir.join(".claude/sessions");std::fs::create_dir_all(&sessions).unwrap();
         let socket=r"\\.\pipe\claude-test-inbox";
+        let alive:HashSet<u32>=[1].into_iter().collect();
         std::fs::write(sessions.join("1.json"),json!({"pid":1,"sessionId":"sid","cwd":"D:/project","messagingSocketPath":socket}).to_string()).unwrap();
         std::fs::write(sessions.join(key_name(1,socket).unwrap()),json!({"peerToken":"a".repeat(32)}).to_string()).unwrap();
-        assert!(discover_in(&dir,"sid","d:\\project",&[1]).is_ok());
-        assert!(discover_in(&dir,"other","D:/project",&[1]).is_err());
-        assert!(discover_in(&dir,"sid","D:/elsewhere",&[1]).is_err());
-        assert!(discover_in(&dir,"sid","D:/project",&[]).is_err());
+        assert_eq!(locate_in(&sessions,"sid","D:/project",&alive).unwrap().len(),1);
+        // 终端在别的目录 resume 过也要能投递：会话 id 唯一，按终端那边的目录读记录
+        let ch=&locate_in(&sessions,"sid","D:/elsewhere",&alive).unwrap()[0];
+        assert_eq!(ch.cwd,"D:/project");
+        assert_eq!(ch.endpoint.socket,socket);
+        assert!(locate_in(&sessions,"other","D:/project",&alive).unwrap().is_empty());
+        // 进程已经退出：登记项不可信，当作终端已关闭，交给 resume
+        assert!(locate_in(&sessions,"sid","D:/project",&HashSet::new()).unwrap().is_empty());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn several_holders_are_ranked_by_cwd_then_freshness() {
+        let dir=std::env::temp_dir().join(format!("agenthub-live-shared-{}",std::process::id()));
+        let sessions=dir.join(".claude/sessions");std::fs::create_dir_all(&sessions).unwrap();
+        let alive:HashSet<u32>=[1,2,3].into_iter().collect();
+        for (pid,cwd,socket,updated) in [
+            (1,"D:/a",r"\\.\pipe\claude-a",100),
+            (2,"D:/b",r"\\.\pipe\claude-b",200),
+            (3,"D:/c",r"\\.\pipe\claude-c",300),
+        ] {
+            std::fs::write(sessions.join(format!("{pid}.json")),json!({"pid":pid,"sessionId":"sid","cwd":cwd,"messagingSocketPath":socket,"updatedAt":updated}).to_string()).unwrap();
+            std::fs::write(sessions.join(key_name(pid,socket).unwrap()),json!({"peerToken":"b".repeat(32)}).to_string()).unwrap();
+        }
+        // 目录一致的那个排第一，其余按登记表最近更新排；投递方按这个顺序找真正在监听的管道
+        let order=|cwd:&str| locate_in(&sessions,"sid",cwd,&alive).unwrap().iter().map(|c|c.cwd.clone()).collect::<Vec<_>>();
+        assert_eq!(order("D:/b"),vec!["D:/b","D:/c","D:/a"]);
+        assert_eq!(order("D:/nowhere"),vec!["D:/c","D:/b","D:/a"]);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
@@ -164,7 +246,24 @@ mod tests {
         assert!(matches!(turn.consume(&reply)[0],Observed::Reply{finished:true,..}));
         assert!(turn.consume(&reply).is_empty());
         assert!(turn.consume(&json!({"type":"user","message":{"content":[{"type":"tool_result"}]}})).is_empty());
-        assert!(matches!(turn.consume(&json!({"type":"user","uuid":"new-human","message":{"content":"hi"}}))[0],Observed::OtherInput));
+        // 后台任务完成通知也是 user 行，但没人插话，不能因此断掉回复跟踪
+        assert!(turn.consume(&json!({"type":"user","uuid":"task-note","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>x</task-notification>"}})).is_empty());
+        assert!(matches!(turn.consume(&json!({"type":"user","uuid":"new-human","origin":{"kind":"human"},"message":{"content":"hi"}}))[0],Observed::OtherInput));
+    }
+    /// 只读探测本机真实登记表（排查「投递通道找不到」时用）：
+    /// `AH_PROBE_KEY=<sessionId> AH_PROBE_CWD=<项目目录> cargo test --lib live_probe -- --ignored --nocapture`
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn live_probe_reads_this_machines_registry() {
+        let Ok(key)=std::env::var("AH_PROBE_KEY") else { return };
+        let cwd=std::env::var("AH_PROBE_CWD").unwrap_or_default();
+        match locate(&key,&cwd) {
+            Ok(c) if c.is_empty()=>println!("MISS 没有存活持有者（可以 resume）"),
+            Ok(c)=>println!("HIT {} 条通道，首选 cwd={} socket={} ready={}",
+                c.len(),c[0].cwd,c[0].endpoint.socket,ready(&c[0].endpoint.socket)),
+            Err(e)=>println!("ERR {e}"),
+        }
     }
     #[cfg(windows)]
     #[test]

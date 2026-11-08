@@ -35,6 +35,20 @@ fn text(v: &Value) -> String {
         .filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n")
 }
 
+/// Claude Code 会顺手把「不是人打的字」也写成 `type:"user"` 的行：后台任务完成通知
+/// （`origin.kind=="task-notification"`）、别的会话发来的消息（`peer`）、hook 注入等。
+/// 这些混进对话流就会被当成用户自己说的话，所以只认真正的输入：
+/// 没有 origin（老版本 CLI 的人打输入）、`kind=="human"`，以及 AgentHub 投递的那条
+/// `peer`/`from=="AgentHub"`——后者是用户在 AgentHub 里打的，算他说的。
+pub fn claude_human_input(row: &Value) -> bool {
+    let Some(origin) = row["origin"].as_object() else { return true };
+    match origin["kind"].as_str() {
+        Some("human") => true,
+        Some("peer") => origin["from"].as_str() == Some("AgentHub"),
+        _ => false,
+    }
+}
+
 pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
     // CodeBuddy 与 WorkBuddy 是同一份 CLI，transcript 格式一致
     if agent == "workbuddy" || agent == "codebuddy" {
@@ -59,6 +73,8 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
         }
         let (role, content, source, branch) = if agent == "claude" {
             let agenthub_input = v["type"] == "user" && v["origin"]["kind"] == "peer" && v["origin"]["from"] == "AgentHub";
+            // 后台任务通知、别的会话发来的 peer 消息也写成 user 行，不能当用户自己说的话
+            if v["type"] == "user" && !claude_human_input(&v) { continue; }
             if (v["isMeta"] == true && !agenthub_input) || v["parent_tool_use_id"].is_string() { continue; }
             let Some(role) = v["type"].as_str().filter(|r| matches!(*r,"user" | "assistant")) else { continue };
             let source = key(&v["uuid"]);
@@ -116,6 +132,26 @@ fn parse_workbuddy(data: &str, limit: usize) -> Vec<HistoryMessage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_injected_user_rows_are_not_mistaken_for_the_user() {
+        let row = |origin: Value, text: &str, uuid: &str| serde_json::json!({
+            "type":"user","uuid":uuid,"origin":origin,"message":{"role":"user","content":text}
+        }).to_string();
+        let typed = row(serde_json::json!({"kind":"human"}), "我看下 unity log", "u1");
+        let legacy = serde_json::json!({"type":"user","uuid":"u2","message":{"role":"user","content":"老版本没有 origin"}}).to_string();
+        let task = row(serde_json::json!({"kind":"task-notification","producer":"session-task"}),
+            "<task-notification>\n<task-id>a73</task-id>\n</task-notification>", "u3");
+        let peer = row(serde_json::json!({"kind":"peer","from":"a551db9c3b239ac7f"}),
+            "Another Claude session sent a message: 顺手把 X 也改了", "u4");
+        let agenthub = row(serde_json::json!({"kind":"peer","from":"AgentHub"}), "提交", "u5");
+        let answer = serde_json::json!({"type":"assistant","uuid":"a1",
+            "message":{"role":"assistant","content":[{"type":"text","text":"好了"}],"stop_reason":"end_turn"}}).to_string();
+        let messages = parse("claude", &[typed, legacy, task, peer, agenthub, answer].join("\n"), 50);
+        assert_eq!(messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(),
+            vec!["我看下 unity log", "老版本没有 origin", "提交", "好了"]);
+        assert_eq!(messages[2].role, "user");
+        assert_eq!(messages[3].role, "assistant");
+    }
     #[test]
     fn workbuddy_keeps_visible_text_and_drops_injections() {
         let wrapped = serde_json::json!({

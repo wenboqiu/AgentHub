@@ -308,6 +308,13 @@ body.sidebar-resizing { user-select: none; -webkit-user-select: none; }
 .msg.tool { font-family: ui-monospace, Consolas, monospace; }
 .msg.approval { align-self: stretch; max-width: 100%; background: var(--alert-bg); color: var(--alert); font-size: 14px; }
 /* 对话流 markdown 渲染的通用样式统一放在文件末尾（.md），这里只留气泡适配 */
+/* 用户气泡是反色底（accent + on-accent）：markdown 里的链接/代码/表格不能再用页面主色，
+   否则在自己的气泡里看不见。一律跟着气泡文字色走，块级底色用中性灰叠加（明暗主题都成立） */
+.msg.user .md a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.msg.user .md code, .msg.user .md pre, .msg.user .md th { background: rgba(127,127,127,.28); }
+.msg.user .md pre { border-color: rgba(127,127,127,.45); }
+.msg.user .md th, .msg.user .md td { border-color: rgba(127,127,127,.45); }
+.msg.user .md blockquote { color: inherit; opacity: .88; border-left-color: currentColor; }
 /* 每条消息的发送时间：气泡外侧的小字，用户消息靠右、其余靠左；完整时间看悬停提示 */
 .msg-time { display: block; margin: 6px 10px 0; color: var(--dim); font-size: 11px; line-height: 1.4; letter-spacing: .02em; font-variant-numeric: tabular-nums; user-select: none; }
 .message-entry.user .msg-time { text-align: right; }
