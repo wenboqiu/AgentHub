@@ -92,9 +92,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [activity, setActivity] = useState<RunActivity | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
-  // 任务单入口上的数量：待确认优先说，处理过的只给个总数
-  const proposalCount = proposals.length;
-  const pendingProposals = proposals.filter((p) => p.status === "pending").length;
+  // 任务单入口上的数量：待确认优先说，处理过的只给个总数。
+  // 忽略过的（discarded）不算：人已经说了「这张单不用了」，聊天流底部不该还留着一个入口提醒他；
+  // 一条会话的单子全被忽略时，入口整块不出现。详情页里仍留着「这条建议不用了」的记录。
+  const liveProposals = proposals.filter((p) => p.status !== "discarded");
+  const proposalCount = liveProposals.length;
+  const pendingProposals = liveProposals.filter((p) => p.status === "pending").length;
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);

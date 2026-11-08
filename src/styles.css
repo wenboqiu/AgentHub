@@ -856,6 +856,8 @@ header h1 { white-space: nowrap; }
 .proposal-evidence ul { margin: 8px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; }
 .proposal-verdict { margin: 14px 0 4px; padding: 10px 14px; border-radius: 12px; background: var(--ok-bg); color: var(--ok); font-size: 13px; }
 .proposal-verdict.dim { background: var(--field); color: var(--dim); }
+/* 忽略后的撤回：跟在「这条建议不用了」后面，一个小按钮，别抢注意力 */
+.proposal-verdict .proposal-undo { min-height: 0; margin-left: 6px; padding: 2px 8px; font-size: 12px; font-weight: 550; vertical-align: baseline; }
 @media (max-width: 560px) {
   .proposal-card { padding: 12px; }
   .proposal-origin { margin-left: 0; }

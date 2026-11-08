@@ -72,8 +72,25 @@ export default function ProposalCard({
     setRefining(false);
   }, [proposal.id, proposal.updatedAt]);
 
+  // 撤回忽略：忽略掉的卡片只留在详情页里（对话流底部的入口会随最后一张单被忽略而消失），
+  // 所以「撤回」得放在这张卡上，不然点错了就没地方找回来
+  const unignore = async () => {
+    onBusy(true); onError("");
+    try {
+      const res = await api.restoreProposal(proposal.id);
+      onChanged(res.proposal);
+      setDone(null);
+    } catch (e) { onError(e instanceof Error ? e.message : String(e)); }
+    finally { onBusy(false); }
+  };
+
   if (done?.kind === "created") return <p className="proposal-verdict">{done.text}</p>;
-  if (done?.kind === "discarded" || proposal.status === "discarded") return <p className="proposal-verdict dim">这条建议不用了。</p>;
+  if (done?.kind === "discarded" || proposal.status === "discarded") return (
+    <p className="proposal-verdict dim">
+      这条建议不用了。
+      <button className="link proposal-undo" disabled={busy} onClick={() => void unignore()}>撤回</button>
+    </p>
+  );
   if (proposal.status === "accepted") return <p className="proposal-verdict">已确认，任务「{proposal.title}」已生成，在任务页继续。</p>;
 
   const act = async (fn: () => Promise<void>) => {
@@ -228,7 +245,13 @@ export default function ProposalCard({
           {refining ? "项目经理正在重写…" : "让项目经理重写"}
         </button>
         <button className="ghost" disabled={busy}
-          onClick={() => void act(async () => { await api.discardProposal(proposal.id); setDone({ kind: "discarded" }); })}>
+          onClick={() => void act(async () => {
+            // 把新的状态交回上层：会话标签的待确认计数、聊天流底部的入口都靠它立刻收掉，
+            // 不用等下次拉快照（服务端只回待处理的单，靠刷新才消失会显得「忽略了还在」）
+            const res = await api.discardProposal(proposal.id);
+            onChanged(res.proposal);
+            setDone({ kind: "discarded" });
+          })}>
           忽略
         </button>
       </div>

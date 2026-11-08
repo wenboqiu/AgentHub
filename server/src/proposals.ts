@@ -892,6 +892,31 @@ export async function markProposal(db: DB, userId: number, id: number, status: '
   return row(r.rows[0])
 }
 
+/** 撤回忽略：把当初丢掉的那张单放回待确认（卡片上的「撤回」走这条）。
+ *  只对 discarded 生效——已确认的那张已经建出任务了，撤回来只会和任务重复。
+ *  放回去也守「只留一张」：同一任务（没挂任务时同一会话）上别的待处理意见照样作废，
+ *  否则同一个活攒出两张待确认，人可能连点两次建出两个任务。 */
+export async function restoreProposal(db: DB, userId: number, id: number): Promise<Proposal> {
+  const r = await db.query(
+    `UPDATE session_proposals SET status='pending', created_task_id=NULL, updated_at=now()
+     WHERE user_id=$1 AND id=$2 AND status='discarded' RETURNING *`,
+    [userId, id],
+  )
+  const back = r.rows[0]
+  if (!back) {
+    const exists = await db.query('SELECT status FROM session_proposals WHERE user_id=$1 AND id=$2', [userId, id])
+    if (!exists.rows[0]) throw new TaskError('处理意见不存在', 404)
+    throw new TaskError('这张单已经确认过了，撤回不了（任务已经建好）', 409)
+  }
+  const scope = back.task_id === null ? 'task_id IS NULL AND session_id=$2' : 'task_id=$2'
+  await db.query(
+    `UPDATE session_proposals SET status='discarded', updated_at=now()
+      WHERE user_id=$1 AND status='pending' AND id<>$3 AND ${scope}`,
+    [userId, back.task_id === null ? back.session_id : back.task_id, back.id],
+  )
+  return getProposal(db, userId, id)
+}
+
 /** 确认时允许人改字段：只接受草稿里出现过的键 */
 export function proposalPatch(raw: unknown): Record<string, unknown> {
   const b = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}

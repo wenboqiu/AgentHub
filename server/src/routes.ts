@@ -97,6 +97,7 @@ import {
   planDelivery,
   proposalPatch,
   recordRefine,
+  restoreProposal,
   refineMessage,
   sessionKeyOf,
   ticketMessage,
@@ -1477,9 +1478,18 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
     return { task: await getTask(pool, req.userId, linked.id), proposal: await getProposal(pool, req.userId, id), dispatched, dispatchError }
   }))
-  app.post('/proposals/:id/discard', async req => serial(async () => ({
-    proposal: await markProposal(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded'),
-  })))
+  app.post('/proposals/:id/discard', async req => serial(async () => {
+    const proposal = await markProposal(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded')
+    // 忽略也要广播：别的窗口 / 手机上这张单还挂着「待确认」，会话底部的入口和标签上的计数得跟着收掉
+    broadcast(req.userId, { type: 'proposal', proposal })
+    return { proposal }
+  }))
+  // 撤回忽略：把丢掉的那张单放回待确认。已确认的撤不回来——任务已经建好，撤回来只会重复
+  app.post('/proposals/:id/restore', async req => serial(async () => {
+    const proposal = await restoreProposal(pool, req.userId, entityId((req.params as {id:string}).id))
+    broadcast(req.userId, { type: 'proposal', proposal })
+    return { proposal }
+  }))
 
   // ---------- 项目经理：谁当经理由角色上的标记决定，可以有多位、各管一摊 ----------
   app.get('/dispatch/manager', async req => serial(async () => {

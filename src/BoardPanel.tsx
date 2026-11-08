@@ -84,6 +84,9 @@ export default function BoardPanel({
   const [busyId, setBusyId] = useState(0);
   const [busyProposal, setBusyProposal] = useState(0);
   const [showForm, setShowForm] = useState(false);
+  /** 刚在看板上忽略掉的单：卡片先留着（变成「这条建议不用了 · 撤回」），点错了能撤回来。
+      只留这一次停留——重新进看板时只列待确认的，页面不被历史卡片堆满 */
+  const [justIgnored, setJustIgnored] = useState<number[]>([]);
   const created = (p: Proposal) => {
     setShowForm(false);
     // 先本地挂上，WS 推回来的细化结果会覆盖同一条
@@ -110,8 +113,10 @@ export default function BoardPanel({
   const stuck = board.entries.filter(e => e.stuck);
   const queued = board.entries.filter(e => e.queued && !e.stuck);
   const running = board.entries.filter(e => !e.stuck && !e.queued);
-  // 只认发单来的：会话攒出来的意见挂在会话详情里，不该混进看板
-  const tickets = proposals.filter(p => p.kind === "ticket" && p.status === "pending");
+  // 只认发单来的：会话攒出来的意见挂在会话详情里，不该混进看板。
+  // 刚忽略的那张继续摆着，撤回按钮在卡片上；已经处理完（accepted）的不留
+  const tickets = proposals.filter(p => p.kind === "ticket" && (p.status === "pending" || justIgnored.includes(p.id)));
+  const waiting = tickets.filter(p => p.status === "pending").length;
   const rows = (list: BoardEntry[]) => (
     <ul className="list">
       {list.map(e => <Entry key={e.taskId} e={e} now={now} busy={busyId === e.taskId} onOpen={onOpen} onAct={act} />)}
@@ -123,7 +128,7 @@ export default function BoardPanel({
         <div>
           <p className="eyebrow">谁在干活，一眼看清</p>
           <h2>派活看板</h2>
-          <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}{tickets.length > 0 ? ` · ${tickets.length} 个待确认` : ""}</p>
+          <p>{running.length} 个在跑 · {queued.length} 个排队{stuck.length > 0 ? ` · ${stuck.length} 个卡住` : ""}{waiting > 0 ? ` · ${waiting} 个待确认` : ""}</p>
         </div>
         <button className="primary" aria-expanded={showForm} onClick={() => setShowForm(!showForm)}>
           <Icon name={showForm ? "close" : "plus"} /> {showForm ? "收起" : "发新单"}
@@ -136,7 +141,7 @@ export default function BoardPanel({
         />
       )}
       <section>
-        <h2>待确认 {tickets.length > 0 && <span className="count">{tickets.length}</span>}</h2>
+        <h2>待确认 {waiting > 0 && <span className="count">{waiting}</span>}</h2>
         {tickets.length === 0
           ? <p className="empty">没有等你确认的工单。发新单后，项目经理写好的任务单会摆在这儿</p>
           : tickets.map(p => (
@@ -145,7 +150,13 @@ export default function BoardPanel({
               busy={busyProposal === p.id}
               onBusy={v => setBusyProposal(v ? p.id : 0)}
               onError={onNotice}
-              onChanged={onProposal}
+              onChanged={next => {
+                // 忽略的留在看板上等撤回，撤回来了就从名单里划掉（状态本身已回到 pending）
+                setJustIgnored(ids => next.status === "discarded"
+                  ? (ids.includes(next.id) ? ids : [...ids, next.id])
+                  : ids.filter(x => x !== next.id));
+                onProposal(next);
+              }}
               onTask={() => { onNotice("工单已确认，任务建好了"); onRefresh(); }}
             />
           ))}

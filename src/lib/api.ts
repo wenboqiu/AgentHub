@@ -419,6 +419,8 @@ export class Api {
   confirmProposal = (id: number, input: ProposalInput & { dispatch?: boolean; delivery?: Delivery }) =>
     this.call<{ task: Task; proposal: Proposal; dispatched: { queued: boolean; delivery?: { mode: Delivery; reason: string } } | null; dispatchError: string }>("POST", `/proposals/${id}/confirm`, input);
   discardProposal = (id: number) => this.call<{ proposal: Proposal }>("POST", `/proposals/${id}/discard`);
+  /** 撤回忽略：只有 discarded 的能放回待确认；已确认的会报 409 */
+  restoreProposal = (id: number) => this.call<{ proposal: Proposal }>("POST", `/proposals/${id}/restore`);
   /** 发新单：先落成一张待确认的任务单，服务端顺手让项目经理用模型补一遍；不直接建任务 */
   createTicket = (input: { title: string; notes: string; projectId: number; roleId?: number; machine?: string; cwd?: string }) =>
     this.call<{ proposal: Proposal; refineError: string }>("POST", "/tickets", input);
