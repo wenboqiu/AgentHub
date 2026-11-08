@@ -602,6 +602,7 @@ Command::new(node_exe)                     // 系统 node，或 Electron + ELECT
 ### 12.5 授权/交互
 
 - `interaction/requestPermission`：沿用 `runner.rs` 的 `Approvals`（`run.out` 发审批事件，`RunMsg::Decide` 回来应答），应答体改为 `{decision: allow|deny}`；`riskLevel` 可做默认策略（low 自动允许可配）。
+  - 已实现（2026-11-08）：配置键 `zcodeAutoApprove`（off|low|medium，默认 low），执行器在档位内的 `riskLevel` 直接 allow 并在会话时间线留痕；high / critical 与 riskLevel 缺失的一律弹审批卡。设置入口：本机执行与采集 → ZCode 自动放行。
 - `interaction/requestUserInput`：复用现有提问卡片；应答 `{value, cancelled}`。
 - 超时策略沿用 30 分钟；超时回 `deny` / `cancelled:true`。
 

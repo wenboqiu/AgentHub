@@ -21,6 +21,9 @@ pub struct Config {
     pub remote_enabled: bool,
     /// 对话页（待处理 / 进行中）用气泡图展示；false = 卡片列表
     pub graph_mode: bool,
+    /// ZCode 权限请求的自动放行档位：off = 每条都弹审批卡；low = 只放行 low；
+    /// medium = low 与 medium 都放行。high / critical 永远弹卡，riskLevel 缺失也不放。
+    pub zcode_auto_approve: String,
 }
 
 impl Default for Config {
@@ -34,6 +37,7 @@ impl Default for Config {
             denied_roots: Vec::new(),
             remote_enabled: false,
             graph_mode: true,
+            zcode_auto_approve: "low".into(),
         }
     }
 }
@@ -159,6 +163,7 @@ mod tests {
             denied_roots: vec!["D:/Tmp".into()],
             remote_enabled: true,
             graph_mode: true,
+            zcode_auto_approve: "medium".into(),
         };
         save(&p, &c).unwrap();
         assert_eq!(load(&p), c);
@@ -170,6 +175,7 @@ mod tests {
         assert!(!d.remote_enabled);
         // 气泡图是默认展示方式：老配置里没有 graphMode 时按 true 读
         assert!(d.graph_mode);
+        assert_eq!(d.zcode_auto_approve, "low", "老配置里没有这个键时按 low 读");
         assert!(d.denied_roots.is_empty() && d.email.is_empty());
         // 旧配置的 allowedRoots（白名单）不会被当成黑名单读进来，避免升级后把工作目录封死
         std::fs::write(&p, r#"{"serverUrl":"http://w","allowedRoots":["D:/Work2"]}"#).unwrap();

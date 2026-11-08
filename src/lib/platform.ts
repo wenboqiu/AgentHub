@@ -14,6 +14,8 @@ export type Config = {
   remoteEnabled: boolean;
   /** 对话页（待处理 / 进行中）用气泡图展示；false = 卡片列表 */
   graphMode: boolean;
+  /** 仅桌面：ZCode 权限请求的自动放行档位（off | low | medium） */
+  zcodeAutoApprove: string;
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
 
@@ -49,7 +51,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: true };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: true, zcodeAutoApprove: "low" };
 
 /**
  * 气泡图改成默认之后的一次性迁移：老配置里 graphMode 基本是「没选过」的 false，

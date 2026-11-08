@@ -2040,7 +2040,26 @@ fn zcode_decision(allow: bool) -> Value {
     json!({"decision": if allow { "allow" } else { "deny" }})
 }
 
-fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &str, instructions: &str) {
+/// ZCode 权限请求的自动放行档位（配置键 zcodeAutoApprove）：
+/// off = 每条都弹审批卡；low = 只放行 low；medium = low 与 medium 都放行。
+/// riskLevel 缺失、写错或比档位高（high / critical）一律交给人——机器猜的风险不算数。
+fn zcode_auto_allows(policy: &str, risk: &str) -> bool {
+    let rank = |r: &str| match r {
+        "low" => 1,
+        "medium" => 2,
+        "high" | "critical" => 3,
+        _ => 0,
+    };
+    let cap = match policy {
+        "low" => 1,
+        "medium" => 2,
+        _ => 0,
+    };
+    let r = rank(risk);
+    cap > 0 && r > 0 && r <= cap
+}
+
+fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &str, instructions: &str, zcode_auto: &str) {
     if mode == Mode::Fork {
         return run.fail("ZCode 暂不支持按回复分叉：可以同目录新开会话，或直接在会话里继续聊");
     }
@@ -2297,7 +2316,15 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                 .filter(|s| !s.is_empty())
                                 .or_else(|| v.pointer("/params/reason").and_then(Value::as_str).map(str::to_string))
                                 .unwrap_or_default();
-                            approvals.add(&run.out, &run.run_id, &tool, &detail, id, ZCODE_PERMISSION, Value::Null);
+                            // 低风险快车道：ZCode 自己标的 riskLevel 在档位内就直接放，不弹卡打断人
+                            let risk = v.pointer("/params/riskLevel").and_then(Value::as_str).unwrap_or("");
+                            if zcode_auto_allows(zcode_auto, risk) {
+                                let head = format!("{tool} {}", detail.replace('\n', " "));
+                                run.message("system", &format!("已自动放行（{risk} 风险）：{}", head.chars().take(160).collect::<String>()));
+                                write_line(&mut stdin, &zcode_response(&id, zcode_decision(true)));
+                            } else {
+                                approvals.add(&run.out, &run.run_id, &tool, &detail, id, ZCODE_PERMISSION, Value::Null);
+                            }
                         }
                         ZCODE_USER_INPUT => {
                             // 提问卡片暂不支持在 AgentHub 作答：直接取消，避免整轮挂住
@@ -2509,16 +2536,17 @@ impl Runner {
             g.insert(run_id.clone(), Entry { session_id, tx });
         }
         let denied = self.config.read().unwrap().denied_roots.clone();
+        let zcode_auto = self.config.read().unwrap().zcode_auto_approve.clone();
         let runs = self.runs.clone();
         std::thread::spawn(move || {
-            execute(&run, &denied, &agent, &mode, &key, &cwd, &text, &images, &branch_point, &model, &instructions);
+            execute(&run, &denied, &agent, &mode, &key, &cwd, &text, &images, &branch_point, &model, &instructions, &zcode_auto);
             runs.lock().unwrap().remove(&run.run_id);
         });
     }
 }
 
 /// 前置检查 + 按 agent 分派
-fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str) {
+fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd: &str, text: &str, images: &[String], branch_point: &str, model: &str, instructions: &str, zcode_auto: &str) {
     let Some(mode) = Mode::parse(mode) else {
         return run.fail(&format!("不支持的模式：{mode}"));
     };
@@ -2559,7 +2587,7 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
             if !images.is_empty() {
                 return run.fail("ZCode 暂不支持在派活时附带图片");
             }
-            run_zcode(run, mode, key, cwd, text, model, instructions)
+            run_zcode(run, mode, key, cwd, text, model, instructions, zcode_auto)
         }
         "workbuddy" => run_workbuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
         "codebuddy" => run_codebuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
@@ -2584,7 +2612,7 @@ mod tests {
         let (out_tx, out_rx) = mpsc::channel::<Value>();
         let (tx, rx) = mpsc::channel::<RunMsg>();
         let run = Run { out: out_tx, run_id: "e2e".into(), rx, tx, activity: Mutex::new((Instant::now(), String::new())) };
-        run_zcode(&run, Mode::Fresh, "", cwd.to_str().unwrap(), "只回复 OK1", "", "");
+        run_zcode(&run, Mode::Fresh, "", cwd.to_str().unwrap(), "只回复 OK1", "", "", "low");
         let mut got_reply = false;
         let mut finished = String::new();
         while let Ok(msg) = out_rx.recv_timeout(Duration::from_secs(5)) {
@@ -3081,6 +3109,23 @@ mod tests {
         assert_eq!(codex_event("turn/completed", &json!({"turn":{"id":"t9","status":"completed"}})), Some(CodexEvent::TurnDone { status: "completed".into() }));
         assert_eq!(codex_event("turn/completed", &json!({"turn":{"status":"interrupted"}})), Some(CodexEvent::TurnDone { status: "interrupted".into() }));
         assert_eq!(codex_event("thread/started", &json!({})), None);
+    }
+
+    #[test]
+    fn zcode_auto_allows_by_risk_level() {
+        assert!(zcode_auto_allows("low", "low"), "low 档放行 low");
+        assert!(!zcode_auto_allows("low", "medium"), "low 档不放行 medium");
+        assert!(zcode_auto_allows("medium", "low") && zcode_auto_allows("medium", "medium"), "medium 档放行 low/medium");
+        assert!(!zcode_auto_allows("medium", "high"), "high 永远要人看");
+        assert!(!zcode_auto_allows("medium", "critical"), "critical 永远要人看");
+        // 没开（off / 空串 / 写错）时一条都不放
+        for off in ["off", "", " Low", "everything"] {
+            assert!(!zcode_auto_allows(off, "low"), "档位 {off:?} 不该放行任何东西");
+        }
+        // 风险值缺失或写错时也不放——机器猜的风险不算数
+        for bad in ["", "unknown", "LOW", " high"] {
+            assert!(!zcode_auto_allows("medium", bad), "风险值 {bad:?} 不该被自动放行");
+        }
     }
 
     #[test]

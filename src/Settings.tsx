@@ -272,6 +272,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     form.machine.trim() !== cfg.machine.trim() ||
     form.notifyDesktop !== cfg.notifyDesktop ||
     form.remoteEnabled !== cfg.remoteEnabled ||
+    form.zcodeAutoApprove !== cfg.zcodeAutoApprove ||
     JSON.stringify(denied) !== JSON.stringify(cfg.deniedRoots ?? []);
 
   const save = async () => {
@@ -281,6 +282,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       machine: form.machine.trim(),
       notifyDesktop: form.notifyDesktop,
       remoteEnabled: form.remoteEnabled,
+      zcodeAutoApprove: form.zcodeAutoApprove,
       deniedRoots: denied,
     };
     try {
@@ -694,6 +696,19 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               />
               <p className="hint">
                 {denied.length > 0 ? `已禁止 ${denied.length} 个目录：这些目录下的任务和会话会被执行端直接拒绝。` : "当前目录不限制：没有任何目录被禁止。"}
+              </p>
+
+              <h3>ZCode 自动放行</h3>
+              <label>
+                ZCode 权限请求的自动放行档位
+                <select value={form.zcodeAutoApprove} onChange={(e) => set("zcodeAutoApprove", e.target.value)}>
+                  <option value="off">关闭：每条都要确认</option>
+                  <option value="low">放行低风险（默认）</option>
+                  <option value="medium">放行中低风险</option>
+                </select>
+              </label>
+              <p className="hint">
+                档位内的请求直接放行并在会话里留痕，不弹审批卡；高风险与致命风险永远弹卡等你确认，ZCode 没标风险等级的也不放。
               </p>
 
               <div className="btns">
