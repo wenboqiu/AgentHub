@@ -212,11 +212,6 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 /* 会话详情页整体布局：顶栏横贯全宽，下面才是「左侧会话列表 + 右侧详情」两栏 */
 .session-page { --gutter-left: max(clamp(16px,3vw,48px),env(safe-area-inset-left)); --gutter-right: max(clamp(16px,3vw,48px),env(safe-area-inset-right)); display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; padding-top: env(safe-area-inset-top); }
 .session-page > header { flex-shrink: 0; position: sticky; top: env(safe-area-inset-top); z-index: 5; display: flex; flex-wrap: nowrap; align-items: center; gap: 12px; min-height: 76px; padding: 14px var(--gutter-right) 14px var(--gutter-left); background: var(--glass); backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%); border-bottom: 1px solid var(--line); }
-/* 会话页头部的「处理」：看完这轮点一下，这条会话就不再挂在待处理区（球上不再挂按钮，避免和状态打架） */
-.session-ack { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; min-height: 0; padding: 6px 14px; border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); font-size: 13px; font-weight: 600; }
-.session-ack:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
-.session-ack:active { transform: scale(.96); }
-.session-ack .icon { width: 15px; height: 15px; }
 .session-shell { flex: 1; display: flex; align-items: stretch; }
 .session-shell > .app { flex: 1; min-width: 0; min-height: 0; padding-top: 0; }
 .session-view { display: flex; flex-direction: column; }
@@ -975,7 +970,7 @@ button.pg-slot { cursor: pointer; }
 /* 运行中会话气泡：旋转弧表示在跑 */
 .pg-bubble.pg-run .pg-run-arc { position: absolute; inset: -4px; border-radius: 50%; border: 2px solid transparent; border-top-color: var(--accent); border-right-color: color-mix(in srgb, var(--accent) 45%, transparent); animation: pg-spin 2.6s linear infinite; pointer-events: none; }
 
-/* 单个会话的「处理」按钮已移到会话页（.session-ack）；球上只留气泡本体，不挂操作按钮 */
+/* 标记已处理改为打开会话即触发（SessionView 里自动 ack），球上只留气泡本体，不挂操作按钮 */
 
 /* 已处理：不进图，只有一条可折叠的列表 */
 .pg-handled { margin: 20px 0 6px; padding-top: 12px; border-top: 1px solid var(--line); }

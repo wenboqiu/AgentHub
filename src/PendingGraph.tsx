@@ -364,7 +364,7 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
             // 球画大了字也跟着放大一点，不然大球里一行小字反而更空；长标题多给几行
             const fs = clamp(e.size / 88, 1, 1.25);
             const titleLines = e.size >= 165 ? 4 : e.size >= 130 ? 3 : 2;
-            // 气泡只负责打开会话：标记已处理在会话页里做（「处理」按钮），球上不挂操作按钮
+            // 气泡只负责打开会话：打开即视为处理（会话页自动 ack），球上不挂操作按钮
             return (
               <div
                 key={e.s.id}
@@ -405,7 +405,7 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
           <span><i className="pg-dot tone-wait" />等待授权</span>
           <span><i className="pg-dot tone-amber" />完成待确认</span>
           <span><i className="pg-dot tone-abort" />中断待确认</span>
-          <span>点球进入会话，在会话页点「处理」标记完成</span>
+          <span>点球进入会话即视为处理，会话自动移入已处理</span>
         </p>
       </div>
     );

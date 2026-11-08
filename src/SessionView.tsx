@@ -54,7 +54,7 @@ type Props = {
   proposals: Proposal[];
   /** 打开任务单详情页（正文放在那边展开，聊天流里只留一个入口） */
   onProposals(sessionId: string): void;
-  /** 把这条会话标记为已处理：会话页头部的「处理」按钮，点完它就不再挂在待处理区 */
+  /** 把这条会话标记为已处理：打开对话流时自动调用，会话从待处理区撒下 */
   onAck(): void;
 };
 
@@ -395,12 +395,15 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       window.setTimeout(() => setNote(""), 3500);
     });
   const stop = () => run && guard("stop", () => api.stop(run.id));
-  // 会话页的「处理」：看完这轮就标记已处理，回列表它就不在待处理区了
-  const ackThis = () => {
+  // 打开对话流即视为处理：进来看这一轮，这条会话自动从待处理区撒下（不再单放「处理」按钮）。
+  // 快照每几秒就换新对象，用 ref 记下已 ack 的会话，避免重复发请求；
+  // 之后会话再次变回 pending（新一轮结束）时照样会再 ack 一次。
+  const autoAcked = useRef(new Set<string>());
+  useEffect(() => {
+    if (!session || !isPending(session) || autoAcked.current.has(session.id)) return;
+    autoAcked.current.add(session.id);
     onAck();
-    setNote("已标记为已处理");
-    window.setTimeout(() => setNote(""), 3500);
-  };
+  }, [session, onAck]);
   // 手动同步电脑上的记录；失败要提示（自动同步失败才静默保留旧记录）
   const loadHistory = () => {
     if (syncing || !online) return;
@@ -456,12 +459,6 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <span className={`tag ${session.agent}`}>{AGENT_LABEL[session.agent]}</span>
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
-        {isPending(session) && (
-          <button type="button" className="session-ack" onClick={ackThis} title="标记为已处理，不再挂在待处理区">
-            <Icon name="check" />
-            处理
-          </button>
-        )}
         <span className="machine">
           <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
           {!pendingSession && (
