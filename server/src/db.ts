@@ -754,6 +754,30 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
       [userId, sessionId],
     )
     const keepRun = active.rows[0]?.id ?? null
+    // 正在跑的 run 关联的消息要保留（流式正文可能还没落进 transcript），但 transcript
+    // 快照里同一条消息会再来一份——刚才发的那条 user 消息、已落盘的助手回复都算，
+    // 不去重的话界面上就是「发送的消息等一会又出现一条」。按 (role, 正文前 400 字)
+    // 多重集匹配：快照里与保留消息对得上的副本跳过，对不上的（真正新增的）照常插入。
+    const keptCounts = new Map<string, number>()
+    if (keepRun) {
+      const kept = await client.query<{ role: string; text: string }>(
+        'SELECT role, text FROM messages WHERE user_id = $1 AND session_id = $2 AND run_id = $3',
+        [userId, sessionId, keepRun],
+      )
+      for (const r of kept.rows) {
+        const k = `${r.role}|${r.text.trim().slice(0, 400)}`
+        keptCounts.set(k, (keptCounts.get(k) ?? 0) + 1)
+      }
+    }
+    const deduped = snapshot.filter(it => {
+      const k = `${it.role}|${it.text.trim().slice(0, 400)}`
+      const n = keptCounts.get(k) ?? 0
+      if (n > 0) {
+        keptCounts.set(k, n - 1)
+        return false
+      }
+      return true
+    })
     // 注意不能写成 run_id IS DISTINCT FROM $3：keepRun 为 null 时 null 和 null 不算不同，历史消息就删不掉了
     if (keepRun) await client.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2 AND run_id IS DISTINCT FROM $3', [userId, sessionId, keepRun])
     else await client.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, sessionId])
@@ -761,12 +785,12 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
       'SELECT COALESCE(min(created_at), now()) AS t FROM messages WHERE user_id = $1 AND session_id = $2',
       [userId, sessionId],
     )
-    const times = historyTimes(snapshot, prevTimes, base.rows[0].t.getTime())
-    for (let i = 0; i < snapshot.length; i++) {
+    const times = historyTimes(deduped, prevTimes, base.rows[0].t.getTime())
+    for (let i = 0; i < deduped.length; i++) {
       await client.query(
         `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
          VALUES ($1, $2, null, $3, $4, $6, $7, $5::timestamptz)`,
-        [userId, sessionId, snapshot[i].role, snapshot[i].text, new Date(times[i]), snapshot[i].sourceId, snapshot[i].branchPoint],
+        [userId, sessionId, deduped[i].role, deduped[i].text, new Date(times[i]), deduped[i].sourceId, deduped[i].branchPoint],
       )
     }
     // 活动计数按当前消息重算：历史是整体替换的，按增量累计会重复入账
