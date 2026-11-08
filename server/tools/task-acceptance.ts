@@ -8,6 +8,7 @@ import { buildApp } from '../src/index.ts'
 import { createPool, listMessages } from '../src/db.ts'
 import { hashPassword, newAuthSession } from '../src/auth.ts'
 import { getTask, saveGoal, saveTask } from '../src/tasks.ts'
+import { getMandate, setMandateMode } from '../src/mandate.ts'
 
 const repo=resolve(import.meta.dirname,'../..')
 const configPath=join(process.env.APPDATA!,'com.wenbo.agenthub','config.json')
@@ -27,6 +28,10 @@ try {
   const email=`desktop-${randomUUID()}@test.dev`
   userId=Number((await pool.query('INSERT INTO users(email,password_hash) VALUES($1,$2) RETURNING id',[email,await hashPassword(randomUUID())])).rows[0].id)
   const token=await newAuthSession(pool,userId,'桌面验收')
+  // 一次授权场景：MANDATE_MODE=auto（需要 mandate-v1 的桌面端）时，开工即签署，范围内动作应零审批，结束后查 approvals 与交付物。
+  // 不设则保持原样（off），脚本行为与以前一致。
+  const mandateMode=process.env.MANDATE_MODE
+  if(mandateMode)await setMandateMode(pool,userId,mandateMode)
   const goal=await saveGoal(pool,userId,{title:'测试目标'})
   const task=await saveTask(pool,userId,{title:'测试任务',notes:'只回复 OK，不要调用任何工具。',goalId:goal.id,agent:'claude',machine:'E2E-PC',cwd})
   if(installedRunning)ps("Get-Process agenthub -ErrorAction SilentlyContinue | Where-Object Path -EQ (Join-Path $env:LOCALAPPDATA 'AgentHub\\agenthub.exe') | Stop-Process -Force")
@@ -49,6 +54,12 @@ try {
   const messages=(await Promise.all(current.sessionIds.map(s=>listMessages(pool,userId!,s,200)))).flat()
   const result={task:current,assistant:messages.filter(m=>m.role==='assistant').map(m=>m.text),user:messages.filter(m=>m.role==='user').map(m=>m.text)}
   await writeFile(join(fixture,'result.json'),JSON.stringify(result,null,2))
+  if(mandateMode){
+    const mandate=await getMandate(pool,userId,task.id)
+    const approvals=Number((await pool.query('SELECT count(*) n FROM approvals a JOIN task_sessions ts ON ts.user_id=a.user_id AND ts.session_id=a.session_id WHERE ts.user_id=$1 AND ts.task_id=$2',[userId,task.id])).rows[0].n)
+    const decisions=Number((await pool.query('SELECT count(*) n FROM mandate_decisions WHERE user_id=$1 AND task_id=$2',[userId,task.id])).rows[0].n)
+    console.log(JSON.stringify({mandateMode,mandateVersion:mandate?.version??null,approvals,decisions,hint:'auto 下范围内动作应 approvals=0；跑完在任务页点「验收通过」才会 done'}))
+  }
   console.log(JSON.stringify({finalStatus:current.status,realSession:current.sessionIds.some(s=>!s.includes(':pending-')),assistant:result.assistant}))
 } finally {
   if(child?.pid){try{execFileSync('taskkill.exe',['/PID',String(child.pid),'/T','/F'],{windowsHide:true,stdio:'ignore'});}catch{}}

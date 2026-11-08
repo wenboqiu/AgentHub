@@ -7,6 +7,8 @@ import { TaskError } from './tasks.ts'
 //
 // 硬性规则：审批（approval）与等待授权（waiting）永远放行——审批 30 分钟无人处理会按
 // 拒绝处理，会话会卡住，任何规则都不允许把它们静音。
+// （Mandate auto 档下，落在冻结范围内的审批根本不建审批行、不进这条管线——不是静音，是没有这件事；
+//  只要审批行存在，也就是范围外 / danger / unknown 交给人的那些，照样永远放行。）
 
 export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
 export type AgentKey = (typeof AGENT_KEYS)[number]

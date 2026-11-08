@@ -12,7 +12,7 @@ export type BoardRun = { id: string; sessionId: string | null; status: 'queued' 
 export type BoardEntry = {
   taskId: number
   title: string
-  status: 'todo' | 'doing'
+  status: 'todo' | 'doing' | 'review'
   agent: string | null
   machine: string | null
   cwd: string | null
@@ -29,7 +29,7 @@ export type BoardEntry = {
 }
 export type Board = { entries: BoardEntry[]; agents: string[]; generatedAt: string }
 
-export async function dispatchBoard(db: DB, userId: number, online: string[]): Promise<Board> {
+export async function dispatchBoard(db: DB, userId: number, online: string[], mandateMode: 'off' | 'observe' | 'auto' = 'off'): Promise<Board> {
   const [queuedRows, doingRows] = await Promise.all([
     db.query(
       `SELECT q.task_id, q.machine, q.agent, q.attempts, q.created_at,
@@ -130,6 +130,25 @@ export async function dispatchBoard(db: DB, userId: number, online: string[]): P
       stuck: !queuedIds.has(taskId) && !runs.has(taskId),
       updatedAt: new Date(r.updated_at).toISOString(),
     })
+  }
+  // 开了 Mandate（observe / auto）：板上只留「需要人」的项——范围外等人决定的审批、卡住的、
+  // 离线排队的，以及待验收的任务；在正常跑的健康任务不出现。mode=off 时保持原样。
+  if (mandateMode !== 'off') {
+    const needsHuman = entries.filter(e => e.waitingApproval || e.stuck || (e.queued && !e.machineOnline))
+    const review = await db.query(
+      `SELECT id, title, agent, machine, cwd, priority, updated_at FROM tasks
+        WHERE user_id = $1 AND status = 'review' AND mandate_id IS NOT NULL
+        ORDER BY updated_at DESC, id DESC`,
+      [userId],
+    )
+    for (const r of review.rows) {
+      needsHuman.push({
+        taskId: Number(r.id), title: r.title, status: 'review', agent: r.agent, machine: r.machine, cwd: r.cwd,
+        priority: r.priority ?? 'medium', queued: false, attempts: 0, queuedAt: null, run: null, waitingApproval: false,
+        lastActivityAt: null, machineOnline: isOnline(r.machine), stuck: false, updatedAt: new Date(r.updated_at).toISOString(),
+      })
+    }
+    return { entries: needsHuman, agents: online, generatedAt: new Date().toISOString() }
   }
   return { entries, agents: online, generatedAt: new Date().toISOString() }
 }

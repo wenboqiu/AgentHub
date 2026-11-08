@@ -112,7 +112,9 @@ describe('目标与任务', () => {
       assert.equal(m.mode,'fresh');assert.equal(m.sessionKey,'');assert.equal(m.text,expected);assert.equal(m.cwd,'D:\\TaskTest')
       assert.ok(r.body.task.sessionIds.includes(r.body.sessionId))
     }
-    await call('PATCH',`/tasks/${t.id}`,{notes:'备注',status:'done'});assert.ok((await get(t.id)).doneAt)
+    // 派发过的任务（有 Mandate、有关联会话）不能手工推到 done，只能经验收
+    assert.equal((await call('PATCH',`/tasks/${t.id}`,{notes:'备注',status:'done'})).status,409)
+    await call('PATCH',`/tasks/${t.id}`,{notes:'备注',status:'review'});assert.equal((await call('POST',`/tasks/${t.id}/accept`,{})).status,200);assert.ok((await get(t.id)).doneAt)
     const r=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(r.body.task.status,'doing');assert.equal(r.body.task.doneAt,null)
     assert.equal((await wait(()=>ex.msgs.find(m=>m.runId===r.body.runId))).text,'备注')
     assert.equal((await call('POST',`/tasks/${t.id}/start`,{text:'\0'})).status,400)

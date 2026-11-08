@@ -2,6 +2,7 @@ import type pg from 'pg'
 import { listMessages } from './db.ts'
 import { TaskError, getTask, type ChecklistItem, type Task } from './tasks.ts'
 import { addMemory } from './memories.ts'
+import { randomUUID } from 'node:crypto'
 
 // 验收检查项与证据链（思路来自 LobeHub 的 Acceptance：把需求拆成看得见的检查项，
 // 逐项跑并附证据，人整体通过或部分打回，打回原因沉淀成下次交付前的标准）。
@@ -142,7 +143,46 @@ export async function decideReviewItem(db: DB, userId: number, taskId: number, i
       } catch { /* 记忆条数到上限等情况忽略 */ }
     }
   }
+  // 签署过 Mandate 的任务：打回不是在原任务里重跑，而是出一张新的任务单提案，人确认后重新授权
+  if (status === 'fail') {
+    try { await proposeRetry(db, userId, taskId, note.trim()) } catch { /* 提案是附加产物，失败不挡住打回本身 */ }
+  }
   return item(r.rows[0])
+}
+
+/**
+ * 打回 → 新 Ticket：原任务保持 review 不动，生成一条带打回原因与原 Mandate 摘要的待确认提案。
+ * 没有 Mandate 的老任务 / 纯人工任务保持原行为（只沉淀经验），返回 null。
+ */
+export async function proposeRetry(db: DB, userId: number, taskId: number, reason: string): Promise<number | null> {
+  const m = (await db.query(
+    `SELECT m.version, m.scope FROM tasks t JOIN task_mandates m ON m.user_id=t.user_id AND m.id=t.mandate_id
+      WHERE t.user_id=$1 AND t.id=$2`, [userId, taskId])).rows[0]
+  if (!m) return null
+  const t = (await db.query(
+    'SELECT title, priority, role_id, project_id, machine, cwd, constraints FROM tasks WHERE user_id=$1 AND id=$2', [userId, taskId])).rows[0]
+  if (!t) return null
+  const s = (await db.query(
+    `SELECT s.id, s.title, s.agent, s.project FROM task_sessions ts JOIN sessions s ON s.user_id=ts.user_id AND s.id=ts.session_id
+      WHERE ts.user_id=$1 AND ts.task_id=$2 ORDER BY ts.created_at, ts.session_id LIMIT 1`, [userId, taskId])).rows[0]
+  const scope = m.scope as { paths?: string[]; net?: boolean; push?: boolean; scripts?: boolean } | null
+  const summary = `原授权范围（v${m.version}）：${scope?.paths?.length ? `只能改 ${scope.paths.join('、')}` : '整个工作目录'}；`
+    + `${scope?.net ? '可联网' : '不联网'}、${scope?.push ? '可推远端' : '不推远端'}、${scope?.scripts ? '可跑脚本' : '不跑脚本'}`
+  const why = reason || '验收未通过'
+  const kind = s ? 'fix' : 'ticket'
+  const r = await db.query(
+    `INSERT INTO session_proposals(
+       user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,note,origin,machine,cwd)
+     VALUES($1,$2,$3,$4,$5,$6,now(),$7,$8,$9,'[]'::jsonb,$10,'fresh',$11,$12,$13,$14,'heuristic',$15,$16) RETURNING id`,
+    [userId, s?.id ?? `ticket:${randomUUID()}`, (s?.title ?? '').slice(0, 200), s?.agent ?? '', (s?.project ?? '').slice(0, 200), taskId, kind,
+      `打回重做：${String(t.title).slice(0, 180)}`.slice(0, 200), [`验收打回原因：${why}`, summary, '（范围已冻结：确认这张新任务单会签署新的授权范围。）'].join('\n').slice(0, 4000),
+      JSON.stringify(t.constraints ?? {}), t.priority, t.role_id, t.project_id, why.slice(0, 500), t.machine, t.cwd],
+  )
+  const id = Number(r.rows[0].id)
+  // 同一任务多次打回只留最新一张待确认的
+  await db.query("UPDATE session_proposals SET status='discarded', updated_at=now() WHERE user_id=$1 AND task_id=$2 AND status='pending' AND id<>$3", [userId, taskId, id])
+  return id
 }
 
 export async function addStandard(db: DB, userId: number, taskId: number, text: string) {

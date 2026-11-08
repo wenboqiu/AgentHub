@@ -70,6 +70,30 @@ export type TaskConstraints = {
 
 export const NO_CONSTRAINTS: TaskConstraints = { paths: [], net: false, push: false, scripts: false, note: '' }
 
+/**
+ * 规则表版本：判定逻辑（DANGEROUS / SENSITIVE / 各命令分类）有实质变化时必须手动递增。
+ * 签署 Mandate 时写进快照，事后才能回答「当时按哪一版规则判的」。
+ */
+export const RULESET_VERSION = 'referee-2026-11'
+
+/**
+ * 冻结进 Mandate 的完整授权范围：在任务边界之上多了命令类、CLI 工具白名单、最长运行时间。
+ * 目录声明只是提示，不是安全隔离——真正的约束来自 CLI 白名单与 sandbox。
+ */
+export type MandateScope = TaskConstraints & {
+  /** 允许的命令类（read | test | build | write）；空 = 沿用本文件的规则表 */
+  commands: string[]
+  /** 下发给 CLI 的工具白名单（如 Read、Edit、Bash(npm test:*)） */
+  allowedTools: string[]
+  /** 单任务最长运行分钟数（本期只存储并随 run.start 下发，执行器暂不强制） */
+  maxRuntimeMin: number
+}
+
+export const MAX_SCOPE_ITEMS = 40
+export const DEFAULT_MAX_RUNTIME_MIN = 30
+export const MAX_RUNTIME_MIN_CAP = 24 * 60
+export const MANDATE_COMMAND_CLASSES = ['read', 'test', 'build', 'write'] as const
+
 export const MAX_CONSTRAINT_PATHS = 12
 export const MAX_CONSTRAINT_NOTE = 400
 
@@ -88,6 +112,24 @@ export function normalizeConstraints(v: unknown): TaskConstraints {
     push: o.push === true,
     scripts: o.scripts === true,
     note: typeof o.note === 'string' ? o.note.replaceAll('\0', '').trim().slice(0, MAX_CONSTRAINT_NOTE) : '',
+  }
+}
+
+/** 清洗 Mandate 范围：沿用边界的清洗语义，看不懂的一律当没声明 */
+export function normalizeScope(v: unknown): MandateScope {
+  const o = v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {}
+  const list = (x: unknown, max: number, keep: (s: string) => boolean = () => true): string[] =>
+    Array.isArray(x)
+      ? [...new Set(x.filter((s): s is string => typeof s === 'string').map(s => s.replaceAll('\0', '').trim().slice(0, max)).filter(s => s && keep(s)))].slice(0, MAX_SCOPE_ITEMS)
+      : []
+  const minutes = typeof o.maxRuntimeMin === 'number' && Number.isFinite(o.maxRuntimeMin) && o.maxRuntimeMin >= 1
+    ? Math.min(Math.floor(o.maxRuntimeMin), MAX_RUNTIME_MIN_CAP)
+    : DEFAULT_MAX_RUNTIME_MIN
+  return {
+    ...normalizeConstraints(v),
+    commands: list(o.commands, 20, s => (MANDATE_COMMAND_CLASSES as readonly string[]).includes(s)),
+    allowedTools: list(o.allowedTools, 200),
+    maxRuntimeMin: minutes,
   }
 }
 

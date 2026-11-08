@@ -13,6 +13,7 @@ import { migrateProposals } from './proposals.ts'
 import { migrateArtifacts } from './artifacts.ts'
 import { migrateAttachments } from './attachments.ts'
 import { migrateReferee } from './referee.ts'
+import { migrateMandate, pruneMandateDecisions } from './mandate.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
 import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
 import { isInternalTitle } from './session-kind.ts'
@@ -231,6 +232,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateAttachments(client)
     // 审批来源（人 / 项目经理代批）加在 approvals 上，表在建库时就存在了
     await migrateReferee(client)
+    // Mandate 快照 / 决策留痕 / 交付物 / 授权模式；给 tasks 与 approvals 加列，必须排在两者建表之后
+    await migrateMandate(client)
     // profiles 实体已废弃（执行目录收进项目）：各处引用清完后删表兜底（CASCADE 清残留约束）
     await client.query('DROP TABLE IF EXISTS profiles CASCADE')
   } finally {
@@ -468,6 +471,7 @@ export async function purgeOld(pool: pg.Pool): Promise<number> {
   const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '30 days'")
   await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '90 days'")
   await pool.query("DELETE FROM approvals WHERE created_at < now() - interval '7 days'")
+  await pruneMandateDecisions(pool)
   await pool.query("DELETE FROM auth_sessions WHERE last_used_at < now() - interval '180 days'")
   return r.rowCount ?? 0
 }

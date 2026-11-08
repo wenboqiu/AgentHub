@@ -63,6 +63,7 @@ import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
+import { acceptTask, createDelivery, decisionStats, getDelivery, getMandate, getMandateMode, judgeByMandate, recentAutoAllowCount, recordDecision, setMandateMode, signMandate, tagApproval, type Mandate, type MandateMode } from './mandate.ts'
 import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
 import { pickDispatchModel } from './model-pick.ts'
 import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, renameMachine, saveProject } from './projects.ts'
@@ -147,7 +148,7 @@ function bearer(req: FastifyRequest) {
 
 // 一个 WS 连接：属于哪个账号、哪个设备会话（踢设备时按它们关闭）
 type Conn = { sock: Sock; userId: number; authSessionId: number }
-type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean; agents: string[] }
+type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean; mandateV1: boolean; agents: string[] }
 const INVALID_LOGIN = 4401
 
 // Codex Desktop 结束一轮时不一定会写终态（直接关窗口、进程被杀都只留下 task_started），
@@ -374,6 +375,25 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
    * 放行 = 写裁决 + 通知执行器继续，人不再被打扰；判不了 = 把理由挂在记录上交给人。
    * 两种情况都会推送，调用方不必再推一次。
    */
+  /** 这条会话关联的任务里，第一份签署过的 Mandate（连同任务）；没有返回 null */
+  const mandateOfSession = async (userId: number, sessionId: string): Promise<{ task: Task; mandate: Mandate } | null> => {
+    const linked = await tasksForSession(pool, userId, sessionId).catch(() => [])
+    for (const t of linked) {
+      const mandate = await getMandate(pool, userId, t.id).catch(() => null)
+      if (mandate) return { task: t, mandate }
+    }
+    return null
+  }
+  /**
+   * run.start 要不要带 mandate：仅 auto 档 + 执行器声明了 mandate-v1 + 任务有冻结 Mandate。
+   * 老执行器不带（也就不会关 CLI 审批），退回逐条代批。Mandate 签署后不可变，所以排队投递时现取与入队时取等价。
+   */
+  const mandateField = async (userId: number, machine: string, taskId: number | undefined): Promise<{ mandate?: { id: number; version: number; mode: MandateMode; scope: Mandate['scope']; rulesetVersion: string } }> => {
+    if (taskId === undefined || !executors.get(execKey(userId, machine))?.mandateV1) return {}
+    if ((await getMandateMode(pool, userId)) !== 'auto') return {}
+    const m = await getMandate(pool, userId, taskId)
+    return m ? { mandate: { id: m.id, version: m.version, mode: 'auto', scope: m.scope, rulesetVersion: m.rulesetVersion } } : {}
+  }
   const refereeHandle = async (userId: number, approval: Approval, machine: string): Promise<void> => {
     const passToHuman = async (rule: string, reason: string, tier = '') => {
       const noted = await annotateApproval(pool, userId, approval.id, rule, reason, tier)
@@ -385,9 +405,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const session = await getSession(pool, userId, approval.sessionId)
     if (!session) return pushApproval(userId, approval, true)
 
-    // 这条审批属于哪个任务：任务自己声明的边界比全局策略更具体，先按它判
+    // 这条审批属于哪个任务：任务自己声明的边界比全局策略更具体，先按它判。
+    // 签署过 Mandate 的任务读冻结快照（范围签署后不会再变，内容与任务上的边界一致）
     const linked = await tasksForSession(pool, userId, approval.sessionId).catch(() => [])
-    const grants = linked.find(t => hasConstraints(t.constraints))?.constraints
+    const frozen = (await mandateOfSession(userId, approval.sessionId))?.mandate.scope
+    const grants = frozen && hasConstraints(frozen) ? frozen : linked.find(t => hasConstraints(t.constraints))?.constraints
     const verdict = judgeApproval({
       tool: approval.tool, detail: approval.detail, cwd: session.cwd, policy: manager.approve, grants,
     })
@@ -473,6 +495,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       for (const t of tasks) {
         const digest = await buildReviewDigest(pool,userId,t.id)
         if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
+        // 交付物快照：签署过 Mandate 的任务进入待验收时落一份（重跑覆盖未验收的）
+        await createDelivery(pool,userId,t.id,digest).catch(e => app.log.warn({ taskId: t.id, err: String(e) }, '写交付物失败'))
         // 每个任务跑完都要有文档产物：这里用摘要兜底生成一份骨架，执行端以后交的会覆盖它
         const artifact = await buildArtifact(pool,userId,t.id)
         if (artifact) broadcast(userId,{type:'task.artifact',taskId:t.id,artifact})
@@ -503,7 +527,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
     pushSession(userId,pending,false); pushRun(userId,run); pushMessage(userId,message)
     if (task) pushTask(userId,task)
-    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text:prompt ?? text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {})})) {
+    const mandate = await mandateField(userId, base.machine, taskId)
+    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text:prompt ?? text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {}),...mandate})) {
       const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
       if (failed) pushRun(userId,failed)
       await abortPending(userId,pendingId,'电脑端不在线')
@@ -554,11 +579,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       await db.query('COMMIT')
     } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
     pushRun(userId, run); pushMessage(userId, message); pushTask(userId, saved)
+    const mandate = await mandateField(userId, session.machine, task.id)
     const sent = sendExecutor(userId, session.machine, {
       type: 'run.start', runId, sessionId: session.id, agent: session.agent,
       sessionKey: sessionKeyOf(session.id), cwd: session.cwd, text, mode: 'resume',
       ...(role.model ? { model: role.model } : {}),
       ...(role.instructions ? { instructions: role.instructions } : {}),
+      ...mandate,
     })
     if (!sent) {
       const failed = await setRunStatus(pool, userId, runId, 'failed', '电脑端不在线')
@@ -681,6 +708,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       },
     })
     const dispatch = { model: chosen.model, instructions, modelNote: chosen.note }
+    // 开工 = 签署 Mandate：到这里派发参数都已校验通过，范围在此冻结（已签署过的原样返回）。
+    // 排队和立刻开跑都算开工；run.start 里带不带 mandate 在真正发送时才按模式与执行器能力决定。
+    await signMandate(pool, userId, task.id, task.constraints, 'user')
     // 开跑方式只用一次：无论排队还是立刻开跑，也无论最后按 fork 还是 fresh 跑，
     // 都在这儿清掉——显式请求 fresh 时不清，重试就会又续回老上下文
     const settle = async () => {
@@ -1163,6 +1193,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if ((req.body as {status?:unknown}|null)?.status === 'done')
       for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
     // 手动推进到待验收/已完成也补一份产物：不依赖会话事件，「每个任务都有文档」才成立
+    if (b.status === 'review') await createDelivery(pool,req.userId,id,(await getDigests(pool,req.userId,id)).review ?? {}).catch(() => null)
     if (b.status === 'review' || b.status === 'done') {
       const artifact = await buildArtifact(pool,req.userId,id)
       if (artifact) broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
@@ -1301,6 +1332,29 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const task = await linkSession(pool,req.userId,entityId(p.id),p.sessionId,true)
     pushTask(req.userId,task); return {task}
   }))
+  // 验收：review → done 的唯一入口（门禁：检查项全 pass、没有待处理审批）
+  app.post('/tasks/:id/accept', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const { task, delivery } = await acceptTask(pool,req.userId,id,'user')
+    for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
+    const artifact = await buildArtifact(pool,req.userId,id)
+    if (artifact) broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
+    if (task.projectId !== null) await appendBrief(pool,req.userId,task.projectId,`「${task.title}」已完成`,id)
+    pushTask(req.userId,task); return {task,delivery}
+  }))
+  // 任务的授权范围快照 + 决策统计（observe 下「本来会自动放行 N 条、会问 M 次」）
+  app.get('/tasks/:id/mandate', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    return {
+      mode: await getMandateMode(pool,req.userId),
+      mandate: await getMandate(pool,req.userId,id),
+      stats: await decisionStats(pool,req.userId,id),
+      delivery: await getDelivery(pool,req.userId,id),
+    }
+  }))
+  app.get('/mandate/settings', async req => ({ mode: await getMandateMode(pool,req.userId) }))
+  app.put('/mandate/settings', async req => serial(async () => ({ mode: await setMandateMode(pool,req.userId,object(req.body ?? {}).mode) })))
   app.post('/tasks/:id/start', async req => serial(async () =>
     startTaskDispatch(req.userId, entityId((req.params as {id:string}).id), object(req.body ?? {}))))
   app.delete('/tasks/:id/queue', async req => serial(async () => {
@@ -1465,6 +1519,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         : v
     }
     const task = await createTaskWithDefaults(req.userId, body)
+    // 确认任务单 = 签署 Mandate：范围从这一刻起冻结，之后不能再改
+    await signMandate(pool, req.userId, task.id, task.constraints, 'user')
     // 发单没有会话可挂；会话攒出来的意见才需要把来源会话关联上
     const linked = isTicket ? task : await linkSession(pool, req.userId, task.id, proposal.sessionId)
     await markProposal(pool, req.userId, id, 'accepted', task.id)
@@ -1513,7 +1569,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
 
   // 派活看板：排队中 / 在跑 / 卡住（进行中无运行）的任务聚到一张板上
   app.get('/dispatch/board', async req => serial(async () =>
-    dispatchBoard(pool, req.userId, agentList(req.userId))))
+    dispatchBoard(pool, req.userId, agentList(req.userId), await getMandateMode(pool, req.userId))))
 
   app.post('/sessions/ack-all', async req => {
     const list = await ackAll(pool, req.userId)
@@ -1849,12 +1905,52 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine || !run.sessionId || TERMINAL.includes(run.status)) return
         const tool = cleanText(str(m.tool), 100) || 'tool'
+        // Mandate：observe 只留痕、不改流程；auto 且执行器认 mandate-v1 时，范围内直接放行（不建审批行、
+        // 不插消息、不广播、不通知），范围外 / danger / unknown 照旧交人。mode=off 或任务没签署过 = 与旧版一致。
+        let scoped: { mandate: Mandate; taskId: number; verdict: ReturnType<typeof judgeByMandate>; auto: boolean } | null = null
+        const mode = await getMandateMode(pool, userId)
+        if (mode !== 'off') {
+          const ctx = await mandateOfSession(userId, run.sessionId)
+          if (ctx) {
+            const cwd = (await getSession(pool, userId, run.sessionId))?.cwd ?? ''
+            const verdict = judgeByMandate(ctx.mandate.scope, { tool, detail: str(m.detail), cwd })
+            const auto = mode === 'auto' && !!executors.get(execKey(userId, machine))?.mandateV1
+            scoped = { mandate: ctx.mandate, taskId: ctx.task.id, verdict, auto }
+            if (auto && verdict.action === 'allow') {
+              const manager = await getManager(pool, userId)
+              if ((await recentAutoAllowCount(pool, userId)) < manager.approve.maxPerHour) {
+                const approvalId = randomUUID()
+                await recordDecision(pool, userId, { taskId: ctx.task.id, mandateId: ctx.mandate.id, approvalId, wouldAllow: true, inScope: true, rule: verdict.rule, tier: verdict.tier, mode: 'auto' })
+                // 没有审批行：只给执行器一个 id 让它继续
+                sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId })
+                sendExecutor(userId, machine, { type: 'approval.decide', approvalId, decision: 'allow' })
+                return
+              }
+              // 一小时内放行太多：说明 agent 在跑飞，后面的全交给人
+              scoped.verdict = { action: 'escalate', tier: 'gray', rule: 'quota', reason: '这一小时的自动放行次数已用完' }
+            }
+          }
+        }
         const approval = await createApproval(pool, userId, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
         // Codex 提问（request_user_input）：detail 是 questions 的 JSON，消息里给人看问题文本
         const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', approvalHeading(approval.tool, approval.detail))
         pushMessage(userId, message)
         // 先告诉执行器这个审批拿到了 id，再发裁决；顺序反了执行器只能走迟到分支
         sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId: approval.id })
+        if (scoped) {
+          const v = scoped.verdict
+          await recordDecision(pool, userId, {
+            taskId: scoped.taskId, mandateId: scoped.mandate.id, approvalId: approval.id,
+            wouldAllow: v.action === 'allow', inScope: v.action === 'allow', rule: v.rule, tier: v.tier, mode: scoped.auto ? 'auto' : 'observe',
+          })
+          if (scoped.auto) {
+            // auto：范围外（含 danger / unknown / 限额）一律交人，不走项目经理代批
+            await tagApproval(pool, userId, approval.id, scoped.mandate.id, v.action === 'allow')
+            const noted = await annotateApproval(pool, userId, approval.id, v.rule, v.reason, v.tier)
+            await pushApproval(userId, noted ?? approval, true)
+            return
+          }
+        }
         // 项目经理先看：能自己放行就直接让 agent 继续，判不了才弹给人
         await refereeHandle(userId, approval, machine)
         return
@@ -1887,11 +1983,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         return
       }
       const key = execKey(userId, machine)
-      // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）
+      // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）、mandate-v1（认 run.start.mandate，auto 档下按范围关掉 CLI 逐动作审批）
       const caps = new Set((q.get('capabilities') ?? '').split(',').map(s => s.trim()).filter(Boolean))
       // agents 是这台电脑装有哪几个工具：老客户端不带这个参数 = 不知道，保留上次上报的结果
       const agents = parseAgents(q.get('agents'))
-      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1'), agents }
+      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1'), mandateV1: caps.has('mandate-v1'), agents }
       let registered = false
       const queue: unknown[] = []
       const handle = (data: unknown) => {
