@@ -103,7 +103,7 @@ fn build_url(s: &Snapshot, agents: &[&str]) -> Result<String, String> {
     } else {
         return Err("服务端地址必须以 http:// 或 https:// 开头".into());
     };
-    let mut url = format!("{ws}/ws?token={}&role=agent&machine={}&capabilities=reply-branch-v1,role-v1", urlencode(&s.token), urlencode(&s.machine));
+    let mut url = format!("{ws}/ws?token={}&role=agent&machine={}&capabilities=reply-branch-v1,role-v1,mandate-v1", urlencode(&s.token), urlencode(&s.machine));
     if !agents.is_empty() {
         url.push_str(&format!("&agents={}", agents.join(",")));
     }
@@ -269,9 +269,9 @@ mod tests {
 
     #[test]
     fn builds_ws_url() {
-        assert_eq!(build_url(&snap("https://x.example.com/"), &[]).unwrap(), "wss://x.example.com/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1");
+        assert_eq!(build_url(&snap("https://x.example.com/"), &[]).unwrap(), "wss://x.example.com/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1,mandate-v1");
         assert!(!build_url(&snap("https://x"), &[]).unwrap().contains("control"));
-        assert_eq!(build_url(&snap("http://127.0.0.1:3000"), &[]).unwrap(), "ws://127.0.0.1:3000/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1");
+        assert_eq!(build_url(&snap("http://127.0.0.1:3000"), &[]).unwrap(), "ws://127.0.0.1:3000/ws?token=t%20k&role=agent&machine=PC-1&capabilities=reply-branch-v1,role-v1,mandate-v1");
         assert!(build_url(&snap("ftp://x"), &[]).is_err());
         assert_eq!(urlencode("中a"), "%E4%B8%ADa");
     }

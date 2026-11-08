@@ -181,6 +181,112 @@ pub fn codex_model_args(model: &str) -> Vec<String> {
     if model.is_empty() { vec![] } else { vec!["-c".into(), format!("model=\"{model}\"")] }
 }
 
+/// 服务端随 `run.start` 下发的授权范围（能力 mandate-v1）。只有 `mandate.mode == "auto"` 才生效；
+/// 没有这个字段、或不是 auto，行为与旧版完全一致（CLI 逐动作审批照旧）。
+///
+/// 目录声明不是安全隔离：真正的约束是 CLI 工具白名单与 Codex sandbox。
+/// 这里绝不据此打开 `bypassPermissions` / `danger-full-access`，也不把 Codex 的 approvalPolicy 设成 never——
+/// 白名单之外的动作仍会走审批，由服务端按冻结范围判定：范围内自动放行，范围外 / danger / unknown 交给人。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Mandate {
+    /// 允许改的相对目录；空 = 整个工作目录
+    pub paths: Vec<String>,
+    pub net: bool,
+    pub push: bool,
+    pub scripts: bool,
+    /// 允许的命令类（read / test / build / write）；空 = 全部
+    pub commands: Vec<String>,
+    /// 服务端显式给的工具白名单；非空时原样使用
+    pub allowed_tools: Vec<String>,
+}
+
+impl Mandate {
+    pub fn from_msg(msg: &Value) -> Option<Mandate> {
+        let m = msg.get("mandate").filter(|m| m.is_object())?;
+        if m.get("mode").and_then(|v| v.as_str()) != Some("auto") {
+            return None;
+        }
+        let scope = m.get("scope").filter(|s| s.is_object())?;
+        let flag = |k: &str| scope.get(k).and_then(|v| v.as_bool()) == Some(true);
+        let list = |k: &str| -> Vec<String> {
+            scope
+                .get(k)
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+        Some(Mandate { paths: list("paths"), net: flag("net"), push: flag("push"), scripts: flag("scripts"), commands: list("commands"), allowed_tools: list("allowedTools") })
+    }
+
+    fn has_command(&self, class: &str) -> bool {
+        self.commands.is_empty() || self.commands.iter().any(|c| c == class)
+    }
+}
+
+/// 按范围生成 Claude 的 `--allowedTools` 白名单。故意保守：只放只读 / 测试 / 构建这类确定无害的，
+/// 联网装包、跑脚本、推远端不进白名单——它们仍会走审批，由服务端按范围判（force push 之类 danger 照样交人）。
+pub fn mandate_allowed_tools(m: &Mandate) -> Vec<String> {
+    if !m.allowed_tools.is_empty() {
+        return m.allowed_tools.clone();
+    }
+    let mut t: Vec<String> = Vec::new();
+    let mut add = |items: &[&str]| t.extend(items.iter().map(|s| s.to_string()));
+    if m.has_command("read") {
+        add(&["Read", "Glob", "Grep", "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git show:*)"]);
+    }
+    if m.has_command("write") {
+        // 声明了目录就只放行目录内的写：目录外的写仍会弹审批（服务端判越界）
+        if m.paths.is_empty() {
+            add(&["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+        } else {
+            for p in &m.paths {
+                for tool in ["Edit", "Write", "MultiEdit"] {
+                    t.push(format!("{tool}({p}/**)"));
+                }
+            }
+        }
+    }
+    let mut add = |items: &[&str]| t.extend(items.iter().map(|s| s.to_string()));
+    if m.has_command("test") {
+        add(&["Bash(npm test:*)", "Bash(npm run test:*)", "Bash(cargo test:*)", "Bash(go test:*)", "Bash(pytest:*)", "Bash(npx tsc --noEmit:*)"]);
+    }
+    if m.has_command("build") {
+        add(&["Bash(npm run build:*)", "Bash(cargo build:*)", "Bash(cargo check:*)", "Bash(go build:*)"]);
+    }
+    if m.net {
+        add(&["WebFetch", "WebSearch"]);
+    }
+    t
+}
+
+/// auto 档下收紧 Claude 的命令行：白名单内的动作 CLI 自己放行，不再逐条问。
+/// 全目录可写时用 `acceptEdits`；声明了目录就保持 `default`，让目录外的写仍然走审批（acceptEdits 会放行整个工作目录）。
+/// 永远不会产生 `bypassPermissions`。
+pub fn claude_mandate_args(args: &mut Vec<String>, m: &Mandate) {
+    if m.paths.is_empty() {
+        if let Some(i) = args.iter().position(|a| a == "--permission-mode") {
+            if args.get(i + 1).map(String::as_str) == Some("default") {
+                args[i + 1] = "acceptEdits".into();
+            }
+        }
+    }
+    let tools = mandate_allowed_tools(m);
+    if !tools.is_empty() {
+        args.push("--allowedTools".into());
+        args.push(tools.join(","));
+    }
+}
+
+/// Codex 的 turn/start 参数：无 mandate 时与旧版逐字一致（approvalPolicy 仍是 on-request）；
+/// auto 档额外钉死 workspace-write 沙箱，`net` 对应 networkAccess。approvalPolicy 不用 never。
+pub fn codex_turn_params(thread_id: &str, input: &[Value], mandate: Option<&Mandate>) -> Value {
+    let mut p = json!({"threadId":thread_id,"input":input,"approvalPolicy":"on-request"});
+    if let Some(m) = mandate {
+        p["sandboxPolicy"] = json!({"type":"workspaceWrite","networkAccess":m.net});
+    }
+    p
+}
+
 /// claude 命令行参数。`permission_tool`：是否带 `--permission-prompt-tool stdio`——
 /// 只有 Claude Code 支持该参数；CodeBuddy / WorkBuddy（同源 CLI）2.x 没有它，
 /// 传了会直接 `error: unknown option` 退出（codebuddy 进程异常退出(1) 的根因）。
@@ -588,6 +694,30 @@ pub fn claude_control_response(request_id: &str, allow: bool, input: &Value) -> 
         json!({"behavior":"deny","message":"用户在 AgentHub 里拒绝了这次操作"})
     };
     json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":inner}}).to_string()
+}
+
+/// CodeBuddy / WorkBuddy（2.x）的 stream-json 权限回包。
+///
+/// 它们的 SDK 客户端只读 `response.allowed`（布尔）+ `updatedInput`：
+/// 缺了 `allowed` 就按 `undefined ?? false` 处理，于是工具被拒、报错恰好是
+/// `Permission denied by SDK`——和用户在 AgentHub 里点没点「允许」无关。
+/// 这条回包格式和 Claude 的 `{"behavior":"allow"}` 不通用，别混用。
+pub fn sdk_control_response(request_id: &str, allow: bool, input: &Value) -> String {
+    let inner = if allow {
+        json!({"allowed":true,"updatedInput":input})
+    } else {
+        json!({"allowed":false,"reason":"用户在 AgentHub 里拒绝了这次操作"})
+    };
+    json!({"type":"control_response","response":{"subtype":"success","request_id":request_id,"response":inner}}).to_string()
+}
+
+/// 按 CLI 家族挑回包格式：真 Claude 用 `behavior`，CodeBuddy 系用 `allowed`
+pub fn permission_response(request_id: &str, allow: bool, input: &Value, sdk_style: bool) -> String {
+    if sdk_style {
+        sdk_control_response(request_id, allow, input)
+    } else {
+        claude_control_response(request_id, allow, input)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -1202,6 +1332,8 @@ struct Run {
     tx: Sender<RunMsg>,
     /// 上一次上报的「正在做什么」：时间是节流用的，文字用来跳过重复内容
     activity: Mutex<(Instant, String)>,
+    /// 服务端下发的授权范围（仅 auto 档）；None = 与旧版一致
+    mandate: Option<Mandate>,
 }
 
 impl Run {
@@ -1692,6 +1824,9 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
     let mut cmd = Command::new(&cli.program);
     let mut args = cli.prefix.clone();
     args.extend(claude_branch_args(mode, key, branch_point, cli.permission_prompt_tool));
+    if let (Some(m), "claude") = (&run.mandate, label) {
+        claude_mandate_args(&mut args, m);
+    }
     claude_role_args(&mut args, model, instructions);
     args.extend_from_slice(extra_args);
     cmd.args(args)
@@ -1715,6 +1850,8 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
     }
 
     let start = Instant::now();
+    // 没有 `--permission-prompt-tool stdio` 的 CLI（CodeBuddy / WorkBuddy）走 SDK 回包格式
+    let sdk_style = !cli.permission_prompt_tool;
     let mut approvals = Approvals::default();
     let mut finish: Option<Finish> = None;
     let mut session_reported = mode == Mode::Resume;
@@ -1780,12 +1917,12 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
             Ok(RunMsg::Shutdown) => finish = Some(Finish::Silent),
             Ok(RunMsg::Created { local_id, approval_id }) => {
                 if let Some((p, allow)) = approvals.created(local_id, approval_id, &run.out, &run.run_id) {
-                    answer_claude(&mut stdin, &p, allow);
+                    answer_claude(&mut stdin, &p, allow, sdk_style);
                 }
             }
             Ok(RunMsg::Decide { approval_id, allow }) => {
                 if let Some((p, allow)) = approvals.decide(&approval_id, allow) {
-                    answer_claude(&mut stdin, &p, allow);
+                    answer_claude(&mut stdin, &p, allow, sdk_style);
                 }
             }
             // Claude 没有用户输入请求；答案只会派给 Codex 运行
@@ -1795,7 +1932,7 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
         }
         for p in approvals.expired(Instant::now(), &run.out, &run.run_id) {
             run.message("system", "授权等待超时，已拒绝");
-            answer_claude(&mut stdin, &p, false);
+            answer_claude(&mut stdin, &p, false, sdk_style);
         }
     }
     let f = finish.unwrap();
@@ -1857,9 +1994,9 @@ fn run_claude_terminal(run: &Run, key: &str, endpoint: &crate::claude_live::Endp
     }
 }
 
-fn answer_claude(stdin: &mut Option<ChildStdin>, p: &Pending, allow: bool) {
+fn answer_claude(stdin: &mut Option<ChildStdin>, p: &Pending, allow: bool, sdk_style: bool) {
     let id = p.key.as_str().unwrap_or("");
-    write_line(stdin, &claude_control_response(id, allow, &p.input));
+    write_line(stdin, &permission_response(id, allow, &p.input, sdk_style));
 }
 
 /// 等进程自己退出；超时就杀
@@ -1948,7 +2085,7 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                                     &rpc_request(
                                         ID_TURN,
                                         "turn/start",
-                                        json!({"threadId":thread_id,"input":input.clone(),"approvalPolicy":"on-request"}),
+                                        codex_turn_params(&thread_id, &input, run.mandate.as_ref()),
                                     ),
                                 );
                             }
@@ -2562,7 +2699,7 @@ impl Runner {
                     .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
                     .unwrap_or_default();
                 // 角色带来的模型与上下文：老服务端不发这两个字段，空串就是「用执行端默认」
-                self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), images, s("mode"), s("branchPoint"), s("model"), s("instructions"));
+                self.start(s("runId"), s("sessionId"), s("agent"), s("sessionKey"), s("cwd"), s("text"), images, s("mode"), s("branchPoint"), s("model"), s("instructions"), Mandate::from_msg(msg));
             }
             Some("run.stop") => {
                 if let Some(e) = self.runs.lock().unwrap().get(&s("runId")) {
@@ -2599,9 +2736,9 @@ impl Runner {
         }
     }
 
-    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String, model: String, instructions: String) {
+    fn start(&self, run_id: String, session_id: String, agent: String, key: String, cwd: String, text: String, images: Vec<String>, mode: String, branch_point: String, model: String, instructions: String, mandate: Option<Mandate>) {
         let (tx, rx) = mpsc::channel();
-        let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone(), activity: Mutex::new((Instant::now(), String::new())) };
+        let run = Run { out: self.out.clone(), run_id: run_id.clone(), rx, tx: tx.clone(), activity: Mutex::new((Instant::now(), String::new())), mandate };
         // 空 cwd = 用 AgentHub 自己的默认工作目录（<文档>/AgentHub，重装也还在）。
         // 先建目录再占会话槽：建不出来就直接失败，别留下一个永远卡住的运行。
         let cwd = if cwd.trim().is_empty() {
@@ -2710,7 +2847,7 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let (out_tx, out_rx) = mpsc::channel::<Value>();
         let (tx, rx) = mpsc::channel::<RunMsg>();
-        let run = Run { out: out_tx, run_id: "e2e".into(), rx, tx, activity: Mutex::new((Instant::now(), String::new())) };
+        let run = Run { out: out_tx, run_id: "e2e".into(), rx, tx, activity: Mutex::new((Instant::now(), String::new())), mandate: None };
         run_zcode(&run, Mode::Fresh, "", cwd.to_str().unwrap(), "只回复 OK1", "", "", "low");
         let mut got_reply = false;
         let mut finished = String::new();
@@ -2853,6 +2990,69 @@ mod tests {
         let mut fresh = vec!["-p"];
         fresh.extend(tail);
         assert_eq!(claude_args(Mode::Fresh, "k1", true), fresh);
+    }
+
+    #[test]
+    fn mandate_parses_only_for_auto_and_keeps_old_args_without_it() {
+        // 没有 mandate / 不是 auto：不解析，Claude 与 Codex 的参数与旧版逐字一致
+        assert_eq!(Mandate::from_msg(&json!({"type":"run.start"})), None);
+        assert_eq!(Mandate::from_msg(&json!({"mandate":{"mode":"observe","scope":{"net":true}}})), None);
+        assert_eq!(Mandate::from_msg(&json!({"mandate":{"mode":"auto"}})), None);
+        let plain = claude_args(Mode::Fresh, "k1", true);
+        assert!(plain.windows(2).any(|w| w == ["--permission-mode", "default"]));
+        assert!(!plain.contains(&"--allowedTools".to_string()));
+        let turn = codex_turn_params("t1", &[json!({"type":"text"})], None);
+        assert_eq!(turn, json!({"threadId":"t1","input":[{"type":"text"}],"approvalPolicy":"on-request"}));
+    }
+
+    #[test]
+    fn mandate_claude_args_accept_edits_and_allowlist() {
+        let msg = json!({"mandate":{"id":1,"version":1,"mode":"auto","rulesetVersion":"x","scope":{"paths":[],"net":false,"push":false,"scripts":false,"commands":[],"allowedTools":[],"maxRuntimeMin":30}}});
+        let m = Mandate::from_msg(&msg).expect("auto mandate");
+        let mut args = claude_args(Mode::Fresh, "k1", true);
+        let before = args.clone();
+        claude_mandate_args(&mut args, &m);
+        // 全目录可写：acceptEdits；其余原参数不动；永远不会出现 bypassPermissions
+        assert!(args.windows(2).any(|w| w == ["--permission-mode", "acceptEdits"]), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("bypass") || a.contains("dangerously")), "{args:?}");
+        assert!(args.contains(&"--permission-prompt-tool".to_string()));
+        assert_eq!(args.len(), before.len() + 2);
+        let tools = args[args.len() - 1].clone();
+        assert_eq!(args[args.len() - 2], "--allowedTools");
+        assert!(tools.contains("Read") && tools.contains("Edit") && tools.contains("Bash(npm test:*)"), "{tools}");
+        // 联网 / 脚本 / 推远端没声明就不在白名单里；就算声明了，装包、脚本、push 也不进白名单（走服务端判）
+        assert!(!tools.contains("WebFetch") && !tools.contains("git push") && !tools.contains("Bash(node:*)"), "{tools}");
+        let net = Mandate { net: true, push: true, scripts: true, ..Mandate::default() };
+        let t = mandate_allowed_tools(&net).join(",");
+        assert!(t.contains("WebFetch") && !t.contains("git push") && !t.contains("Bash(node:*)"), "{t}");
+    }
+
+    #[test]
+    fn mandate_with_paths_keeps_default_mode_and_scopes_writes() {
+        let m = Mandate { paths: vec!["src".into()], ..Mandate::default() };
+        let mut args = claude_args(Mode::Fresh, "k1", true);
+        claude_mandate_args(&mut args, &m);
+        // 声明了目录：不用 acceptEdits（它会放行整个工作目录），写只在目录内放行
+        assert!(args.windows(2).any(|w| w == ["--permission-mode", "default"]), "{args:?}");
+        let tools = args[args.len() - 1].clone();
+        assert!(tools.contains("Edit(src/**)") && !tools.split(',').any(|t| t == "Edit"), "{tools}");
+        // 服务端显式给了白名单就原样使用
+        let explicit = Mandate { allowed_tools: vec!["Read".into()], ..Mandate::default() };
+        assert_eq!(mandate_allowed_tools(&explicit), vec!["Read".to_string()]);
+    }
+
+    #[test]
+    fn mandate_codex_turn_keeps_sandbox_and_never_skips_approval() {
+        let off = Mandate::default();
+        let on = Mandate { net: true, ..Mandate::default() };
+        let p = codex_turn_params("t1", &[], Some(&off));
+        assert_eq!(p["approvalPolicy"], "on-request");
+        assert_eq!(p["sandboxPolicy"], json!({"type":"workspaceWrite","networkAccess":false}));
+        assert_eq!(codex_turn_params("t1", &[], Some(&on))["sandboxPolicy"]["networkAccess"], json!(true));
+        // thread/start 仍是 workspace-write + on-request，不因 mandate 放开
+        let r: Value = serde_json::from_str(&codex_thread_request(2, Mode::Fresh, "t1", "D:/x")).unwrap();
+        assert_eq!(r["params"]["sandbox"], "workspace-write");
+        assert_eq!(r["params"]["approvalPolicy"], "on-request");
     }
 
     #[test]
@@ -3167,6 +3367,24 @@ mod tests {
         let u: Value = serde_json::from_str(&claude_user_line("你好", &[])).unwrap();
         assert_eq!(u["message"]["content"], "你好");
         assert!(!claude_user_line("a\nb", &[]).contains('\n'), "单行 JSON");
+    }
+
+    /// CodeBuddy / WorkBuddy 的 SDK 客户端只认 `allowed`；给 `behavior` 会被当成 false，
+    /// 工具就以 "Permission denied by SDK" 被拒（实测复现过）。
+    #[test]
+    fn sdk_response_lines() {
+        let allow: Value = serde_json::from_str(&sdk_control_response("perm_1", true, &json!({"a":1}))).unwrap();
+        assert_eq!(allow["type"], "control_response");
+        assert_eq!(allow["response"]["request_id"], "perm_1");
+        assert_eq!(allow["response"]["response"]["allowed"], true);
+        assert_eq!(allow["response"]["response"]["updatedInput"]["a"], 1);
+        assert!(allow["response"]["response"].get("behavior").is_none(), "不要混进 Claude 的字段");
+        let deny: Value = serde_json::from_str(&sdk_control_response("perm_1", false, &json!({}))).unwrap();
+        assert_eq!(deny["response"]["response"]["allowed"], false);
+        assert!(deny["response"]["response"]["reason"].as_str().unwrap().len() > 0);
+        // 分发：有 --permission-prompt-tool 的是真 Claude，没有的是 CodeBuddy 系
+        assert_eq!(permission_response("r", true, &json!({}), false), claude_control_response("r", true, &json!({})));
+        assert_eq!(permission_response("r", true, &json!({}), true), sdk_control_response("r", true, &json!({})));
     }
 
     #[test]
