@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import type { Api, Delivery, Project, Proposal, ProposalInput, Role, Task } from "./lib/api";
-import { constraintsSummary } from "./lib/api";
+import BoundsEditor from "./BoundsEditor";
+import type { Api, Delivery, Project, Proposal, ProposalInput, Role, Task, TaskConstraints } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import { planDelivery } from "./lib/delivery";
 
@@ -22,7 +22,7 @@ const KIND_LABEL: Record<Proposal["kind"], string> = {
 
 const PRIORITY_LABEL: Record<Task["priority"], string> = { high: "高", medium: "中", low: "低" };
 
-type Form = { title: string; notes: string; checklist: string; priority: Task["priority"]; roleId: string; projectId: string; delivery: Delivery };
+type Form = { title: string; notes: string; checklist: string; priority: Task["priority"]; roleId: string; projectId: string; delivery: Delivery; constraints: TaskConstraints };
 
 const toForm = (p: Proposal): Form => ({
   title: p.title,
@@ -32,6 +32,7 @@ const toForm = (p: Proposal): Form => ({
   roleId: p.assignee.roleId === null ? "" : String(p.assignee.roleId),
   projectId: p.projectId === null ? "" : String(p.projectId),
   delivery: p.delivery,
+  constraints: p.constraints,
 });
 
 export default function ProposalCard({
@@ -63,6 +64,8 @@ export default function ProposalCard({
   const [refining, setRefining] = useState(false);
   // 建议阶段点「生成任务单」到服务端回来之间：按钮锁住，别让人连点两次
   const [drafting, setDrafting] = useState(false);
+  // 「谁来做」的详细配置默认收起，只露一行摘要；菜单同理
+  const [whoOpen, setWhoOpen] = useState(false), [menuOpen, setMenuOpen] = useState(false);
   const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
   // 发单没有原会话：不显示「从哪开始」，也不自称来自某个会话
   const isTicket = proposal.kind === "ticket";
@@ -165,6 +168,7 @@ export default function ProposalCard({
     priority: form.priority,
     roleId: form.roleId ? Number(form.roleId) : null,
     projectId: form.projectId ? Number(form.projectId) : null,
+    constraints: form.constraints,
   });
 
   const confirm = (dispatch: boolean) => act(async () => {
@@ -179,125 +183,133 @@ export default function ProposalCard({
     if (res.dispatchError) onError(`任务已建好，但派发没成功：${res.dispatchError}`);
   });
 
+  const roleName = role?.name ?? (sameRole ? proposal.assignee.roleName : "");
+  const whoDim = [agent ? AGENT_LABEL[agent] ?? agent : "工具未定", machine || "电脑待定", cwd || "目录待定", ...(isTicket ? [] : [plan.mode === "fork" ? "接着原会话" : "从零开始"])].join(" · ");
+  const origin = writing ? "项目经理正在重写…" : proposal.origin === "agent" ? "✓ 项目经理已重写" : isTicket ? "待确认" : "按会话展开的草稿";
+
   return (
     <div className="proposal-card">
       <div className="proposal-head">
         <span className={`proposal-kind ${proposal.kind}`}>{KIND_LABEL[proposal.kind]}</span>
-        <strong>任务单</strong>
         <span className="dim">
           {isTicket
             ? "来自你发的单"
             : `来自「${proposal.sessionTitle || "未命名会话"}」（${AGENT_LABEL[proposal.sessionAgent] ?? proposal.sessionAgent}）`}
         </span>
-        <span className="dim proposal-origin">
-          {proposal.origin === "agent" ? "项目经理整理" : isTicket ? "待确认" : "按会话展开的草稿"}
-        </span>
+        <span className="dim proposal-origin">{origin}</span>
       </div>
 
-      {writing && <p className="hint">项目经理正在读这张单，写好后会自动替换下面的内容…</p>}
-
-      <div className="proposal-assignee">
-        <div className="form-grid">
-          <label>执行人
-            <select value={form.roleId} disabled={busy} onChange={e => set({ roleId: e.target.value })}>
-              <option value="">不指定角色</option>
-              {roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.title ? ` · ${r.title}` : ""}</option>)}
-            </select>
-          </label>
-          <label>项目
-            <select value={form.projectId} disabled={busy} onChange={e => set({ projectId: e.target.value })}>
-              <option value="">不归属项目</option>
-              {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
-          </label>
-        </div>
-        <p className="dim proposal-place">
-          {[agent ? AGENT_LABEL[agent] ?? agent : "执行工具未定", machine || "电脑待定", cwd || "目录待定"].join(" · ")}
-        </p>
-      </div>
-
-      {/* 从哪开始：接着原会话的上下文，还是新开一个。换了工具 / 电脑 / 目录就续不上，选项直接灰掉。
-          发单没有原会话可续，这块整段不出现。 */}
-      {!isTicket && (
-        <div className="delivery-pick">
-          <span className="delivery-label">从哪开始</span>
-          <div className="delivery-opts" role="radiogroup" aria-label="从哪开始">
-            <button type="button" role="radio" aria-checked={plan.mode === "fork"}
-              className={plan.mode === "fork" ? "delivery-opt on" : "delivery-opt"}
-              disabled={busy || plan.blocked} title={plan.blocked ? plan.reason : "把原会话的上下文接过来"}
-              onClick={() => set({ delivery: "fork" })}>接着原会话</button>
-            <button type="button" role="radio" aria-checked={plan.mode === "fresh"}
-              className={plan.mode === "fresh" ? "delivery-opt on" : "delivery-opt"}
-              disabled={busy} title="新开一个会话，只带任务单里的说明"
-              onClick={() => set({ delivery: "fresh" })}>从零开始</button>
-          </div>
-          <p className="hint delivery-note">{plan.blocked ? `续不上：${plan.reason}` : plan.reason}</p>
-        </div>
-      )}
-
-      <label>要做什么
+      <label className="proposal-what">要做什么
         <input value={form.title} maxLength={200} disabled={busy}
           onChange={e => set({ title: e.target.value })} />
       </label>
-      <label>背景与验证方式
-        <textarea value={form.notes} rows={4} maxLength={4000} disabled={busy}
-          onChange={e => set({ notes: e.target.value })} />
-      </label>
-      <label>验收要点（一行一条）
+
+      <div className="who-line">
+        <span className="who-label">谁来做</span>
+        <span className="who-sum">
+          <strong>{roleName || "执行人未定"}</strong>
+          <span className="dim"> {whoDim}</span>
+          {!isTicket && plan.blocked && <span className="who-warn"> 续不上：{plan.reason}</span>}
+        </span>
+        <button type="button" className="link" aria-expanded={whoOpen} onClick={() => setWhoOpen(v => !v)}>{whoOpen ? "收起" : "改"}</button>
+      </div>
+      {whoOpen && (
+        <div className="proposal-assignee">
+          <div className="form-grid">
+            <label>执行人
+              <select value={form.roleId} disabled={busy} onChange={e => set({ roleId: e.target.value })}>
+                <option value="">不指定角色</option>
+                {roles.map(r => <option key={r.id} value={r.id}>{r.name}{r.title ? ` · ${r.title}` : ""}</option>)}
+              </select>
+            </label>
+            <label>项目
+              <select value={form.projectId} disabled={busy} onChange={e => set({ projectId: e.target.value })}>
+                <option value="">不归属项目</option>
+                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </label>
+          </div>
+          {/* 从哪开始：接着原会话的上下文，还是新开一个。换了工具 / 电脑 / 目录就续不上，选项直接灰掉。
+              发单没有原会话可续，这块整段不出现。 */}
+          {!isTicket && (
+            <div className="delivery-pick">
+              <span className="delivery-label">从哪开始</span>
+              <div className="delivery-opts" role="radiogroup" aria-label="从哪开始">
+                <button type="button" role="radio" aria-checked={plan.mode === "fork"}
+                  className={plan.mode === "fork" ? "delivery-opt on" : "delivery-opt"}
+                  disabled={busy || plan.blocked} title={plan.blocked ? plan.reason : "把原会话的上下文接过来"}
+                  onClick={() => set({ delivery: "fork" })}>接着原会话</button>
+                <button type="button" role="radio" aria-checked={plan.mode === "fresh"}
+                  className={plan.mode === "fresh" ? "delivery-opt on" : "delivery-opt"}
+                  disabled={busy} title="新开一个会话，只带任务单里的说明"
+                  onClick={() => set({ delivery: "fresh" })}>从零开始</button>
+              </div>
+              <p className="hint delivery-note">{plan.blocked ? `续不上：${plan.reason}` : plan.reason}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      <label>怎么算完（一行一条，每条会变成验收检查项）
         <textarea value={form.checklist} rows={3} maxLength={2000} disabled={busy} placeholder="留空就不带检查项"
           onChange={e => set({ checklist: e.target.value })} />
       </label>
-      <div className="form-grid">
+
+      <details className="proposal-more">
+        <summary>{`更多：说明 · 优先级 · 执行边界${proposal.evidence.length ? ` · 证据 ${proposal.evidence.length} 条` : ""}`}</summary>
+        <label>背景与验证方式
+          <textarea value={form.notes} rows={4} maxLength={4000} disabled={busy}
+            onChange={e => set({ notes: e.target.value })} />
+        </label>
         <label>优先级
           <select value={form.priority} disabled={busy} onChange={e => set({ priority: e.target.value as Task["priority"] })}>
             {(["high", "medium", "low"] as const).map(k => <option key={k} value={k}>{PRIORITY_LABEL[k]}</option>)}
           </select>
         </label>
-      </div>
+        <div className="proposal-bounds-edit">
+          <span className="dim">执行边界 · 确认前可改，确认后冻结</span>
+          <BoundsEditor value={form.constraints} disabled={busy} onChange={c => set({ constraints: c })} />
+        </div>
+        {proposal.evidence.length > 0 && (
+          <div className="proposal-evidence">
+            <span className="dim">会话里留下的证据（{proposal.evidence.length}）</span>
+            <ul>
+              {proposal.evidence.slice(0, 8).map((e, i) => (
+                <li key={i}><span className="dim">{e.label}：</span>{e.value.slice(0, 160)}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {proposal.note && <p className="hint">{proposal.note}</p>}
+      </details>
 
-      {/* 确认 = 签署授权：范围从这一刻起冻结。没声明的能力（联网 / 推远端 / 跑脚本）就是不授权 */}
-      <>
-        <p className="proposal-bounds">
-          <span className="dim">本次授权范围</span>
-          {constraintsSummary(proposal.constraints).length > 0
-            ? constraintsSummary(proposal.constraints).map(c => <span key={c} className="bound-chip">{c}</span>)
-            : <span className="bound-chip">不限目录 · 不联网 · 不推远端 · 不跑脚本</span>}
-        </p>
-        <p className="hint">点确认即签署：范围一经确认不可撤销、不可再改，要改只能新开任务。目录声明只是提示，不是安全隔离。</p>
-      </>
-
-      {proposal.evidence.length > 0 && (
-        <details className="proposal-evidence">
-          <summary className="dim">会话里留下的证据（{proposal.evidence.length}）</summary>
-          <ul>
-            {proposal.evidence.slice(0, 8).map((e, i) => (
-              <li key={i}><span className="dim">{e.label}：</span>{e.value.slice(0, 160)}</li>
-            ))}
-          </ul>
-        </details>
-      )}
-      {proposal.note && <p className="hint">{proposal.note}</p>}
-
-      <div className="btns">
+      <div className="btns proposal-btns">
         <button className="primary" disabled={busy || !form.title.trim()} onClick={() => void confirm(true)}>
           确认并派发
         </button>
-        <button disabled={busy || !form.title.trim()} onClick={() => void confirm(false)}>
-          只建任务
+        <button disabled={busy || !form.title.trim()} onClick={() => void confirm(false)}
+          title={autoDispatch ? "建好任务，项目经理会按限额替你派出去" : "建好任务，之后自己派"}>
+          先存为待办
         </button>
-        <button className="ghost" disabled={busy || refining}
-          onClick={() => void act(async () => {
-            setRefining(true);
-            try { await api.refineProposal(proposal.id); }
-            catch (e) { setRefining(false); throw e; }
-          })}>
-          {refining ? "项目经理正在重写…" : "让项目经理重写"}
-        </button>
-        <button className="ghost" disabled={busy} onClick={() => void discard()}>
-          忽略
-        </button>
+        <span className="spacer" />
+        <div className="head-menu">
+          <button className="icon-button" aria-label="更多操作" title="更多操作" disabled={busy} onClick={() => setMenuOpen(v => !v)}>···</button>
+          {menuOpen && <>
+            <div className="menu-backdrop" onClick={() => setMenuOpen(false)} />
+            <div className="menu-pop" role="menu">
+              <button className="ghost" disabled={busy || refining}
+                onClick={() => { setMenuOpen(false); void act(async () => {
+                  setRefining(true);
+                  try { await api.refineProposal(proposal.id); }
+                  catch (e) { setRefining(false); throw e; }
+                }); }}>
+                {refining ? "项目经理正在重写…" : "让项目经理重写"}
+              </button>
+              <button className="ghost" disabled={busy} onClick={() => { setMenuOpen(false); void discard(); }}>忽略</button>
+            </div>
+          </>}
+        </div>
       </div>
-      {autoDispatch && <p className="hint">项目经理已开自动派发：点「只建任务」，它会按并发和每小时上限替你派出去。</p>}
     </div>
   );
 }

@@ -16,6 +16,7 @@ import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
 import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary } from "./lib/runMeta";
 import Markdown from "./Markdown";
+import { parseQuestions } from "./lib/questions";
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -63,27 +64,6 @@ type Props = {
 export { isPendingSession, sendBlockReason, isStuckRunning, STALE_RUNNING_MS } from "./lib/sendBlock";
 
 const NOT_FOUND_GRACE_MS = 5000;
-
-/** Codex 提问（request_user_input）的 questions，存在 approval.detail 里（JSON 字符串） */
-type UserQuestion = { id: string; question: string; options: { label: string; description?: string }[] };
-const parseQuestions = (detail: string): UserQuestion[] | null => {
-  try {
-    const v = JSON.parse(detail);
-    if (!Array.isArray(v) || !v.length) return null;
-    const out = v
-      .filter((q): q is Record<string, unknown> => !!q && typeof q === "object" && typeof (q as { id?: unknown }).id === "string")
-      .map((q) => ({
-        id: String(q.id),
-        question: typeof q.question === "string" ? q.question : String(q.header ?? ""),
-        options: Array.isArray(q.options)
-          ? q.options.filter((o): o is { label: string; description?: string } => !!o && typeof o === "object" && typeof (o as { label?: unknown }).label === "string")
-          : [],
-      }));
-    return out.length ? out : null;
-  } catch {
-    return null;
-  }
-};
 
 export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals, onAck }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);

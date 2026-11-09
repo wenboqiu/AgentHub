@@ -14,7 +14,6 @@ import ProposalView from "./ProposalView";
 import GoalView from "./GoalView";
 import CalendarView from "./CalendarView";
 import PendingGraph from "./PendingGraph";
-import BoardPanel from "./BoardPanel";
 import Icon from "./Icon";
 import Markdown from "./Markdown";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
@@ -22,8 +21,8 @@ import { ago } from "./lib/time";
 import { isInternalSession } from "./lib/internal";
 // proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
 type Detail = {kind:"session";id:string} | {kind:"proposal";id:string} | {kind:"task"|"goal";id:number} | null;
-type Tab = "sessions"|"tasks"|"board"|"goals"|"calendar";
-const TAB_LABEL = { sessions:"会话", tasks:"任务", board:"看板", goals:"目标", calendar:"日历" } as const;
+type Tab = "sessions"|"tasks"|"goals"|"calendar";
+const TAB_LABEL = { sessions:"会话", tasks:"任务", goals:"目标", calendar:"日历" } as const;
 
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
@@ -340,8 +339,6 @@ export default function App() {
 
   const list = useMemo(() => [...sessions.values()].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)), [sessions]);
   const proposalList = useMemo(() => [...proposals.values()], [proposals]);
-  // 待确认的任务单：会话标签上挂个数字，别让人错过「等你点头才开工」的活
-  const pendingProposals = useMemo(() => proposalList.filter(p => p.status === "pending").length, [proposalList]);
   const saveProposal = useCallback((p: Proposal) => setProposals(m => new Map(m).set(p.id, p)), []);
   const approvalSessions = useMemo(() => new Set([...approvals.values()].map((a) => a.sessionId)), [approvals]);
   const needsAttention = (s: Session) => isPending(s) || approvalSessions.has(s.id);
@@ -430,7 +427,7 @@ export default function App() {
         const renamed=renamedIds.current.get(next.id);
         if(renamed) { next={kind:"session",id:renamed};window.history.replaceState({...e.state,detail:next},""); }
       }
-      setDetail(next);setTab(e.state?.tab ?? "sessions");
+      setDetail(next);setTab(e.state?.tab === "board" ? "tasks" : (e.state?.tab ?? "sessions"));
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -442,7 +439,8 @@ export default function App() {
   const saveTask=(t:Task)=>setTasks(m=>mergeEntity(m,t,"response"));
   const saveGoal=(g:Goal)=>setGoals(m=>mergeEntity(m,g,"response"));
   const taskList=[...tasks.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
-  const stuckCount = board?.entries.filter(e=>e.stuck).length ?? 0;
+  // 「任务」页收件箱的件数：待授权 + 待验收 + 卡住 + 待确认的任务单 / 建议
+  const inboxCount = approvals.size + taskList.filter(t=>t.status==="review").length + (board?.entries.filter(e=>e.stuck).length ?? 0) + proposalList.filter(p=>p.status==="pending").length;
   const goalList=[...goals.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
 
   const activeReminders = [...reminders.values()].filter(r=>{
@@ -524,7 +522,7 @@ export default function App() {
     }
     if(detail.kind === "task") {
       const task=tasks.get(detail.id);
-      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
+      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} boardEntry={board?.entries.find(e=>e.taskId===task.id)} approvals={[...approvals.values()].filter(a=>task.sessionIds.includes(a.sessionId))} roles={roles} projects={projects} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
     }
     if(detail.kind === "goal") {
       const goal=goals.get(detail.id);
@@ -533,8 +531,8 @@ export default function App() {
   }
 
   const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
-  // 派单 tab 已下线：本地 hub 队列与看板职责重叠且长期未用，派活统一走看板
-  const tabs = ["sessions","tasks","board","goals","calendar"] as const;
+  // 派单 tab 已下线；看板并入「任务」页，派活统一从那里走
+  const tabs = ["sessions","tasks","goals","calendar"] as const;
   const renderList = (items: Session[]) => (
     <ul className="list">
       {items.map((s) => (
@@ -563,15 +561,14 @@ export default function App() {
           <i /> {connText}
         </span>
         <span className="spacer" />
-        <nav className="tabs" aria-label="主要功能">{tabs.map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && taskList.some(t=>t.status==="review") && <span className="count" aria-label={`${taskList.filter(t=>t.status==="review").length} 个待验收任务`}>{taskList.filter(t=>t.status==="review").length}</span>}{t==="sessions" && pendingProposals > 0 && <span className="count" aria-label={`${pendingProposals} 份任务单待确认`}>{pendingProposals}</span>}{t==="board" && stuckCount > 0 && <span className="count" aria-label={`${stuckCount} 个卡住的任务`}>{stuckCount}</span>}</button>)}</nav>
+        <nav className="tabs" aria-label="主要功能">{tabs.map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && inboxCount > 0 && <span className="count" aria-label={`${inboxCount} 件等你处理`}>{inboxCount}</span>}</button>)}</nav>
         <span className="spacer" />
         <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>
       {toast && <div className="toast" role="status">{toast}</div>}
       <main>
         {activeReminders.length > 0 && <section className="reminder-list" aria-label="时间提醒"><h2>时间提醒（{activeReminders.length}）</h2><ul className="list">{activeReminders.map(r=><li key={r.id} className="reminder-row"><button className="entity-row" onClick={()=>r.entityType === "task" ? openTask(r.entityId) : openGoal(r.entityId)}><span className="entity-main"><strong>{r.title}</strong><span>{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span></span></button><button onClick={()=>void dismissReminder(r.id)}>已处理</button></li>)}</ul></section>}
-        <div hidden={tab!=="tasks"}>{api && <TasksPanel tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
-        <div hidden={tab!=="board"}>{board && api && <BoardPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={[...proposals.values()]} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onOpen={openTask} onNotice={say} onProposal={saveProposal}/>}</div>
+        <div hidden={tab!=="tasks"}>{api && <TasksPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={proposalList} approvals={[...approvals.values()]} sessions={list} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onNotice={say} onProposal={saveProposal} onSaved={saveTask} onOpenSession={openSession} tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
         <div hidden={tab!=="sessions"}>

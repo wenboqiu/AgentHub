@@ -184,7 +184,7 @@ export type Proposal = {
   createdAt: string;
   updatedAt: string;
 };
-export type ProposalInput = Partial<Pick<Proposal, "title" | "notes" | "checklist" | "priority" | "roleId" | "projectId">>;
+export type ProposalInput = Partial<Pick<Proposal, "title" | "notes" | "checklist" | "priority" | "roleId" | "projectId" | "constraints">>;
 
 /** 项目经理：全局一个，负责细化意见，可选地把已确认的任务自动派出去 */
 /** 代批策略：会话卡在等授权时，项目经理能自己放行哪些操作 */
@@ -440,7 +440,7 @@ export class Api {
   thread = (id: number, limit = 200) => this.call<{ events: ThreadEvent[] }>("GET", `/threads/task/${id}?limit=${limit}`);
   unlinkSession = async (id: number, sessionId: string) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/sessions/${encodeURIComponent(sessionId)}`)).task;
   /** 派活：电脑在线时返回 runId/sessionId；离线时入队，返回 queued 和带 queuedAt 的任务 */
-  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task; /** 电脑端太旧：角色里的模型与上下文被忽略 */ roleDegraded?: boolean; /** 这一轮实际用的模型（角色写的或项目经理挑的），空 = 执行端默认 */ model?: string | null; /** 谁定的、为什么 */ modelNote?: string}>("POST", `/tasks/${id}/start`, input);
+  startTask = (id: number, input: {agent?: Task["agent"]; machine?: string; cwd?: string; text?: string; delivery?: "fresh"}) => this.call<{runId?: string; sessionId?: string; queued?: boolean; task: Task; /** 电脑端太旧：角色里的模型与上下文被忽略 */ roleDegraded?: boolean; /** 这一轮实际用的模型（角色写的或项目经理挑的），空 = 执行端默认 */ model?: string | null; /** 谁定的、为什么 */ modelNote?: string}>("POST", `/tasks/${id}/start`, input);
   /** 取消排队：不再等那台电脑上线 */
   unqueueTask = async (id: number) => (await this.call<{task: Task}>("DELETE", `/tasks/${id}/queue`)).task;
   /** 派活看板：排队中 / 在跑 / 卡住的任务聚合 */

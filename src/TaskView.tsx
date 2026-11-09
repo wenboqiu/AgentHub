@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import type { Api, Attachment, AttachmentInput, EvidenceKind, Goal, Machine, Project, ProjectDir, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskConstraints, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
-import { NO_CONSTRAINTS } from "./lib/api";
-import { BOUND_PRESETS, applyPreset, presetHint, presetOf, type PresetId } from "./lib/boundsPresets";
+import { useEffect, useRef, useState } from "react";
+import type { Api, Approval, Attachment, BoardEntry, AttachmentInput, EvidenceKind, Goal, Machine, Project, ProjectDir, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import { APPROVAL_TIER_LABEL, NO_CONSTRAINTS, constraintsSummary } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
+import BoundsEditor from "./BoundsEditor";
 import Icon from "./Icon";
 import { localDateTime } from "./ScheduleFields";
 import { PrioritySelect } from "./GoalPriority";
@@ -12,6 +12,8 @@ import Markdown from "./Markdown";
 import TaskNotes from "./TaskNotes";
 import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
 import { pickMachine } from "./lib/machines";
+import { parseQuestions } from "./lib/questions";
+import { ago } from "./lib/time";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
@@ -26,25 +28,12 @@ const toIso = (v: string) => v ? new Date(v).toISOString() : null;
 const dirKey = (d: ProjectDir) => `${d.machine ?? ""}\u0000${d.cwd}`;
 
 /**
- * 任务详情的多级结构：
- * 一级 = 头部常驻摘要（标题 / 状态 / 执行摘要一行 + 「开始执行」主按钮），滚到哪都能看到、都能按；
- * 二级 = 四个分区 Tab（概览 / 执行 / 过程 / 结果），按任务生命周期分组；
- * 三级 = 执行配置默认收成一行摘要，点「编辑」在弹层里改，改完即关。
- * 删除等危险操作收进标题栏「···」菜单。
+ * 任务详情是单页：头部（标题 / 状态 / 执行摘要）→ 状态卡（按任务状态变形态，主操作都在这）
+ * → 说明 / 产物 / 过程；属性放右侧栏，窄屏落到下面。删除等危险操作收进标题栏「···」菜单。
  */
-const TABS = [
-  { id: "overview", label: "概览" },
-  { id: "exec", label: "执行" },
-  { id: "process", label: "过程" },
-  { id: "result", label: "结果" },
-] as const;
-type TabId = typeof TABS[number]["id"];
-
-export default function TaskView({ task, goals, sessions, agents, api, digest: liveDigest, artifact: liveArtifact, onArtifact, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; digest?: TaskDigests; artifact?: TaskArtifact; onArtifact(a: TaskArtifact): void; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
+export default function TaskView({ task, goals, sessions, agents, api, boardEntry, approvals, roles, projects, digest: liveDigest, artifact: liveArtifact, onArtifact, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; boardEntry?: BoardEntry; approvals: Approval[]; roles: Role[]; projects: Project[]; digest?: TaskDigests; artifact?: TaskArtifact; onArtifact(a: TaskArtifact): void; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
   const [busy, setBusy] = useState(false), [err, setErr] = useState(""), [saved, setSaved] = useState(false);
   const [starting, setStarting] = useState(false), [message, setMessage] = useState(""), [linking, setLinking] = useState(false);
-  // 分区：目录还没配置时直接落在「执行」页，省得先看到空概览再找配置入口
-  const [tab, setTab] = useState<TabId>(() => !task.cwd ? "exec" : "overview");
   const [configOpen, setConfigOpen] = useState(false), [menuOpen, setMenuOpen] = useState(false);
   /** 上一次派活由项目经理挑的模型与理由：只在这一屏显示，重新打开以执行记录为准 */
   const [dispatchNote, setDispatchNote] = useState("");
@@ -56,8 +45,10 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const [editingArtifact, setEditingArtifact] = useState(false), [artifactDraft, setArtifactDraft] = useState("");
   const [timeline, setTimeline] = useState<ThreadEvent[] | null>(null);
   const [review, setReview] = useState<Review | null>(null);
-  const [roles, setRoles] = useState<Role[]>([]);
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [fresh, setFresh] = useState(false);
+  const [pickOpen, setPickOpen] = useState(false), [pickedMachine, setPickedMachine] = useState("");
+  const [pokeOpen, setPokeOpen] = useState(false), [poke, setPoke] = useState("");
+  const [replyOpen, setReplyOpen] = useState(false), [evidenceOpen, setEvidenceOpen] = useState<EvidenceKind | null>(null);
   const [machines, setMachines] = useState<Machine[]>([]);
   // 附件：列表只有元信息，图片的 data URL 按 id 单取（缓存起来，切回来不重下）
   const [attachments, setAttachments] = useState<Attachment[] | null>(null), [preview, setPreview] = useState<string | null>(null);
@@ -78,7 +69,8 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
   const flashTimer = useRef<number | undefined>(undefined);
   const attachPicker = useRef<HTMLInputElement | null>(null);
   useEffect(() => () => window.clearTimeout(flashTimer.current), []);
-  useEffect(() => { if (!task.timerStartedAt) return; const t = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(t); }, [task.timerStartedAt]);
+  // 计时中每秒走一格；否则 30 秒一格就够「正在做 · 已跑多久」用了
+  useEffect(() => { const t = window.setInterval(() => setNow(Date.now()), task.timerStartedAt ? 1000 : 30000); return () => window.clearInterval(t); }, [task.timerStartedAt]);
   // 预摘要：打开详情时拉一次，任务更新（如重新进入待验收）后再拉；WS 推送的实时摘要优先
   useEffect(() => {
     let alive = true;
@@ -107,13 +99,6 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
     }).catch(() => { if (alive) setAttachments([]); });
     return () => { alive = false; };
   }, [api, task.id]);
-  // 角色与项目只在打开详情时拉一次（改动不频繁）
-  useEffect(() => {
-    let alive = true;
-    api.roles().then(r => { if (alive) setRoles(r); }).catch(() => {});
-    api.projects().then(p => { if (alive) setProjects(p); }).catch(() => {});
-    return () => { alive = false; };
-  }, [api]);
   // 电脑的工具清单是执行器连上来时上报的：在线名单一变就重拉，刚上线的电脑才能马上出现在候选里
   const onlineKey = [...agents].sort().join(",");
   useEffect(() => {
@@ -258,16 +243,236 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
         : !task.cwd && !projectUsable ? `项目「${currentProject?.name ?? ""}」登记的配置都装不了 ${agentName(tool)}：这个项目当前不可用，换个角色 / 工具，或在对应电脑上装好再选`
           : !machine ? (usable.length ? "请选择电脑" : `没有能跑 ${agentName(tool)} 的电脑：先在装了这个工具的电脑上打开 AgentHub`)
             : machineLacks ? `${machine} 没装 ${agentName(tool)}：换一台电脑，或给这个角色换个工具` : "";
-  // 执行配置的一行摘要：头部和执行页的配置卡共用，点「编辑」进弹层改
-  const configSummary = [
+  // 执行配置的一行摘要：头部、状态卡和侧栏共用，点「编辑」进弹层改
+  const cfgParts = [
     currentRole ? `角色 ${currentRole.name}` : "角色未指定",
     tool ? agentName(tool) : "工具未定",
     (task.machine || machine) ? `电脑 ${task.machine || machine}${offline ? "（离线）" : ""}` : "电脑待定",
     task.cwd ? `目录 ${task.cwd}` : dirs.length ? "目录自动挑" : "目录未配置",
-  ].join(" · ");
+  ];
+  const configSummary = cfgParts.join(" · ");
   const items = task.checklist ?? [];
   const goalTitle = goals.find(g => g.id === task.goalId)?.title;
   const hasProcess = (timeline?.length ?? 0) > 0 || task.sessionIds.length > 0 || !!(digest?.review || digest?.failure);
+
+  // ---- 状态卡：按任务状态变形态（优先级从上到下取第一个命中的） ----
+  const run = boardEntry?.run ?? null;
+  const form: "done" | "approval" | "review" | "stuck" | "queued" | "running" | "plain" | "todo" =
+    task.status === "done" ? "done"
+      : approvals.length > 0 ? "approval"
+        : task.status === "review" ? "review"
+          : boardEntry?.stuck ? "stuck"
+            : (task.queuedAt || boardEntry?.queued) ? "queued"
+              : run ? "running"
+                : (!tool || listenOnly) ? "plain" : "todo";
+  const tone = { done: "ok", approval: "mid", review: "accent", stuck: "alert", queued: "mid", running: "ok", plain: "dim", todo: "accent" }[form];
+  const reviewItems = review?.items ?? [];
+  const unjudged = reviewItems.filter(it => it.status !== "pass").length;
+  const deliveredAt = digest?.review?.lastReplyAt ?? digest?.review?.builtAt ?? task.updatedAt;
+  const lastReply = digest?.review?.lastReply ?? "";
+  const replyLong = lastReply.length > 240 || lastReply.split("\n").length > 6;
+  const checkDone = items.filter(i => i.done).length;
+  const queueMachine = task.machine || machine;
+  const deliveryInput = fresh ? { delivery: "fresh" as const } : {};
+  // 派发：成功后的处理（保存任务、模型说明、角色降级提示、跳到会话）都在这儿，各个按钮共用
+  const runStart = async (input: Parameters<Api["startTask"]>[1]) => {
+    const r = await api.startTask(task.id, input);
+    onSaved(r.task);
+    setDispatchNote(r.modelNote ?? "");
+    if (r.roleDegraded) setErr("电脑端版本较旧：角色里的模型与上下文没有生效，升级电脑端后重新派发即可");
+    if (r.sessionId) onSession(r.sessionId); else setStarting(false);
+    setPickOpen(false);
+  };
+  const decideApproval = (a: Approval, d: "allow" | "deny") => void guard(async () => { await api.decide(a.id, d); });
+  const sendPoke = () => void guard(async () => {
+    if (!run?.sessionId || !poke.trim()) return;
+    await api.send(run.sessionId, poke.trim());
+    setPoke(""); setPokeOpen(false);
+  });
+  const stopRun = () => {
+    if (!run || !window.confirm("停止这次执行？")) return;
+    void guard(async () => { await api.stop(run.id); });
+  };
+  const tlLine = (e: ThreadEvent) => <>
+    {e.type === "message" && <>{ROLE_LABEL[e.role] ?? e.role}：{e.text.slice(0, 200)}</>}
+    {e.type === "run" && (e.phase === "start"
+      ? <>开始执行{e.status === "queued" ? "（排队中）" : ""}</>
+      : <>执行{RUN_LABEL[e.status] ?? e.status}{e.startedAt ? ` · 耗时 ${gap(e.startedAt, e.at)}` : ""}{e.error ? ` · ${e.error.slice(0, 120)}` : ""}</>)}
+    {e.type === "reminder" && <>{e.title}{e.acked ? "（已处理）" : ""}</>}
+    {e.type === "digest" && <>{e.kind === "failure" ? "失败上下文" : "验收摘要"}：{e.text.slice(0, 200) || "（无内容）"}</>}
+  </>;
+  /** 「换台电脑派」的电脑下拉：stuck / queued 两个形态共用 */
+  const machinePicker = (onGo: (m: string) => void) => pickOpen && (
+    <div className="status-inline">
+      <select aria-label="换台电脑" value={pickedMachine} disabled={busy} onChange={e => setPickedMachine(e.target.value)}>
+        <option value="">选一台电脑</option>
+        {options.map(c => <option key={c.name} value={c.name}>{c.name}{c.online ? "" : "（离线）"}</option>)}
+      </select>
+      <button className="primary" disabled={busy || !pickedMachine} onClick={() => onGo(pickedMachine)}>确认派发</button>
+      <button className="ghost" onClick={() => setPickOpen(false)}>取消</button>
+    </div>
+  );
+
+  const statusCard = <section className={`status-card tone-${tone}`}>
+    {form === "review" && <>
+      <div className="status-head"><h3>等你验收</h3><span className="dim">{ago(deliveredAt, Date.now())}交付</span></div>
+      {lastReply && <div className="status-reply">
+        <span className="dim">它说做了什么</span>
+        <div className={`reply-clip ${replyOpen ? "open" : ""}`}><Markdown text={lastReply} /></div>
+        {replyLong && <button className="link" onClick={() => setReplyOpen(v => !v)}>{replyOpen ? "收起" : "展开全文"}</button>}
+      </div>}
+      {evidenceGroups.length > 0 && <div className="evidence">
+        <div className="evidence-chips">{evidenceGroups.map(g => <button key={g.k} type="button" className={`pg-chip ev-chip ${evidenceOpen === g.k ? "on" : ""}`} aria-expanded={evidenceOpen === g.k} onClick={() => setEvidenceOpen(evidenceOpen === g.k ? null : g.k)}>{g.label} {g.list.length}</button>)}</div>
+        {evidenceGroups.filter(g => g.k === evidenceOpen).map(g => <ul key={g.k}>{g.list.map((e, i) => <li key={i}><code>{e.value}</code></li>)}</ul>)}
+      </div>}
+      <ul className="review-list">
+        {reviewItems.map(it => (
+          <li key={it.id} className={`review-item ${it.status}`}>
+            <div className="review-row">
+              <span className={`review-dot ${it.status}`} aria-hidden />
+              <span className="review-title">{it.title}</span>
+              <span className="review-actions">
+                <button className="link" disabled={busy} onClick={() => void decide(it, it.status === "pass" ? "pending" : "pass")}>{it.status === "pass" ? "撤销" : "通过"}</button>
+                <button className="link danger" disabled={busy} onClick={() => { setFailing(failing === it.id ? null : it.id); setNote(it.note); }}>{it.status === "fail" ? "重新打回" : "打回"}</button>
+              </span>
+            </div>
+            {it.note && failing !== it.id && <p className="review-note-text">{it.note}</p>}
+            {failing === it.id && (
+              <div className="review-note">
+                <textarea value={note} maxLength={500} placeholder="打回原因（会沉淀为标准，下次交付前先自查）" onChange={e => setNote(e.target.value)} />
+                <div className="action-bar">
+                  <button className="primary" disabled={busy} onClick={() => void decide(it, "fail")}>确认打回</button>
+                  <button onClick={() => setFailing(null)}>取消</button>
+                </div>
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      <form className="review-add" onSubmit={e => { e.preventDefault(); if (newItem.trim()) addItem(); }}>
+        <input value={newItem} maxLength={500} placeholder="补一项检查…" onChange={e => setNewItem(e.target.value)} />
+        <button disabled={busy || !newItem.trim()}>添加</button>
+      </form>
+      <div className="action-bar status-actions">
+        <button className="primary" disabled={busy || unjudged > 0} title={unjudged > 0 ? "检查项全部通过后才能验收" : ""}
+          onClick={() => void guard(async () => onSaved((await api.acceptTask(task.id)).task))}>验收通过</button>
+        {digest?.review?.sessionId && <button disabled={busy} onClick={() => onSession(digest.review!.sessionId!)}>打开会话</button>}
+        {unjudged > 0 && <span className="dim status-note">还差 {unjudged} 项未判</span>}
+      </div>
+      {(review?.standards.length ?? 0) > 0 && <details className="review-standards">
+        <summary className="dim">打回沉淀的标准（最近 5 条，交付前先自查）</summary>
+        <ul>{review!.standards.map((s, i) => <li key={i}>{s}</li>)}</ul>
+      </details>}
+    </>}
+
+    {form === "approval" && <>
+      <div className="status-head"><h3>{approvals.every(a => a.decisionTier === "gray") ? "它想做一件边界外的事" : "等你授权"}</h3></div>
+      {approvals.map(a => {
+        const isQuestion = a.tool === "userInput" && !!parseQuestions(a.detail);
+        return <div key={a.id} className="approval-block">
+          <p><code>{a.tool}</code> {isQuestion ? "它在问你问题" : a.detail.slice(0, 300)}{!isQuestion && a.detail.length > 300 ? "…" : ""}</p>
+          <p className="dim">{[APPROVAL_TIER_LABEL[a.decisionTier], a.decisionReason].filter(Boolean).join(" · ")}</p>
+          <div className="action-bar status-actions">
+            {isQuestion
+              ? <button className="primary" onClick={() => onSession(a.sessionId)}>去回答</button>
+              : <>
+                <button className="primary" disabled={busy} onClick={() => decideApproval(a, "allow")}>允许这一次</button>
+                <button disabled={busy} onClick={() => decideApproval(a, "deny")}>拒绝</button>
+                <button className="ghost" onClick={() => onSession(a.sessionId)}>打开会话</button>
+              </>}
+          </div>
+        </div>;
+      })}
+    </>}
+
+    {form === "running" && run && <>
+      <div className="status-head"><h3>正在做 · {elapsed(run.startedAt)}</h3>{boardEntry?.lastActivityAt && <span className="dim">最后活动 {ago(boardEntry.lastActivityAt, Date.now())}</span>}</div>
+      {timeline !== null && timeline.length > 0 && <ul className="timeline">
+        {timeline.slice(0, 3).map((e, i) => <li key={i} className={`tl-item tl-${e.type}`}><span className="tl-time">{new Date(e.at).toLocaleString()}</span><span className="tl-body">{tlLine(e)}</span></li>)}
+      </ul>}
+      {items.length > 0 && <p className="dim">检查项 {checkDone}/{items.length}</p>}
+      <div className="action-bar status-actions">
+        {run.sessionId && <button className="primary" onClick={() => onSession(run.sessionId!)}>打开会话</button>}
+        {run.sessionId && <button disabled={busy} aria-expanded={pokeOpen} onClick={() => setPokeOpen(v => !v)}>插一句话</button>}
+        <button className="danger" disabled={busy} onClick={stopRun}>停止</button>
+      </div>
+      {pokeOpen && <div className="status-inline">
+        <textarea value={poke} rows={2} maxLength={4000} placeholder="往这次会话里插一句话" onChange={e => setPoke(e.target.value)} />
+        <button className="primary" disabled={busy || !poke.trim()} onClick={sendPoke}>发送</button>
+      </div>}
+    </>}
+
+    {form === "stuck" && <>
+      <div className="status-head"><h3>没人在跑了</h3></div>
+      <p className="status-gray">{[
+        boardEntry?.machine && !boardEntry.machineOnline ? `${boardEntry.machine} 离线` : "",
+        boardEntry?.lastActivityAt ? `最后活动 ${ago(boardEntry.lastActivityAt, Date.now())}` : "",
+        digest?.failure ? `上次失败：${digest.failure.error || "（执行器未返回错误信息）"}` : "",
+      ].filter(Boolean).join(" · ") || "进行中，但没有任何在跑的执行"}</p>
+      <div className="action-bar status-actions">
+        <button className="primary" disabled={busy} onClick={() => void guard(() => runStart({}))}>重新派发</button>
+        <button disabled={busy} onClick={() => setPickOpen(v => !v)}>换台电脑派</button>
+        <button disabled={busy} onClick={() => patch({ status: "todo" })}>退回待办</button>
+      </div>
+      {machinePicker(m => void guard(() => runStart({ machine: m })))}
+    </>}
+
+    {form === "queued" && <>
+      <div className="status-head"><h3>排队中 · 等 {queueMachine || "电脑"} 上线</h3>{(task.queuedAt ?? boardEntry?.queuedAt) && <span className="dim">{new Date((task.queuedAt ?? boardEntry?.queuedAt)!).toLocaleString()} 入队</span>}</div>
+      <div className="action-bar status-actions">
+        <button disabled={busy} onClick={() => void guard(async () => onSaved(await api.unqueueTask(task.id)))}>取消排队</button>
+        <button disabled={busy} onClick={() => setPickOpen(v => !v)}>换台电脑派</button>
+      </div>
+      {machinePicker(m => void guard(async () => { onSaved(await api.unqueueTask(task.id)); await runStart({ machine: m }); }))}
+    </>}
+
+    {form === "todo" && <>
+      <div className="status-head"><h3>还没派出去</h3></div>
+      <div className="who-line">
+        <span className="who-label">谁来做</span>
+        <span className="who-sum">{configSummary}</span>
+        <button className="link" disabled={busy} onClick={() => setConfigOpen(true)}>改</button>
+      </div>
+      {task.sessionIds.length > 0 && <div className="delivery-pick">
+        <span className="delivery-label">从哪开始</span>
+        <div className="delivery-opts" role="radiogroup" aria-label="从哪开始">
+          <button type="button" role="radio" aria-checked={!fresh} className={!fresh ? "delivery-opt on" : "delivery-opt"} onClick={() => setFresh(false)}>接着上次的会话</button>
+          <button type="button" role="radio" aria-checked={fresh} className={fresh ? "delivery-opt on" : "delivery-opt"} onClick={() => setFresh(true)}>从零开始</button>
+        </div>
+      </div>}
+      {reason && <p className="who-warn" role="alert">{reason}</p>}
+      {!reason && offline && <p className="dim">{machine} 离线，派发后会在它上线时自动开始</p>}
+      <div className="action-bar status-actions">
+        <button className="primary" disabled={busy || !!reason} onClick={() => void guard(() => runStart({ machine, ...deliveryInput }))}>{offline ? "排队等上线" : "派发"}</button>
+        <button disabled={busy || !!reason} onClick={() => { setMessage(notesForAgent(task.notes, attachments ?? []) || task.title); setStarting(true); }}>补一句话再派…</button>
+      </div>
+      {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(() => runStart({ text: message, machine, ...deliveryInput })); }}>
+        <label>{task.sessionIds.length ? "这次要做什么" : "第一条消息"}<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
+        <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
+      </form>}
+    </>}
+
+    {form === "plain" && <>
+      <div className="status-head"><h3>普通待办</h3></div>
+      <p className="dim">{listenOnly && reason ? reason : "普通待办，不派给 agent"}</p>
+      <div className="action-bar status-actions">
+        {task.timerStartedAt
+          ? <><button disabled={busy} onClick={() => void guard(async () => onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
+          : <button disabled={busy} onClick={() => void guard(async () => onSaved(await api.startTimer(task.id)))}><Icon name="timer" />开始计时</button>}
+        <button disabled={busy} onClick={() => setConfigOpen(true)}>设执行人</button>
+      </div>
+    </>}
+
+    {form === "done" && <>
+      <div className="status-head"><h3>已完成 · {fmt(task.doneAt)}</h3>{reviewItems.length > 0 && <span className="dim">检查项 {passed}/{reviewItems.length} 通过</span>}</div>
+      <div className="action-bar status-actions">
+        <button disabled={busy} onClick={() => patch({ status: "todo" })}>标记为未完成</button>
+      </div>
+    </>}
+  </section>;
+
+  const [cfgA, cfgB] = [cfgParts.slice(0, 2).join(" · "), cfgParts.slice(2).join(" · ")];
+  const lastSession = task.sessionIds[task.sessionIds.length - 1];
 
   return <div className="app">
     <header className="task-header">
@@ -277,6 +482,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
           <button className={`complete-toggle ${done ? "done" : ""}`} aria-pressed={done} title={done ? "标记为未完成" : "标记为完成"} aria-label={done ? "标记为未完成" : "标记为完成"} disabled={busy} onClick={() => patch({ status: done ? "todo" : "done" })}><Icon name="check" /></button>
           <InlineField className="title-field" value={task.title} ariaLabel="任务标题" placeholder="任务标题" maxLength={200} disabled={busy} onSave={title => patch({ title })} />
         </div>
+        <span className={`task-status ${task.status}`}>{TASK_LABEL[task.status]}</span>
         {saved && <span className="save-flash" role="status">已保存</span>}
         <span className="spacer" />
         <div className="head-menu">
@@ -290,61 +496,23 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
           </>}
         </div>
       </div>
-      <div className="task-head-row">
-        <div className="seg status" role="group" aria-label="任务状态">{STATUSES.map(s => <button key={s} className={task.status === s ? "active" : ""} aria-pressed={task.status === s} disabled={busy} onClick={() => patch({ status: s })}>{TASK_LABEL[s]}</button>)}</div>
-        <PrioritySelect value={task.priority ?? "medium"} onChange={priority => patch({ priority })} />
-        <span className="sum-line" title={configSummary}>{configSummary}</span>
-        <span className="spacer" />
-        <button className="primary" disabled={busy || !!reason} title={task.sessionIds.length ? "接着上次派发的会话继续，不会再新开一个对话" : undefined} onClick={() => { setMessage(notesForAgent(task.notes, attachments ?? []) || task.title); setStarting(true); }}>{offline ? "排队等上线" : task.sessionIds.length ? "继续执行" : "开始执行"}</button>
+      <div className="task-head-row task-sum-row">
+        <span className="dim" title={configSummary}>{configSummary}</span>
+        {lastSession && <button className="link" onClick={() => onSession(lastSession)}>· 来自会话</button>}
       </div>
-      {(reason || (!reason && offline)) && <div className="task-head-row task-sum-row"><span className="dim">{reason || `${machine} 离线，开始后会在它上线时自动派发`}</span></div>}
     </header>
 
-    <div className="task-head-zone">
-      {dispatchNote && <p className="hint" role="status">{dispatchNote}</p>}
-      {task.queuedAt && <p className="hint queue-hint" role="status">
-        已排队 · 等 {task.machine || machine} 上线后自动开始（{new Date(task.queuedAt).toLocaleString()} 入队）
-        <button className="link" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unqueueTask(task.id)))}>取消排队</button>
-      </p>}
-      {starting && <form className="selection-panel" onSubmit={e => { e.preventDefault(); void guard(async () => { const r = await api.startTask(task.id, { text: message, machine }); onSaved(r.task);
-              setDispatchNote(r.modelNote ?? "");
-              if (r.roleDegraded) setErr("电脑端版本较旧：角色里的模型与上下文没有生效，升级电脑端后重新派发即可");
-              if (r.sessionId) onSession(r.sessionId); else setStarting(false); }); }}>
-        <label>{task.sessionIds.length ? "这次要做什么" : "第一条消息"}<textarea value={message} maxLength={8000} onChange={e => setMessage(e.target.value)} /></label>
-        <div className="action-bar"><button className="primary" disabled={busy || !!reason || !message.trim()}>{offline ? "排队，等上线后开始" : "确认开始"}</button><button type="button" onClick={() => setStarting(false)}>取消</button></div>
-        {task.sessionIds.length > 0 && <p className="hint">接着上次派发的会话继续：没换工具 / 电脑 / 目录的话，不会再新开一个对话。</p>}
-      </form>}
-    </div>
+    {err && <p className="form-error task-err" role="alert">{err}</p>}
 
-    <nav className="task-tabs" aria-label="任务分区">
-      {TABS.map(t => (
-        <button key={t.id} className={`task-tab ${tab === t.id ? "active" : ""}`} aria-pressed={tab === t.id} onClick={() => setTab(t.id)}>
-          {t.label}
-          {t.id === "result" && task.status === "review" && <span className="tab-badge">待验收</span>}
-        </button>
-      ))}
-    </nav>
-    {err && <p className="form-error" role="alert">{err}</p>}
+    <div className="task-layout">
+      <main className="task-main">
+        {dispatchNote && <p className="hint" role="status">{dispatchNote}</p>}
+        {statusCard}
 
-    <main className="entity-detail">
-      {tab === "overview" && <>
-        <div className="detail-props">
-          <div className="prop"><span className="prop-label">所属目标</span>
-            <select className="inline-control" aria-label="所属目标" value={task.goalId ?? ""} disabled={busy} onChange={e => patch({ goalId: e.target.value ? Number(e.target.value) : null })}><option value="">无目标</option>{goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}</select>
-          </div>
-          <div className="prop"><span className="prop-label">开始时间</span>
-            <input className="inline-control" type="datetime-local" aria-label="开始时间" value={localDateTime(task.startAt)} max={localDateTime(task.dueAt) || undefined} disabled={busy} onChange={e => patch({ startAt: toIso(e.target.value) })} />
-            <label className="check"><input type="checkbox" checked={task.remindStart} disabled={busy || !task.startAt} onChange={e => patch({ remindStart: e.target.checked })} />开始时提醒</label>
-          </div>
-          <div className="prop"><span className="prop-label">截止时间</span>
-            <input className={`inline-control ${task.dueAt && !done && Date.parse(task.dueAt) < now ? "overdue" : ""}`} type="datetime-local" aria-label="截止时间" value={localDateTime(task.dueAt)} min={localDateTime(task.startAt) || undefined} disabled={busy} onChange={e => patch({ dueAt: toIso(e.target.value) })} />
-            <label className="check"><input type="checkbox" checked={task.remindDue} disabled={busy || !task.dueAt} onChange={e => patch({ remindDue: e.target.checked })} />截止时提醒</label>
-          </div>
-          {task.doneAt && <div className="prop"><span className="prop-label">完成时间</span><span className="prop-value">{fmt(task.doneAt)}</span></div>}
-        </div>
-        <TaskNotes notes={task.notes} attachments={attachments} disabled={busy} onEditingChange={setNotesEditing} onSave={saveNotes} upload={uploadAttachment} onOpen={openAttachment} onImage={setPreview} />
-        <Checklist items={items} disabled={busy} onChange={checklist => patch({ checklist })} />
         <section className="detail-section">
+          <h3>说明</h3>
+          <TaskNotes notes={task.notes} attachments={attachments} disabled={busy} onEditingChange={setNotesEditing} onSave={saveNotes} upload={uploadAttachment} onOpen={openAttachment} onImage={setPreview} />
+          <Checklist items={items} disabled={busy} onChange={checklist => patch({ checklist })} />
           <h3>
             附件
             {attachments?.length ? <span className="dim"> · {attachments.length}</span> : null}
@@ -358,7 +526,7 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
           {!attachments
             ? <p className="dim">正在读取附件…</p>
             : attachments.length === 0
-            ? <p className="dim">还没有附件。在备注里粘贴截图或拖文件进来，也可以点上面的「上传」。</p>
+            ? <p className="dim">还没有附件，可以在说明里粘贴截图或点上传</p>
             : <ul className="attachment-list">
               {attachments.map(a => (
                 <li key={a.id} className={`attachment-item ${a.kind}`}>
@@ -377,174 +545,10 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
                 </li>
               ))}
             </ul>}
-          <p className="hint">图片和文件是独立实体，备注里只存 attachment:ID 引用；删掉附件时备注里对应的引用会一起摘掉，不会留下坏图。</p>
         </section>
-      </>}
 
-      {tab === "exec" && <>
-        <section className="detail-section">
-          <h3>执行配置</h3>
-          <div className="exec-config-card">
-            <div className="exec-config-line">
-              <span className="exec-config-sum">{configSummary}</span>
-              <button className="link" disabled={busy} onClick={() => setConfigOpen(true)}>编辑</button>
-            </div>
-            {currentProject && dirs.length > 0 && !projectUsable && <p className="form-error" role="alert">项目「{currentProject.name}」登记的配置所在电脑都装不了 {agentName(tool ?? "")}：这个项目当前不可用。换个角色 / 工具，或在对应电脑上装好再选。</p>}
-            {machineLacks && <p className="form-error" role="alert">{machine} 没装 {agentName(tool ?? "")}：换一台装了它的电脑，或者给这个角色换工具。</p>}
-            <p className="hint">从项目登记的配置里挑电脑 + 目录；不选则开始执行时按所选电脑自动挑。</p>
-          </div>
-          <div className="action-bar">
-            {task.timerStartedAt
-              ? <><button disabled={busy} onClick={() => void guard(async () => onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
-              : <button disabled={busy || done} onClick={() => void guard(async () => onSaved(await api.startTimer(task.id)))}><Icon name="timer" />开始计时</button>}
-          </div>
-        </section>
-        <section className="detail-section">
-          <h3>执行边界<span className="dim"> · 超出范围的动作会停下来问你</span></h3>
-          <p className="hint">代批先按这份边界判：写在这里的动作直接放行，越界的交给人。留空 = 不限目录，联网 / 推远端 / 跑脚本都不预先授权。目录声明只是提示，不是安全隔离。</p>
-          {task.mandateFrozenAt && <p className="hint">授权范围已于 {new Date(task.mandateFrozenAt).toLocaleString()} 冻结，不能再改；要换范围请新开任务。</p>}
-          <BoundsEditor value={task.constraints ?? NO_CONSTRAINTS} disabled={busy || !!task.mandateFrozenAt} onChange={constraints => patch({ constraints })} />
-        </section>
-      </>}
-
-      {tab === "process" && <>
-        {(digest?.review || digest?.failure) && (
-          <section className="detail-section">
-            <h3>预摘要</h3>
-            {digest?.failure && (
-              <div className="digest-card bad">
-                <strong>最近一次失败（{new Date(digest.failure.builtAt).toLocaleString()}）</strong>
-                <p>{digest.failure.error || "（执行器未返回错误信息）"}</p>
-                {digest.failure.tail.length > 0 && (
-                  <p className="dim">{digest.failure.tail.map(m => `[${m.role}] ${m.text}`).join(" ⏎ ")}</p>
-                )}
-              </div>
-            )}
-            {digest?.review && (
-              <div className="digest-card">
-                <strong>验收摘要{digest.review.sessionTitle ? ` · ${digest.review.sessionTitle}` : ""}</strong>
-                <p className="dim">
-                  {digest.review.messages > 0 ? `已同步 ${digest.review.messages} 条消息` : "会话还没有同步消息"}
-                  {digest.review.runs.length ? ` · 最近执行 ${digest.review.runs.map(r => r.model ? `${r.status}（${r.model}）` : r.status).join(" / ")}` : ""}
-                </p>
-                <p>{digest.review.lastReply ? <Markdown text={digest.review.lastReply} /> : "还没有助手回复内容；打开会话详情加载历史可看全文。"}</p>
-                {digest.review.sessionId && <button className="link" onClick={() => onSession(digest.review!.sessionId!)}>打开会话</button>}
-              </div>
-            )}
-            <p className="hint">摘要在会话完成或失败时由服务端后台预生成，打开详情即可看到，不用等终端加载。</p>
-          </section>
-        )}
-        {timeline !== null && timeline.length > 0 && (
-          <section className="detail-section">
-            <h3>
-              时间线
-              <button className="link" onClick={() => void api.thread(task.id).then(r => setTimeline(r.events)).catch(() => {})}>刷新</button>
-            </h3>
-            <ul className="timeline">
-              {timeline.slice(0, 50).map((e, i) => (
-                <li key={i} className={`tl-item tl-${e.type}`}>
-                  <span className="tl-time">{new Date(e.at).toLocaleString()}</span>
-                  <span className="tl-body">
-                    {e.type === "message" && <>{ROLE_LABEL[e.role] ?? e.role}：{e.text.slice(0, 200)}</>}
-                    {e.type === "run" && (e.phase === "start"
-                      ? <>开始执行{e.status === "queued" ? "（排队中）" : ""}</>
-                      : <>执行{RUN_LABEL[e.status] ?? e.status}{e.startedAt ? ` · 耗时 ${gap(e.startedAt, e.at)}` : ""}{e.error ? ` · ${e.error.slice(0, 120)}` : ""}</>)}
-                    {e.type === "reminder" && <>{e.title}{e.acked ? "（已处理）" : ""}</>}
-                    {e.type === "digest" && <>{e.kind === "failure" ? "失败上下文" : "验收摘要"}：{e.text.slice(0, 200) || "（无内容）"}</>}
-                  </span>
-                </li>
-              ))}
-            </ul>
-            <p className="hint">以任务为锚点的统一事件流：关联会话的对话、执行记录、时间提醒和摘要按时间合并；最多显示最近 50 条。</p>
-          </section>
-        )}
-        <section className="detail-section">
-          <h3>关联会话（{task.sessionIds.length}）</h3>
-          {task.sessionIds.length > 0
-            ? <ul className="list">{task.sessionIds.map(id => {
-              const s = sessions.find(s => s.id === id) ?? extra[id] ?? undefined;
-              const looked = id in extra; // 补查过：为 null 说明记录真没了
-              return <li className="linked-row" key={id}>
-                <button className="entity-row" disabled={!s} onClick={() => onSession(id)}>
-                  <span className="entity-main">
-                    <strong>{s ? `${AGENT_LABEL[s.agent] ?? s.agent} · ${s.project || "未知项目"}` : looked ? "会话记录已删除" : "读取中…"}</strong>
-                    <span className="dim">{s ? `${s.title} · ${STATE_LABEL[s.state] ?? s.state} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span>
-                  </span>
-                </button>
-                <button className="icon-ghost" aria-label="取消挂接" title="取消挂接" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unlinkSession(task.id, id)))}><Icon name="close" /></button>
-              </li>;
-            })}</ul>
-            : <p className="dim">还没有关联会话。开始执行后会自动挂接。</p>}
-          <button className="link" disabled={busy} onClick={() => setLinking(!linking)}>关联已有会话</button>
-          {linking && <div className="selection-panel"><p>选择会话（最近 30 条）</p>{sessions.filter(s => !task.sessionIds.includes(s.id)).slice(0, 30).map(s => <button className="entity-row" key={s.id} disabled={busy} onClick={() => void guard(async () => { onSaved(await api.linkSession(task.id, s.id)); setLinking(false); })}><span>{AGENT_LABEL[s.agent] ?? s.agent} · {s.project} · {s.title}</span></button>)}</div>}
-        </section>
-        {!hasProcess && <p className="dim">还没有过程记录。开始执行后，这里会出现时间线、关联会话和预摘要。</p>}
-      </>}
-
-      {tab === "result" && <>
-        {review && (review.items.length > 0 || review.evidence.length > 0 || task.status === "review") ? (
-          <section className="detail-section">
-            <h3>验收{review.items.length > 0 ? <span className="dim"> · {passed}/{review.items.length} 通过</span> : null}</h3>
-            {review.items.length === 0 && <p className="hint">这个任务还没有检查项。任务清单里的每一项都会自动变成检查项，也可以在这里临时补。</p>}
-            <ul className="review-list">
-              {review.items.map(it => (
-                <li key={it.id} className={`review-item ${it.status}`}>
-                  <div className="review-row">
-                    <span className={`review-dot ${it.status}`} aria-hidden />
-                    <span className="review-title">{it.title}</span>
-                    <span className="review-actions">
-                      <button className="link" disabled={busy} onClick={() => void decide(it, it.status === "pass" ? "pending" : "pass")}>{it.status === "pass" ? "撤销" : "通过"}</button>
-                      <button className="link danger" disabled={busy} onClick={() => { setFailing(failing === it.id ? null : it.id); setNote(it.note); }}>{it.status === "fail" ? "重新打回" : "打回"}</button>
-                    </span>
-                  </div>
-                  {it.note && failing !== it.id && <p className="review-note-text">{it.note}</p>}
-                  {failing === it.id && (
-                    <div className="review-note">
-                      <textarea value={note} maxLength={500} placeholder="打回原因（会沉淀为标准，下次交付前先自查）" onChange={e => setNote(e.target.value)} />
-                      <div className="action-bar">
-                        <button className="primary" disabled={busy} onClick={() => void decide(it, "fail")}>确认打回</button>
-                        <button onClick={() => setFailing(null)}>取消</button>
-                      </div>
-                    </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-            {task.status === "review" && (
-              <div className="action-bar">
-                <button className="primary" disabled={busy || review.items.some(it => it.status !== "pass")} title={review.items.some(it => it.status !== "pass") ? "检查项全部通过后才能验收" : ""}
-                  onClick={() => void guard(async () => onSaved((await api.acceptTask(task.id)).task))}>验收通过</button>
-                <span className="dim">验收通过后任务才会完成；还有待处理的授权请求时会被拦下</span>
-              </div>
-            )}
-            <form className="review-add" onSubmit={e => { e.preventDefault(); if (newItem.trim()) addItem(); }}>
-              <input value={newItem} maxLength={500} placeholder="补一项检查…" onChange={e => setNewItem(e.target.value)} />
-              <button disabled={busy || !newItem.trim()}>添加</button>
-            </form>
-            {evidenceGroups.length > 0 && (
-              <div className="evidence">
-                <p className="dim">证据（自动摘取自会话记录，只读）</p>
-                {evidenceGroups.map(g => (
-                  <details key={g.k}>
-                    <summary>{g.label} · {g.list.length}</summary>
-                    <ul>{g.list.map((e, i) => <li key={i}><code>{e.value}</code></li>)}</ul>
-                  </details>
-                ))}
-              </div>
-            )}
-            {review.standards.length > 0 && (
-              <div className="review-standards">
-                <p className="dim">打回沉淀的标准（最近 5 条，交付前先自查）</p>
-                <ul>{review.standards.map((s, i) => <li key={i}>{s}</li>)}</ul>
-              </div>
-            )}
-          </section>
-        ) : <p className="dim">还没有验收内容：任务进入待验收后，检查项和证据会出现在这里。</p>}
-        <section className="detail-section">
-          <h3>
-            任务产物
-            {artifact && <span className="dim"> · {artifact.edited ? "人改过" : artifact.source === "agent" ? "执行端交付" : "自动生成"} · {new Date(artifact.updatedAt).toLocaleString()}</span>}
-          </h3>
+        <details className="task-fold">
+          <summary>任务产物{artifact && <span className="dim"> · {artifact.edited ? "人改过" : artifact.source === "agent" ? "执行端交付" : "自动生成"} · {new Date(artifact.updatedAt).toLocaleString()}</span>}</summary>
           {artifact ? (editingArtifact ? (
             <div className="artifact-edit">
               <textarea value={artifactDraft} onChange={e => setArtifactDraft(e.target.value)} rows={18} spellCheck={false} />
@@ -560,10 +564,9 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
               <div className="action-bar">
                 <button disabled={busy} onClick={() => { setArtifactDraft(artifact.md); setEditingArtifact(true); }}><Icon name="edit" />编辑</button>
                 <button disabled={busy} onClick={rebuildArtifact}>按最新会话重建</button>
-                <button disabled={busy} onClick={downloadArtifact}>导出 .md</button>
+                <button disabled={busy} title={`导出文件名 ${artifactName || `docs/tasks/${task.id}-task.md`}`} onClick={downloadArtifact}>导出 .md</button>
                 <button className="link" disabled={busy} onClick={removeArtifact}>删除</button>
               </div>
-              <p className="hint">每个任务跑完自动留一份：做了什么、怎么验证、影响面、后续与风险。导出文件名 {artifactName || `docs/tasks/${task.id}-task.md`}。</p>
             </>
           )) : (
             <>
@@ -575,9 +578,118 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
               )}
             </>
           )}
-        </section>
-      </>}
-    </main>
+        </details>
+
+        {task.status !== "review" && reviewItems.length > 0 && (
+          <details className="task-fold">
+            <summary>验收记录<span className="dim"> · {passed}/{reviewItems.length} 通过</span></summary>
+            <ul className="review-list">
+              {reviewItems.map(it => (
+                <li key={it.id} className={`review-item ${it.status}`}>
+                  <div className="review-row"><span className={`review-dot ${it.status}`} aria-hidden /><span className="review-title">{it.title}</span></div>
+                  {it.note && <p className="review-note-text">{it.note}</p>}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+        <details className="task-fold" open={form === "running" || form === "stuck"}>
+          <summary>过程</summary>
+          {digest?.failure && form !== "stuck" && (
+            <div className="digest-card bad">
+              <strong>最近一次失败（{new Date(digest.failure.builtAt).toLocaleString()}）</strong>
+              <p>{digest.failure.error || "（执行器未返回错误信息）"}</p>
+              {digest.failure.tail.length > 0 && (
+                <p className="dim">{digest.failure.tail.map(m => `[${m.role}] ${m.text}`).join(" ⏎ ")}</p>
+              )}
+            </div>
+          )}
+          {timeline !== null && timeline.length > 0 && (
+            <section className="detail-section">
+              <h3>
+                时间线
+                <button className="link" onClick={() => void api.thread(task.id).then(r => setTimeline(r.events)).catch(() => {})}>刷新</button>
+              </h3>
+              <ul className="timeline">
+                {timeline.slice(0, 50).map((e, i) => (
+                  <li key={i} className={`tl-item tl-${e.type}`}>
+                    <span className="tl-time">{new Date(e.at).toLocaleString()}</span>
+                    <span className="tl-body">{tlLine(e)}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          <section className="detail-section">
+            <h3>关联会话（{task.sessionIds.length}）</h3>
+            {task.sessionIds.length > 0
+              ? <ul className="list">{task.sessionIds.map(id => {
+                const s = sessions.find(s => s.id === id) ?? extra[id] ?? undefined;
+                const looked = id in extra; // 补查过：为 null 说明记录真没了
+                return <li className="linked-row" key={id}>
+                  <button className="entity-row" disabled={!s} onClick={() => onSession(id)}>
+                    <span className="entity-main">
+                      <strong>{s ? `${AGENT_LABEL[s.agent] ?? s.agent} · ${s.project || "未知项目"}` : looked ? "会话记录已删除" : "读取中…"}</strong>
+                      <span className="dim">{s ? `${s.title} · ${STATE_LABEL[s.state] ?? s.state} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span>
+                    </span>
+                  </button>
+                  <button className="icon-ghost" aria-label="取消挂接" title="取消挂接" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unlinkSession(task.id, id)))}><Icon name="close" /></button>
+                </li>;
+              })}</ul>
+              : <p className="dim">还没有关联会话。开始执行后会自动挂接。</p>}
+            <button className="link" disabled={busy} onClick={() => setLinking(!linking)}>关联已有会话</button>
+            {linking && <div className="selection-panel"><p>选择会话（最近 30 条）</p>{sessions.filter(s => !task.sessionIds.includes(s.id)).slice(0, 30).map(s => <button className="entity-row" key={s.id} disabled={busy} onClick={() => void guard(async () => { onSaved(await api.linkSession(task.id, s.id)); setLinking(false); })}><span>{AGENT_LABEL[s.agent] ?? s.agent} · {s.project} · {s.title}</span></button>)}</div>}
+          </section>
+          {!hasProcess && <p className="dim">还没有过程记录。开始执行后，这里会出现时间线、关联会话和预摘要。</p>}
+        </details>
+      </main>
+
+      <aside className="task-side" aria-label="任务属性">
+        <div className="prop"><span className="prop-label">状态</span>
+          <select className="inline-control" aria-label="任务状态" value={task.status} disabled={busy} onChange={e => patch({ status: e.target.value as Task["status"] })}>{STATUSES.map(s => <option key={s} value={s}>{TASK_LABEL[s]}</option>)}</select>
+        </div>
+        <div className="prop"><span className="prop-label">执行人</span>
+          <span className="prop-value">{cfgA}</span>
+          <span className="prop-value dim">{cfgB}</span>
+          <button className="link prop-edit" disabled={busy} onClick={() => setConfigOpen(true)}>编辑</button>
+        </div>
+        <div className="prop"><span className="prop-label">所属目标</span>
+          <select className="inline-control" aria-label="所属目标" value={task.goalId ?? ""} disabled={busy} onChange={e => patch({ goalId: e.target.value ? Number(e.target.value) : null })}><option value="">无目标</option>{goals.map(g => <option key={g.id} value={g.id}>{g.title}</option>)}</select>
+        </div>
+        <div className="prop"><span className="prop-label">优先级</span>
+          <PrioritySelect value={task.priority ?? "medium"} onChange={priority => patch({ priority })} />
+        </div>
+        <div className="prop"><span className="prop-label">执行边界</span>
+          {task.mandateFrozenAt
+            ? <div className="bound-chips">
+              {(constraintsSummary(task.constraints).length > 0 ? constraintsSummary(task.constraints) : ["不限目录 · 不联网 · 不推远端 · 不跑脚本"]).map(c => <span key={c} className="bound-chip">{c}</span>)}
+              <span className="dim">· 已冻结</span>
+            </div>
+            : <>
+              <BoundsEditor value={task.constraints ?? NO_CONSTRAINTS} disabled={busy} onChange={constraints => patch({ constraints })} />
+              <span className="dim">第一次派发时冻结</span>
+            </>}
+        </div>
+        <details className="prop task-fold">
+          <summary>时间 · 提醒 · 计时</summary>
+          <div className="prop"><span className="prop-label">开始时间</span>
+            <input className="inline-control" type="datetime-local" aria-label="开始时间" value={localDateTime(task.startAt)} max={localDateTime(task.dueAt) || undefined} disabled={busy} onChange={e => patch({ startAt: toIso(e.target.value) })} />
+            <label className="check"><input type="checkbox" checked={task.remindStart} disabled={busy || !task.startAt} onChange={e => patch({ remindStart: e.target.checked })} />开始时提醒</label>
+          </div>
+          <div className="prop"><span className="prop-label">截止时间</span>
+            <input className={`inline-control ${task.dueAt && !done && Date.parse(task.dueAt) < now ? "overdue" : ""}`} type="datetime-local" aria-label="截止时间" value={localDateTime(task.dueAt)} min={localDateTime(task.startAt) || undefined} disabled={busy} onChange={e => patch({ dueAt: toIso(e.target.value) })} />
+            <label className="check"><input type="checkbox" checked={task.remindDue} disabled={busy || !task.dueAt} onChange={e => patch({ remindDue: e.target.checked })} />截止时提醒</label>
+          </div>
+          {task.doneAt && <div className="prop"><span className="prop-label">完成时间</span><span className="prop-value">{fmt(task.doneAt)}</span></div>}
+          <div className="prop"><span className="prop-label">计时</span>
+            {task.timerStartedAt
+              ? <><button disabled={busy} onClick={() => void guard(async () => onSaved(await api.stopTimer(task.id)))}>结束计时</button><span className="dim">已计时 {elapsed(task.timerStartedAt)}</span></>
+              : <button disabled={busy || done} onClick={() => void guard(async () => onSaved(await api.startTimer(task.id)))}><Icon name="timer" />开始计时</button>}
+          </div>
+        </details>
+      </aside>
+    </div>
 
     {configOpen && (
       <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setConfigOpen(false); }}>
@@ -642,80 +754,4 @@ export default function TaskView({ task, goals, sessions, agents, api, digest: l
       </div>
     )}
   </div>;
-}
-
-/** 四项能力开关：勾上 = 这个任务授权了这类动作，不勾 = 遇到就停下来问人 */
-const BOUND_FLAGS = [
-  { key: "net", label: "可联网 / 装依赖", hint: "装新依赖、调外部接口" },
-  { key: "push", label: "可推远端", hint: "git push" },
-  { key: "scripts", label: "可跑脚本", hint: "npm run xxx、sh / node / python" },
-] as const;
-
-/**
- * 执行边界编辑器：文本类字段失焦才提交，勾选立刻生效。
- * 这里声明的不是「权限」而是「这个任务预计要动到哪」，所以默认全空——
- * 没声明的能力一律按「遇到就问人」处理，宁可多问一句。
- */
-function BoundsEditor({ value, disabled, onChange }: { value: TaskConstraints; disabled: boolean; onChange(v: TaskConstraints): void }) {
-  const joined = value.paths.join(", ");
-  const [paths, setPaths] = useState(joined);
-  const [note, setNote] = useState(value.note);
-  // 别处改过（项目经理细化、别的设备编辑）就跟着同步，别让人看着旧值
-  useEffect(() => { setPaths(joined); }, [joined]);
-  useEffect(() => { setNote(value.note); }, [value.note]);
-  const commitPaths = () => {
-    const next = paths.split(/[,，;；\s]+/).map(s => s.trim()).filter(Boolean);
-    if (next.join("|") === value.paths.join("|")) return;
-    onChange({ ...value, paths: next });
-  };
-  const commitNote = () => {
-    const next = note.trim();
-    if (next === value.note) return;
-    onChange({ ...value, note: next });
-  };
-  const onEnter = (e: KeyboardEvent<HTMLInputElement>) => { if (e.key === "Enter") e.currentTarget.blur(); };
-
-  const preset = presetOf(value);
-  const apply = (id: PresetId) => {
-    // 「自定义」只是状态，不是动作：选了什么都不改
-    if (id === "custom") return;
-    const next = applyPreset(value, id);
-    if (next.net === value.net && next.push === value.push && next.scripts === value.scripts && next.note === value.note) return;
-    onChange(next);
-  };
-  const hint = presetHint(value);
-
-  return (
-    <div className="bounds-editor">
-      <label className="bounds-preset">场景
-        <select className="inline-control" aria-label="边界策略" value={preset} disabled={disabled}
-          onChange={e => apply(e.target.value as PresetId)}>
-          {BOUND_PRESETS.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
-          <option value="custom">自定义</option>
-        </select>
-      </label>
-      <p className="bounds-hint dim">{hint}
-        {/* 下拉选中项再点一次不会触发 change，说明空着时给一个明确的「填上」入口 */}
-        {preset !== "custom" && !value.note && (
-          <button type="button" className="link" disabled={disabled} onClick={() => apply(preset)}>填上</button>
-        )}
-      </p>
-      <label className="bounds-paths">只允许改
-        <input className="inline-control" value={paths} maxLength={400} disabled={disabled}
-          placeholder="留空 = 整个项目目录；多个用逗号分隔，如 server/src, docs"
-          onChange={e => setPaths(e.target.value)} onBlur={commitPaths} onKeyDown={onEnter} />
-      </label>
-      <div className="bounds-flags">
-        {BOUND_FLAGS.map(f => (
-          <label key={f.key} className="check" title={f.hint}>
-            <input type="checkbox" checked={value[f.key]} disabled={disabled}
-              onChange={() => onChange({ ...value, [f.key]: !value[f.key] })} />{f.label}
-          </label>
-        ))}
-      </div>
-      <input className="inline-control" value={note} maxLength={400} disabled={disabled}
-        placeholder="补充一句（会拼进执行者的系统提示），如：只动服务端，前端这次不碰"
-        onChange={e => setNote(e.target.value)} onBlur={commitNote} onKeyDown={onEnter} />
-    </div>
-  );
 }
