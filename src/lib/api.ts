@@ -155,6 +155,8 @@ export type Proposal = {
   sessionProject: string;
   taskId: number | null;
   kind: ProposalKind;
+  /** suggest = 只是一条建议（一行摘要）；draft = 已展开成完整任务单 */
+  stage: "suggest" | "draft";
   title: string;
   notes: string;
   checklist: string[];
@@ -419,6 +421,9 @@ export class Api {
     (await this.call<{ proposals: Proposal[] }>("GET", `/proposals${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""}`)).proposals;
   /** 让项目经理重写这条意见：借电脑上已登录的 agent，电脑离线时直接 409 */
   refineProposal = (id: number) => this.call<{ runId: string }>("POST", `/proposals/${id}/refine`, {});
+  /** 建议 → 任务单：展开完整草稿，并让项目经理用模型重写一遍；电脑离线时 refineError 带原因 */
+  draftProposal = (id: number) =>
+    this.call<{ proposal: Proposal; refineError: string }>("POST", `/proposals/${id}/draft`, {});
   confirmProposal = (id: number, input: ProposalInput & { dispatch?: boolean; delivery?: Delivery }) =>
     this.call<{ task: Task; proposal: Proposal; dispatched: { queued: boolean; delivery?: { mode: Delivery; reason: string } } | null; dispatchError: string }>("POST", `/proposals/${id}/confirm`, input);
   discardProposal = (id: number) => this.call<{ proposal: Proposal }>("POST", `/proposals/${id}/discard`);

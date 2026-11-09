@@ -101,6 +101,11 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const liveProposals = proposals.filter((p) => p.status !== "discarded");
   const proposalCount = liveProposals.length;
   const pendingProposals = liveProposals.filter((p) => p.status === "pending").length;
+  // 两段式：待确认的还停在「建议」阶段时，入口就直说「几条建议」，别一上来叫任务单
+  const pendingSuggestions = liveProposals.filter((p) => p.status === "pending" && p.stage === "suggest").length;
+  const pendingLabel = pendingSuggestions === pendingProposals && pendingProposals > 0
+    ? `${pendingProposals} 条建议待确认`
+    : `${pendingProposals} 份待确认`;
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
@@ -624,7 +629,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               <Icon name="tasks" />
               <span className="proposal-open-main">
                 <strong>任务单</strong>
-                <span className="dim">{pendingProposals > 0 ? `${pendingProposals} 份待确认` : "都已处理"}</span>
+                <span className="dim">{pendingProposals > 0 ? pendingLabel : "都已处理"}</span>
               </span>
               {proposalCount > pendingProposals && <span className="proposal-count dim">共 {proposalCount} 份</span>}
               <Icon name="chevron" />

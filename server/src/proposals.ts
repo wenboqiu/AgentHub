@@ -13,11 +13,13 @@ import { ASSISTANT_TITLE, CONTRACT_HEADS, PROPOSAL_TITLE } from './session-kind.
 // 和角色助手（assistant.ts）的分工——助手是「从一句话造一个角色」，这里是「从一段刚结束的工作
 // 攒出下一件事」。两者共用同一套范式：先出结构化草稿、人在界面上改、确认了才落库。
 //
-// 两档生成，缺一不可：
+// 两段式，先建议后任务单（两档生成，缺一不可）：
 //   ① 规则档（零成本、同步）：从最后一条助手回复、证据链、未完成清单里拼出底稿，几十毫秒；
-//   ② 细化档（一次 run、要电脑在线）：把会话尾部交给项目经理角色用模型重写，这才是任务单的最终内容。
-// 只有挂了未完成任务的会话才攒意见（没挂任务的闲聊不产单），而且底稿攒出来后立刻自动走细化档——
-// 规则稿只是给项目经理参考的底稿，人看到的那份是模型写的；电脑不在线时底稿先顶上，人可以手动点细化。
+//      会话跑完只落一条「建议」（stage=suggest）——一行「做什么 · 谁来做」，不叫模型。
+//   ② 细化档（一次 run、要电脑在线）：人点「生成任务单」才展开全文（stage=draft），
+//      同时把会话尾部交给项目经理角色用模型重写；写好了替换规则稿，电脑不在线就停在规则稿。
+//
+// 只有挂了未完成任务的会话才攒建议（没挂任务的闲聊不产单）。
 //
 // 一条会话可以有多次完成（多段任务），用 (session, event_at) 做唯一键：同一时刻只出一条，
 // 新一轮完成（event_at 变了）才会再出一条。
@@ -36,6 +38,13 @@ export type ProposalOrigin = 'heuristic' | 'agent'
  */
 export type Delivery = 'fork' | 'fresh' | 'resume'
 export type ProposalStatus = 'pending' | 'accepted' | 'discarded'
+/**
+ * 两段式：
+ * - suggest = 建议：只有「做什么 · 谁来做」一行，会话跑完先给人看这个，零成本；
+ * - draft = 任务单：完整草稿（说明 / 验收 / 边界 / 从哪开始），人点了「生成任务单」才进这一段。
+ * 会话攒出来的意见从 suggest 起步；人直接发的单（ticket）和打回重做的单是现成的任务单，直接 draft。
+ */
+export type ProposalStage = 'suggest' | 'draft'
 export type Priority = 'high' | 'medium' | 'low'
 
 /** 项目经理安排好的执行人：角色是人、目录是地方（机器 + 目录来自项目的目录列表） */
@@ -72,6 +81,8 @@ export type Proposal = {
   /** 生成时该会话挂着的未完成任务（可空） */
   taskId: number | null
   kind: ProposalKind
+  /** 建议还是任务单：界面据此决定只给一行摘要，还是展开整张表单 */
+  stage: ProposalStage
   title: string
   notes: string
   /** 只是文本；确认建任务时才补 id 和完成状态 */
@@ -211,6 +222,7 @@ export async function migrateProposals(db: DB) {
     task_id bigint,
     event_at timestamptz NOT NULL,
     kind text NOT NULL CHECK (kind IN ('continue','followup','fix','ticket')),
+    stage text NOT NULL DEFAULT 'draft',
     title text NOT NULL,
     notes text NOT NULL DEFAULT '',
     checklist jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -242,6 +254,11 @@ export async function migrateProposals(db: DB) {
     CHECK (kind IN ('continue','followup','fix','ticket'))`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'fresh'`)
+  // 两段式：老库里的单子都当成已经展开的任务单（默认 draft），不改动它们的行为
+  await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS stage text NOT NULL DEFAULT 'draft'`)
+  await db.query('ALTER TABLE session_proposals DROP CONSTRAINT IF EXISTS session_proposals_stage_check')
+  await db.query(`ALTER TABLE session_proposals ADD CONSTRAINT session_proposals_stage_check
+    CHECK (stage IN ('suggest','draft'))`)
   // 老库清理：历史上给没挂任务的会话也攒过意见，按新规矩它们不该存在——
   // 待确认的一律作废（人发的单 kind=ticket 例外，它本来就没有会话可挂）
   await db.query(`UPDATE session_proposals SET status='discarded', updated_at=now()
@@ -267,6 +284,7 @@ const row = (r: any): Proposal => ({
   sessionProject: r.session_project ?? '',
   taskId: r.task_id === null || r.task_id === undefined ? null : Number(r.task_id),
   kind: r.kind,
+  stage: r.stage === 'suggest' ? 'suggest' : 'draft',
   title: r.title,
   notes: r.notes ?? '',
   checklist: Array.isArray(r.checklist) ? r.checklist.filter((t: unknown): t is string => typeof t === 'string') : [],
@@ -576,6 +594,8 @@ export async function generateProposal(pool: pg.Pool, userId: number, session: S
     eventAt,
     evidence,
     origin: 'heuristic',
+    // 只先给一条建议：标题 + 执行人一行，人点了「生成任务单」才展开全文并让项目经理细化
+    stage: 'suggest',
     draft,
   })
   return saved ? (await fillAssignees(pool, userId, [saved]))[0] : null
@@ -590,13 +610,15 @@ async function saveProposal(pool: DB, userId: number, input: {
   eventAt: string
   evidence: Evidence[]
   origin: ProposalOrigin
+  /** 不传 = draft（发单、打回重做这类一上来就是任务单的） */
+  stage?: ProposalStage
   draft: ProposalDraft
 }): Promise<Proposal | null> {
   const r = await pool.query(
     `INSERT INTO session_proposals(
        user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
-       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,evidence,note,origin)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,evidence,note,origin,stage)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      ON CONFLICT (user_id,session_id,event_at) DO NOTHING RETURNING *`,
     [userId, input.sessionId, input.sessionTitle.slice(0, 200), input.sessionAgent, input.sessionProject.slice(0, 200),
       input.taskId, input.eventAt, input.draft.kind, input.draft.title.slice(0, MAX_TITLE),
@@ -604,7 +626,7 @@ async function saveProposal(pool: DB, userId: number, input: {
       JSON.stringify(normalizeConstraints(input.draft.constraints)),
       input.draft.delivery ?? defaultDelivery(input.draft.kind),
       input.draft.priority, input.draft.roleId, input.draft.projectId,
-      JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin],
+      JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin, input.stage ?? 'draft'],
   )
   const inserted = r.rows[0]
   if (!inserted) return null
@@ -818,7 +840,7 @@ export async function replaceDraft(pool: DB, userId: number, id: number, draft: 
   const r = await pool.query(
     `UPDATE session_proposals SET kind=$3,title=$4,notes=$5,checklist=$6,priority=$7,
        role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),delivery=$11,
-       constraints=$12
+       constraints=$12,stage='draft'
      WHERE user_id=$1 AND id=$2 AND status='pending' RETURNING *`,
     [userId, id, draft.kind, draft.title.slice(0, MAX_TITLE), draft.notes.slice(0, MAX_NOTES),
       JSON.stringify(draft.checklist), draft.priority, draft.roleId, draft.projectId, draft.note.slice(0, 500),
@@ -875,6 +897,21 @@ export async function getProposal(db: DB, userId: number, id: number): Promise<P
   const r = await db.query('SELECT * FROM session_proposals WHERE user_id=$1 AND id=$2', [userId, id])
   if (!r.rows[0]) throw new TaskError('处理意见不存在', 404)
   return (await fillAssignees(db, userId, [row(r.rows[0])]))[0]
+}
+
+/** 建议 → 任务单：人点了「生成任务单」才把 stage 推过去。
+ *  重复点不报错（已经是 draft 就原样返回），避免双击或两个窗口同时点时弹出假错误。 */
+export async function promoteToDraft(db: DB, userId: number, id: number): Promise<Proposal> {
+  const r = await db.query(
+    `UPDATE session_proposals SET stage='draft', updated_at=now()
+     WHERE user_id=$1 AND id=$2 AND status='pending' AND stage='suggest' RETURNING *`,
+    [userId, id],
+  )
+  if (r.rows[0]) return (await fillAssignees(db, userId, [row(r.rows[0])]))[0]
+  const cur = await db.query('SELECT status,stage FROM session_proposals WHERE user_id=$1 AND id=$2', [userId, id])
+  if (!cur.rows[0]) throw new TaskError('处理意见不存在', 404)
+  if (cur.rows[0].status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
+  return getProposal(db, userId, id)
 }
 
 /** 确认/忽略只对 pending 生效，避免同一份意见生成两个任务 */

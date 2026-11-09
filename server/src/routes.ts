@@ -96,6 +96,7 @@ import {
   markRefineRun,
   missingSessionError,
   planDelivery,
+  promoteToDraft,
   proposalPatch,
   recordRefine,
   restoreProposal,
@@ -139,7 +140,23 @@ export type RouteOptions = {
   pendingExpireMs?: number
 }
 
-type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
+type HistoryResult = { messages: ({ role: string; text: string; at?: string; images?: string[] } & MessageMeta)[]; error?: string }
+
+/** 历史同步里的图片：只收 data URL，限单张和总量，防止一次同步拖着几十 MB 走 WS */
+const HISTORY_IMAGE_MAX_CHARS = 8_000_000
+const HISTORY_IMAGE_MAX_TOTAL = 48_000_000
+export function historyImages(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  let total = 0
+  const out: string[] = []
+  for (const u of raw) {
+    if (typeof u !== 'string' || !u.startsWith('data:image/') || u.length > HISTORY_IMAGE_MAX_CHARS) continue
+    total += u.length
+    if (total > HISTORY_IMAGE_MAX_TOTAL) break
+    out.push(u)
+  }
+  return out.length ? out : undefined
+}
 
 function bearer(req: FastifyRequest) {
   const h = req.headers.authorization ?? ''
@@ -316,7 +333,8 @@ function approvalHeading(tool: string, detail: string): string {
 
 // 返回 kick：删除设备会话 / 账号后，用它立刻关闭对应的 WS（viewer 和执行器）
 export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions = {}): Kick {
-  const historyTimeoutMs = opts.historyTimeoutMs ?? 10_000
+  // 图片进历史后一次同步可能带几十 MB，10 秒在慢网络上不够
+  const historyTimeoutMs = opts.historyTimeoutMs ?? 30_000
   const stallAfterMs = opts.stallAfterMs ?? 45 * 60_000
   // 排队项 24 小时后作废；一次上线最多投递 3 条，失败 3 次放弃
   const queueTtlMs = opts.queueTtlMs ?? 24 * 3600_000
@@ -853,6 +871,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         branchPoint: nativeKey(m.branchPoint) ?? undefined,
         // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
         at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
+        // Codex 的生成图/附图转成的 data URL；老电脑端不发这个字段
+        images: historyImages(m.images),
       }))
     const messages = await serial(() => replaceHistory(pool, userId, session.id, items))
     broadcast(userId, { type: 'session.history', sessionId: session.id })
@@ -917,14 +937,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
           if (r.session.state === 'done' && !ev.quiet &&
               !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
             const done = r.session
-            // 攒出底稿后立刻让项目经理用模型重写（与发单同一条自动细化通道）；
-            // 规则稿只是底稿，人看到的那份应是模型写的。电脑不在线/没配经理时底稿先顶上，人可手动点细化。
+            // 两段式：这一段只攒一条简短建议（标题 + 执行人），不叫模型——
+            // 人点「生成任务单」才展开全文并让项目经理细化，省掉「跑完就甩一张看不完的长单」。
             const draft = async () => {
               const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
                 .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
               if (!proposal) return
               broadcast(req.userId, { type: 'proposal', proposal })
-              await startRefine(req.userId, proposal, {}).catch(e => app.log.warn(e, '自动细化处理意见失败，保留规则底稿'))
             }
             if (done.agent === 'workbuddy') {
               // 同步要等电脑端回话（最多 10s），放后台跑，别把这次事件上报的响应拖住
@@ -1446,6 +1465,26 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
     const res = await startRefine(req.userId, proposal, object(req.body ?? {}))
     return { runId: res.runId }
+  }))
+  // 建议 → 任务单：会话跑完只留一行建议（类型 + 标题 + 执行人），人点了才走这里。
+  // 先把完整草稿交出去，界面立刻能展开；同时让项目经理用模型重写一遍，回来会替换成更好的版本。
+  // 电脑不在线也照样能继续——内容停在规则稿，把原因带回去让界面提示。
+  app.post('/proposals/:id/draft', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const proposal = await getProposal(pool, req.userId, id)
+    if (proposal.status !== 'pending') throw new TaskError('这条建议已经处理过了', 409)
+    // 发单本身就是任务单（只有一句话 + 项目背景，细化在发单时已经跑过）
+    if (proposal.kind === 'ticket') throw new TaskError('发单本身就是任务单，不用再生成', 409)
+    let next = await promoteToDraft(pool, req.userId, id)
+    broadcast(req.userId, { type: 'proposal', proposal: next })
+    let refineError = ''
+    try {
+      await startRefine(req.userId, next, {})
+      // 带上 refineRunId 再推一次：界面据此显示「项目经理正在写完整任务单」
+      next = await getProposal(pool, req.userId, id)
+      broadcast(req.userId, { type: 'proposal', proposal: next })
+    } catch (e) { refineError = e instanceof Error ? e.message : String(e) }
+    return { proposal: next, refineError }
   }))
   // 发单：人写一句话，先落成一份待确认的任务单，再让项目经理用模型补成能开工的样子。
   // 不直接建任务——建了再改等于让人对着半成品做验收；这里坚持「预览 → 人确认 → 才派发」。

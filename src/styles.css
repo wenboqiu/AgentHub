@@ -852,6 +852,12 @@ header h1 { white-space: nowrap; }
 .proposal-assignee .form-grid { gap: 12px; }
 .proposal-place { margin: 8px 0 0; font-size: 12px; overflow-wrap: anywhere; }
 .proposal-card > label { display: block; margin-bottom: 10px; }
+/* 建议阶段：一行摘要 + 两个按钮。整张表单要等「生成任务单」点下去才展开 */
+.proposal-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 14px; padding: 12px 14px; }
+.proposal-suggest-main { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: 1; min-width: 0; }
+.proposal-suggest-title { font-size: 14px; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
+.proposal-suggest-who { font-size: 12px; white-space: nowrap; }
+.proposal-suggest .btns { margin: 0; flex: none; }
 .proposal-evidence { margin: 4px 0 10px; }
 .proposal-evidence ul { margin: 8px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; }
 .proposal-verdict { margin: 14px 0 4px; padding: 10px 14px; border-radius: 12px; background: var(--ok-bg); color: var(--ok); font-size: 13px; }

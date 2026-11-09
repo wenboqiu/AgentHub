@@ -4,13 +4,14 @@ import { constraintsSummary } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import { planDelivery } from "./lib/delivery";
 
-// 任务单卡：会话跑完后，项目经理先替人把「接下来做什么、谁来做、在哪做」排好，
-// 人只需要看一眼、改不改都行，点「确认并派发」它就真的开工。
+// 任务单卡，两段式：
+//   ① 建议（stage=suggest）：会话跑完只给一行——类型 + 标题 + 执行人，两个按钮「生成任务单 / 不用了」。
+//      这一步不花模型，人也不必读完整张单就能决定「这件事要不要做」。
+//   ② 任务单（stage=draft）：点了「生成任务单」才展开全文（说明 / 验收 / 边界 / 从哪开始），
+//      同时项目经理会用模型重写一遍；人改不改都行，点「确认并派发」它就真的开工。
 //
 // 和执行意见的区别只是多了「执行人」这一层——意见说的是该做什么，任务单说的是这件事归谁。
-// 所以卡片上能改的字段和任务详情页一致：标题、说明、验收要点、优先级、执行人、项目。
-//
-// 「让项目经理重写」只在需要时点：规则档是零成本的拼装，重写才花一次模型调用。
+// 所以任务单上能改的字段和任务详情页一致：标题、说明、验收要点、优先级、执行人、项目。
 
 const KIND_LABEL: Record<Proposal["kind"], string> = {
   continue: "接着做",
@@ -60,11 +61,14 @@ export default function ProposalCard({
   const [form, setForm] = useState<Form>(() => toForm(proposal));
   const [done, setDone] = useState<null | { kind: "created"; text: string } | { kind: "discarded" }>(null);
   const [refining, setRefining] = useState(false);
+  // 建议阶段点「生成任务单」到服务端回来之间：按钮锁住，别让人连点两次
+  const [drafting, setDrafting] = useState(false);
   const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
   // 发单没有原会话：不显示「从哪开始」，也不自称来自某个会话
   const isTicket = proposal.kind === "ticket";
   // 项目经理正拿着模型读这张单（细化结果回来时 origin 会变 agent，这行提示自然消失）
-  const writing = isTicket && proposal.origin === "heuristic" && !!proposal.refineRunId;
+  // 建议阶段还没有细化这回事：那时只有一行摘要，谈不上「正在写」
+  const writing = proposal.stage === "draft" && proposal.origin === "heuristic" && !!proposal.refineRunId;
 
   // 重写结果从 WS 推回来（origin 变 agent）：把「正在看」收掉，表单换成新的
   useEffect(() => {
@@ -112,6 +116,48 @@ export default function ProposalCard({
   // 去向按「现在选的执行人」预览：换人 / 换机器之后能不能续，当场就能看出来
   const plan = planDelivery(form.delivery, proposal.fork, { agent, machine, cwd });
 
+  // 忽略：只算「这条建议暂时不用」，记录还留在详情页，可以撤回
+  const discard = () => act(async () => {
+    const res = await api.discardProposal(proposal.id);
+    onChanged(res.proposal);
+    setDone({ kind: "discarded" });
+  });
+
+  // 建议 → 任务单：展开完整草稿，同时让项目经理用模型重写一遍。
+  // 先出规则稿是为了「电脑不在线也能继续」，模型回来再替换成更好的版本。
+  const makeDraft = () => act(async () => {
+    setDrafting(true);
+    try {
+      const res = await api.draftProposal(proposal.id);
+      onChanged(res.proposal);
+      if (res.refineError) onError(`任务单已展开，但项目经理没能重写：${res.refineError}`);
+    } finally { setDrafting(false); }
+  });
+
+  // ---- 建议阶段：只给一行 ----
+  // 会话跑完先让人看「做什么 · 谁来做」，不用对着整张表单做阅读理解。
+  // 点「生成任务单」才展开全文——这一步才是「确认要做这件事」。
+  if (proposal.stage === "suggest") {
+    const who = proposal.assignee.roleName
+      ? `${proposal.assignee.roleName}${agent ? ` · ${AGENT_LABEL[agent] ?? agent}` : ""}`
+      : "执行人待定";
+    return (
+      <div className="proposal-card proposal-suggest">
+        <div className="proposal-suggest-main">
+          <span className={`proposal-kind ${proposal.kind}`}>{KIND_LABEL[proposal.kind]}</span>
+          <strong className="proposal-suggest-title">{proposal.title}</strong>
+          <span className="dim proposal-suggest-who">{who}</span>
+        </div>
+        <div className="btns">
+          <button className="primary" disabled={busy || drafting} onClick={() => void makeDraft()}>
+            {drafting ? "正在生成…" : "生成任务单"}
+          </button>
+          <button className="ghost" disabled={busy || drafting} onClick={() => void discard()}>不用了</button>
+        </div>
+      </div>
+    );
+  }
+
   const fields = (): ProposalInput => ({
     title: form.title.trim(),
     notes: form.notes,
@@ -144,7 +190,7 @@ export default function ProposalCard({
             : `来自「${proposal.sessionTitle || "未命名会话"}」（${AGENT_LABEL[proposal.sessionAgent] ?? proposal.sessionAgent}）`}
         </span>
         <span className="dim proposal-origin">
-          {proposal.origin === "agent" ? "项目经理整理" : isTicket ? "待确认" : "按会话自动排出"}
+          {proposal.origin === "agent" ? "项目经理整理" : isTicket ? "待确认" : "按会话展开的草稿"}
         </span>
       </div>
 
@@ -247,14 +293,7 @@ export default function ProposalCard({
           })}>
           {refining ? "项目经理正在重写…" : "让项目经理重写"}
         </button>
-        <button className="ghost" disabled={busy}
-          onClick={() => void act(async () => {
-            // 把新的状态交回上层：会话标签的待确认计数、聊天流底部的入口都靠它立刻收掉，
-            // 不用等下次拉快照（服务端只回待处理的单，靠刷新才消失会显得「忽略了还在」）
-            const res = await api.discardProposal(proposal.id);
-            onChanged(res.proposal);
-            setDone({ kind: "discarded" });
-          })}>
+        <button className="ghost" disabled={busy} onClick={() => void discard()}>
           忽略
         </button>
       </div>
