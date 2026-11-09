@@ -58,7 +58,8 @@ pub fn claude_human_input(row: &Value) -> bool {
 const HISTORY_IMAGE_BUDGET: usize = 48 * 1024 * 1024;
 
 fn push_image(budget: &mut usize, out: &mut Vec<String>, url: String) {
-    if url.len() > *budget {
+    // 同一张图可能从两条路各收一次（工具输出里的 data URL、事件里的 savedPath），按内容去重
+    if url.len() > *budget || out.contains(&url) {
         return;
     }
     *budget -= url.len();
@@ -165,11 +166,18 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
                 pending_images.clear();
             }
             if p["type"] == "turn_aborted" { final_index = None; turn = None; pending_images.clear(); }
+            // 图像生成：成品图只记在事件的 savedPath 里（桌面端不会把 data URL 写进工具输出）
+            let item = &p["item"];
+            if p["type"] == "item_completed" && item["type"] == "Extension" && item["kind"] == "image_gen.generation" && item["failure"].is_null() {
+                if let Some(url) = item["savedPath"].as_str().and_then(crate::runner::image_data_url) {
+                    push_image(&mut image_budget, &mut pending_images, url);
+                }
+            }
             continue;
         }
         // 图像生成技能的成品图（base64 data URL）整段躺在工具输出里：收下来，
         // 挂到紧随其后的那条助手消息上；回合结束还没人认领就作废
-        if agent == "codex" && v["type"] == "response_item" && v["payload"]["type"] == "custom_tool_call_output" {
+        if agent == "codex" && v["type"] == "response_item" && matches!(v["payload"]["type"].as_str(), Some("custom_tool_call_output" | "function_call_output")) {
             collect_images(&v["payload"]["output"], &mut pending_images, &mut image_budget);
             continue;
         }
@@ -211,9 +219,14 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
                 // 附图以 <image … path="…">…</image> 行内标签记录：转成 data URL 挂到本条消息，
                 // 标签本身从正文剥掉（不剥的话正文里残留一串标签，也没法从历史里看到图）
                 let (clean, paths) = strip_codex_image_tags(&body);
-                for path in &paths {
-                    if let Some(url) = crate::runner::image_data_url(path) {
-                        push_image(&mut image_budget, &mut pending_images, url);
+                // 新版把图本体内嵌成 input_image（data URL），优先用；没有内嵌才按标签里的路径读文件
+                let before = pending_images.len();
+                collect_images(&p["content"], &mut pending_images, &mut image_budget);
+                if pending_images.len() == before {
+                    for path in &paths {
+                        if let Some(url) = crate::runner::image_data_url(path) {
+                            push_image(&mut image_budget, &mut pending_images, url);
+                        }
                     }
                 }
                 if !paths.is_empty() {
@@ -222,7 +235,11 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
             }
             (role, body, key(&p["id"]), None)
         };
-        if content.trim().is_empty() || (agent == "codex" && role == "user" && content.trim_start().starts_with('<')) { continue; }
+        if content.trim().is_empty() || (agent == "codex" && role == "user" && content.trim_start().starts_with('<')) {
+            // 被丢掉的用户消息，它的内嵌图不能漏到下一条消息上
+            if role == "user" { pending_images.clear(); }
+            continue;
+        }
         if agent == "codex" && role == "assistant" && v["payload"]["phase"] == "final_answer" && turn.is_some() {
             final_index = Some(messages.len());
         }
@@ -449,6 +466,31 @@ mod tests {
         // 上一回合的图不外溢：新回合的消息不带图
         assert!(messages[2].images.is_empty());
         assert!(messages[0].images.is_empty());
+    }
+
+    #[test]
+    fn codex_image_gen_event_function_output_and_inline_user_image() {
+        let d = std::env::temp_dir().join(format!("ah-img-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("gen.png");
+        std::fs::write(&f, [0x89, b'P', b'N', b'G']).unwrap();
+        let saved = serde_json::to_string(f.to_str().unwrap()).unwrap();
+        let data = format!(
+            r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t1"}}}}
+{{"type":"response_item","payload":{{"type":"message","id":"u1","role":"user","content":[{{"type":"input_text","text":"看图"}},{{"type":"input_image","image_url":"{IMG}"}}]}}}}
+{{"type":"event_msg","payload":{{"type":"item_completed","item":{{"type":"Extension","kind":"image_gen.generation","failure":null,"savedPath":{saved}}}}}}}
+{{"type":"response_item","payload":{{"type":"function_call_output","id":"f1","output":[{{"type":"input_text","text":"ok"}},{{"type":"input_image","image_url":"{IMG}"}}]}}}}
+{{"type":"response_item","payload":{{"type":"message","id":"m2","role":"assistant","phase":"final_answer","content":[{{"type":"output_text","text":"好了"}}]}}}}"#
+        );
+        let messages = parse("codex", &data, 50);
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(messages.len(), 2);
+        // 用户消息内嵌的图挂在它自己身上
+        assert_eq!(messages[0].images, vec![IMG]);
+        // 生成图（savedPath）+ function_call_output 里的图都挂到助手消息；相同内容只留一张
+        assert_eq!(messages[1].images.len(), 2);
+        assert!(messages[1].images[0].starts_with("data:image/png;base64,"));
+        assert_eq!(messages[1].images[1], IMG);
     }
 
     #[test]
