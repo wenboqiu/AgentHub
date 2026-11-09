@@ -377,7 +377,10 @@ export default function App() {
     const nextTab: Tab = t.kind === "session" ? "sessions" : t.kind === "task" ? "tasks" : "goals";
     const next: Detail = t.kind === "session" ? { kind: "session", id: t.id } : { kind: t.kind, id: t.id };
     setTab(nextTab);
-    window.history.pushState({ agenthub: true, detail: next, tab: nextTab }, "");
+    // 已在某个会话里、通知又指向会话：替换当前历史项，别叠一层——否则返回会先退回上一个会话，要点多次才回到列表
+    const state = { agenthub: true, detail: next, tab: nextTab };
+    if (detail?.kind === "session" && t.kind === "session") window.history.replaceState(state, "");
+    else window.history.pushState(state, "");
     setDetail(next);
   };
   useEffect(() => {
