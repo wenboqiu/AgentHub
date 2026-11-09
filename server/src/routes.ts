@@ -63,7 +63,7 @@ import { taskThread } from './threads.ts'
 import { addReviewItem, decideReviewItem, getReview } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
-import { acceptTask, createDelivery, decisionStats, getDelivery, getMandate, getMandateMode, judgeByMandate, recentAutoAllowCount, recordDecision, setMandateMode, signMandate, tagApproval, type Mandate, type MandateMode } from './mandate.ts'
+import { AUTO_ALLOW_PER_TASK_HOUR, acceptTask, createDelivery, decisionStats, getDelivery, getMandate, getMandateMode, judgeByMandate, recentAutoAllowCount, recordDecision, setMandateMode, signMandate, tagApproval, type Mandate, type MandateMode } from './mandate.ts'
 import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
 import { pickDispatchModel } from './model-pick.ts'
 import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, renameMachine, saveProject } from './projects.ts'
@@ -1956,8 +1956,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
             const auto = mode === 'auto' && !!executors.get(execKey(userId, machine))?.mandateV1
             scoped = { mandate: ctx.mandate, taskId: ctx.task.id, verdict, auto }
             if (auto && verdict.action === 'allow') {
-              const manager = await getManager(pool, userId)
-              if ((await recentAutoAllowCount(pool, userId)) < manager.approve.maxPerHour) {
+              if ((await recentAutoAllowCount(pool, userId, ctx.task.id)) < AUTO_ALLOW_PER_TASK_HOUR) {
                 const approvalId = randomUUID()
                 await recordDecision(pool, userId, { taskId: ctx.task.id, mandateId: ctx.mandate.id, approvalId, wouldAllow: true, inScope: true, rule: verdict.rule, tier: verdict.tier, mode: 'auto' })
                 // 没有审批行：只给执行器一个 id 让它继续
@@ -1966,7 +1965,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
                 return
               }
               // 一小时内放行太多：说明 agent 在跑飞，后面的全交给人
-              scoped.verdict = { action: 'escalate', tier: 'gray', rule: 'quota', reason: '这一小时的自动放行次数已用完' }
+              scoped.verdict = { action: 'escalate', tier: 'gray', rule: 'quota', reason: `这个任务一小时内自动放行已满 ${AUTO_ALLOW_PER_TASK_HOUR} 次，可能在跑飞` }
             }
           }
         }

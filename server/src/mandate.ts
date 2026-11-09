@@ -166,12 +166,19 @@ export async function tagApproval(db: DB, user: number, approvalId: string, mand
   await db.query('UPDATE approvals SET mandate_id=$3, in_scope=$4 WHERE user_id=$1 AND id=$2', [user, approvalId, mandateId, inScope])
 }
 
-/** auto 档最近一小时真放行了几次（超过代批限额就全交给人，防跑飞） */
-export async function recentAutoAllowCount(db: DB, user: number): Promise<number> {
+/**
+ * auto 档每个任务每小时最多自动放行几次。和项目经理代批的 maxPerHour（默认 60）分开：
+ * agent 用 Bash 跑 ls / cat / git diff 都要走这里，一个长任务一小时轻松过百，
+ * 共用 60 会让「不再询问」在任务中途失效。这条线只防跑飞（死循环刷命令），不是常规节流。
+ */
+export const AUTO_ALLOW_PER_TASK_HOUR = 300
+
+/** auto 档这个任务最近一小时真放行了几次（超过上限就全交给人，防跑飞） */
+export async function recentAutoAllowCount(db: DB, user: number, taskId: number): Promise<number> {
   const r = await db.query(
     `SELECT count(*)::int n FROM mandate_decisions
-      WHERE user_id=$1 AND mode='auto' AND would_allow AND rule<>'quota' AND created_at > now() - interval '1 hour'`,
-    [user],
+      WHERE user_id=$1 AND task_id=$2 AND mode='auto' AND would_allow AND rule<>'quota' AND created_at > now() - interval '1 hour'`,
+    [user, taskId],
   )
   return Number(r.rows[0]?.n ?? 0)
 }
