@@ -1673,6 +1673,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const { run, message, session } = res as Extract<typeof res, { code: 200 }>
     pushRun(userId, run)
     pushMessage(userId, message)
+    // 后续消息只是上下文，不是授权：这条会话挂着签过 Mandate 的任务，就原样带上那份冻结快照，
+    // 消息正文怎么写（「可以 push 了」「联网装吧」）都不读、不改范围。要换范围只能新开任务。
+    const scoped = await mandateOfSession(userId, id)
+    const mandate = scoped ? await mandateField(userId, session.machine, scoped.task.id) : {}
     const sent = sendExecutor(userId, session.machine, {
       type: 'run.start',
       runId: run.id,
@@ -1683,6 +1687,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       text: clean,
       ...(images.length ? { images } : {}),
       mode: 'resume',
+      ...mandate,
     })
     if (!sent) {
       const failed = await setRunStatus(pool, userId, run.id, 'failed', '电脑端不在线')

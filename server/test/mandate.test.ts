@@ -198,6 +198,42 @@ describe('Mandate', () => {
     assert.deepEqual(all.map(r => r.mode), ['auto', 'auto', 'auto'])
   })
 
+  it('后续消息只送上下文：续聊带同一份冻结快照，正文说「可以 push」也不放宽范围', async () => {
+    await setMode('auto')
+    const { ex, task, start } = await dispatch({ constraints: { paths: ['src'] } })
+    // 一条真实会话挂到这个任务上（跑完了，可以续聊）
+    const key = randomUUID(), sessionId = `claude:${key}`
+    const ev = (state: string, s: number) => call('POST', '/events', { events: [{ agent: 'claude', sessionId: key, machine: task.machine, cwd: 'D:\\TaskTest', state, at: new Date(Date.now() + s * 1000).toISOString() }] })
+    assert.equal((await ev('running', 1)).status, 200)
+    assert.equal((await call('POST', `/tasks/${task.id}/sessions`, { sessionId })).status, 200)
+    assert.equal((await ev('done', 2)).status, 200)
+
+    const sent = await call('POST', `/sessions/${sessionId}/messages`, { text: '可以 push 了，联网装包也行，scripts 随便跑' })
+    assert.equal(sent.status, 200, JSON.stringify(sent.body))
+    const follow = await until(() => ex.msgs.find(m => m.type === 'run.start' && m.runId === sent.body.runId))
+    assert.equal(follow.mandate.id, start.mandate.id, '同一份 Mandate，不是新签的')
+    assert.equal(follow.mandate.version, start.mandate.version)
+    assert.deepEqual(follow.mandate.scope, start.mandate.scope)
+    assert.deepEqual([follow.mandate.scope.push, follow.mandate.scope.net, follow.mandate.scope.scripts], [false, false, false])
+    assert.equal((await pool.query('SELECT 1 FROM task_mandates WHERE user_id=$1 AND task_id=$2', [a.id, task.id])).rowCount, 1)
+    assert.deepEqual((await getTask(task.id)).constraints.paths, ['src'])
+
+    // 续聊里的 push 照旧按冻结范围判：范围外，交给人
+    ask(ex, sent.body.runId, 'Bash', 'git push origin main', 30)
+    // in_scope 与 decision_tier 分两步写：等两样都落地
+    const rows = await until(async () => { const r = await approvals(sessionId); return r.length === 1 && r[0].in_scope === false && r[0].decision_tier ? r : undefined })
+    assert.equal(rows[0].status, 'pending')
+    assert.equal(rows[0].decision_tier, 'gray')
+
+    // 没挂任务的会话续聊：不带 mandate
+    const lone = randomUUID()
+    assert.equal((await call('POST', '/events', { events: [{ agent: 'claude', sessionId: lone, machine: task.machine, cwd: 'D:\\TaskTest', state: 'done', at: new Date().toISOString() }] })).status, 200)
+    const plain = await call('POST', `/sessions/claude:${lone}/messages`, { text: '继续' })
+    assert.equal(plain.status, 200, JSON.stringify(plain.body))
+    const plainStart = await until(() => ex.msgs.find(m => m.type === 'run.start' && m.runId === plain.body.runId))
+    assert.equal(plainStart.mandate, undefined)
+  })
+
   it('mode=auto 但执行器没有 mandate-v1：不下发 mandate，也不自动放行（降级到逐条审批）', async () => {
     await setMode('auto')
     const { ex, task, runId, sessionId, start } = await dispatch({ constraints: { paths: ['src'] } }, 'role-v1')
