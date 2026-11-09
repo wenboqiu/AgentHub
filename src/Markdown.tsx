@@ -1,6 +1,8 @@
 import { memo } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly";
+import remarkBreaks from "remark-breaks";
 import type { Attachment } from "./lib/api";
 import { attachmentId, formatSize } from "./lib/attachments";
 
@@ -23,9 +25,18 @@ type Props = {
   /** 点文件附件（下载 / 打开）；图片点击走 onImage 预览 */
   onAttachment?: (id: number) => void;
   onImage?: (url: string) => void;
+  /**
+   * 宽松排版，只给 Codex 的消息开：remark-cjk-friendly 修 **“……”** 这类加粗紧贴中文标点时露出字面 `**`；
+   * remark-breaks 把段落里的单个换行渲染成换行（Codex 习惯一行一句，标准 Markdown 会把它吞成空格）。
+   * 其他通道本来就没问题，保持标准 GFM，不受影响。
+   */
+  lenient?: boolean;
 };
 
-const Markdown = memo(function Markdown({ text, compact = false, attachments, onAttachment, onImage }: Props) {
+const PLUGINS = [remarkGfm];
+const LENIENT_PLUGINS = [remarkGfm, remarkCjkFriendly, remarkBreaks];
+
+const Markdown = memo(function Markdown({ text, compact = false, lenient = false, attachments, onAttachment, onImage }: Props) {
   const loaded = Array.isArray(attachments);
   const byId = new Map((attachments ?? []).map(a => [a.id, a]));
   // 附件还没读回来时不放行：react-markdown 会把 href 过滤成空，这里正好渲染成纯文本
@@ -35,7 +46,7 @@ const Markdown = memo(function Markdown({ text, compact = false, attachments, on
   return (
     <div className={`md${compact ? " md-compact" : ""}`}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={lenient ? LENIENT_PLUGINS : PLUGINS}
         urlTransform={urlTransform}
         components={{
           a: ({ href, children }) => {

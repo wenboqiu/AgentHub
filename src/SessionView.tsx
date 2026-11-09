@@ -592,7 +592,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               <div className={`msg ${m.role}`}>
                 {/* 人和 agent 的话都按 markdown 渲染（都会贴表格、代码、路径）；
                     tool / system 行还是原文，终端输出里的符号不能被当成格式 */}
-                {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} /> : m.text}
+                {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} lenient={session.agent === "codex"} /> : m.text}
                 {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
