@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "agenthub"
-version = "0.11.30"
+version = "0.12.0"
 dependencies = [
  "ab_glyph",
  "aes-gcm",
