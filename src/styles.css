@@ -666,7 +666,7 @@ header h1 { white-space: nowrap; }
 @media (hover: hover) { .icon-ghost:not(:disabled):hover { color: var(--alert); background: var(--alert-bg); border-color: transparent; } }
 .detail-progress { flex-direction: row; }
 
-/* 任务详情预摘要（投机生成的验收摘要与失败上下文） */
+/* 任务详情预摘要（后台预生成的验收摘要与失败上下文） */
 .digest-card { margin: 10px 0; padding: 12px 16px; border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
 .digest-card.bad { border-color: var(--alert); background: var(--alert-bg); }
 .digest-card p { margin: 0; white-space: pre-wrap; word-break: break-word; }

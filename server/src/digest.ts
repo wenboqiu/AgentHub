@@ -2,9 +2,8 @@ import type pg from 'pg'
 import { listMessages } from './db.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
 
-// 投机预摘要（思路来自 DeepSeek Super-agent 的投机执行：结果不确定是否被采用时先在
-// 后台准备，有价值再提交）。任务进入「待验收」时预生成验收摘要，失败运行时预收集
-// 错误上下文；用户点开任务详情时立即可见，不用再开终端翻记录。
+// 预摘要：任务进入「待验收」时预生成验收摘要，失败运行时预收集错误上下文；
+// 用户点开任务详情时立即可见，不用再开终端翻记录。证据靠正则抽取，宁可少抓。
 // 全程只读会话/运行数据 + 写自己的缓存表，不改变任何权限模型。
 
 type DB = Pick<pg.Pool, 'query'>

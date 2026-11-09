@@ -3,7 +3,7 @@ import { listMessages } from './db.ts'
 
 // Thread 模型（思路来自 DeepSeek Super-agent：Session 应当是系统实现细节而非用户
 // 认知负担）。把「任务」升级为 Thread——一条按时间排序的统一事件流：关联会话的
-// 消息、执行记录、时间提醒、投机摘要全部收进同一个视图。v1 只做聚合读（不迁移
+// 消息、执行记录、时间提醒、预摘要全部收进同一个视图。v1 只做聚合读（不迁移
 // 数据、不破坏现有 API），客户端任务详情页以「时间线」呈现。
 
 export type ThreadEvent =
@@ -51,7 +51,7 @@ export async function taskThread(pool: pg.Pool, userId: number, taskId: number, 
     )
   ).rows
   for (const r of reminderRows) events.push({ type: 'reminder', at: at(r.scheduled_at), kind: r.kind as 'start' | 'due', title: r.kind === 'start' ? '开始时间提醒' : '截止时间提醒', acked: r.acked })
-  // 投机摘要（验收摘要取最后回复节选，失败取错误信息）
+  // 预摘要（验收摘要取最后回复节选，失败取错误信息）
   const digestRows = (await pool.query<{ kind: string; digest: any; created_at: Date }>('SELECT kind, digest, created_at FROM task_digests WHERE user_id=$1 AND task_id=$2', [userId, taskId])).rows
   for (const d of digestRows) {
     const text = d.kind === 'failure' ? (d.digest?.error ?? '') : (d.digest?.lastReply ?? '')

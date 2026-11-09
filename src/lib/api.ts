@@ -109,7 +109,7 @@ export type RunBrief = { status: RunStatus; error: string; /** 这一轮用的�
 /** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
 export type EvidenceKind = "file" | "command" | "test" | "shot" | "log";
 export type Evidence = { kind: EvidenceKind; label: string; value: string; at: string | null };
-/** 验收摘要：任务进入待验收时服务端后台预生成（投机执行），打开详情即见 */
+/** 验收摘要：任务进入待验收时服务端后台预生成，打开详情即见 */
 export type ReviewDigest = { kind: "review"; builtAt: string; sessionId: string | null; sessionTitle: string; agent: string | null; project: string; messages: number; lastReply: string; lastReplyAt: string | null; runs: RunBrief[]; evidence?: Evidence[] };
 /** 失败上下文：run 失败时预收集的错误与最后几条消息 */
 export type FailureDigest = { kind: "failure"; builtAt: string; runId: string; sessionId: string | null; error: string; tail: { role: string; text: string }[] };

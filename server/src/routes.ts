@@ -508,7 +508,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const syncTask = async (userId: number, sessionId: string, state: Session['state']) => {
     const tasks = await syncTaskForSession(pool,userId,sessionId,state)
     for (const t of tasks) pushTask(userId,t)
-    // 投机执行：任务进入待验收时预生成验收摘要（调用点都在 serial 内，几条查询不阻塞）
+    // 预摘要：任务进入待验收时预生成验收摘要（调用点都在 serial 内，几条查询不阻塞）
     if (state === 'done') {
       for (const t of tasks) {
         const digest = await buildReviewDigest(pool,userId,t.id)
@@ -1248,7 +1248,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const item = await decideReviewItem(pool, req.userId, entityId(p.id), entityId(p.itemId), status, note)
     return { item }
   }))
-  // 投机预摘要：验收摘要（进入待验收时后台生成）与失败上下文
+  // 预摘要：验收摘要（进入待验收时后台生成）与失败上下文
   app.get('/tasks/:id/digest', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
     await getTask(pool,req.userId,id)
@@ -1848,7 +1848,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!updated) return
         pushRun(userId, updated)
         if (updated.sessionId && !isPendingId(updated.sessionId) && (status === 'done' || status === 'running')) await syncTask(userId,updated.sessionId,status)
-        // 投机执行：run 失败时预收集错误上下文挂到任务上（关联任务或会话所属任务）
+        // 预摘要：run 失败时预收集错误上下文挂到任务上（关联任务或会话所属任务）
         if (status === 'failed') {
           const ids = updated.taskId ? [Number(updated.taskId)]
             : updated.sessionId ? (await tasksForSession(pool,userId,updated.sessionId)).map(t => t.id) : []

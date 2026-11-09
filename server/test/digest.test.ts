@@ -6,7 +6,7 @@ import { createPool } from '../src/db.ts'
 import { buildFailureDigest } from '../src/digest.ts'
 import { DATABASE_URL, makeUser } from './helpers.ts'
 
-describe('投机预摘要', () => {
+describe('预摘要', () => {
   const pool = createPool(DATABASE_URL)
   let app: Awaited<ReturnType<typeof buildApp>>, a: Awaited<ReturnType<typeof makeUser>>, b: typeof a
   async function call(method: string, path: string, body?: unknown, token = a.token) {

@@ -150,7 +150,7 @@ export default function App() {
   const [reminders,setReminders] = useState<Map<number,Reminder>>(new Map());
   const notifiedReminders = useRef(new Set<number>());
   const [tasks,setTasks] = useState<Map<number,Task>>(new Map());
-  // 投机预摘要：taskId -> {review, failure}，由 WS task.digest 实时更新
+  // 预摘要：taskId -> {review, failure}，由 WS task.digest 实时更新
   const [digests,setDigests] = useState<Map<number,TaskDigests>>(new Map());
   // 任务产物：taskId -> artifact，由 WS task.artifact 实时更新（跑完自动生成/人改/重建都会推）
   const [artifacts,setArtifacts]=useState<Map<number,TaskArtifact>>(new Map());
