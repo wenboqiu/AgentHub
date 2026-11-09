@@ -52,26 +52,32 @@ const readWidth = () => {
  * 宽屏（桌面）常驻左侧；窄屏（手机 / Android）由对话页头部的「会话列表」按钮打开成抽屉。
  */
 export default function SessionSidebar({ sessions, currentId, attention, now, onSelect, onCollapse, drawer = false }: Props) {
+  // 当前会话固定在刚选中时所在的段：它被自动处理（已读 / 转运行 / 收尾）后状态会变，
+  // 若跟着挪段，会掉进默认折叠的「已处理」或滚出视野，列表里就没有选中项了。切到别的会话才重新归段。
+  const pinRef = useRef<{ id: string; key: Section["key"] } | null>(null);
   const sections = useMemo<Section[]>(() => {
-    const pending: Session[] = [];
-    const running: Session[] = [];
-    const rest: Session[] = [];
-    const internal: Session[] = [];
-    for (const s of sessions) {
+    const classify = (s: Session): Section["key"] => {
       // 内部会话（角色助手 / 意见细化）先挑走：它们的首条消息是契约提示词，混在「待处理」里只会让人误点
-      if (isInternalSession(s)) internal.push(s);
-      else if (attention.has(s.id)) pending.push(s);
-      else if (s.state === "running") running.push(s);
-      else rest.push(s);
+      if (isInternalSession(s)) return "internal";
+      if (attention.has(s.id)) return "pending";
+      if (s.state === "running") return "running";
+      return "rest";
+    };
+    const cur = currentId ? sessions.find((s) => s.id === currentId) : undefined;
+    if (cur && pinRef.current?.id !== cur.id) pinRef.current = { id: cur.id, key: classify(cur) };
+    const pinned = cur ? pinRef.current : null;
+    const buckets: Record<Section["key"], Session[]> = { pending: [], running: [], rest: [], internal: [] };
+    for (const s of sessions) {
+      buckets[pinned && s.id === pinned.id ? pinned.key : classify(s)].push(s);
     }
     const all: Section[] = [
-      { key: "pending", label: "待处理", hint: "等你处理", items: pending },
-      { key: "running", label: "进行中", hint: "在跑", items: running },
-      { key: "rest", label: "已处理", hint: "历史", items: rest },
-      { key: "internal", label: "内部会话", hint: "AgentHub 自己开的", items: internal },
+      { key: "pending", label: "待处理", hint: "等你处理", items: buckets.pending },
+      { key: "running", label: "进行中", hint: "在跑", items: buckets.running },
+      { key: "rest", label: "已处理", hint: "历史", items: buckets.rest },
+      { key: "internal", label: "内部会话", hint: "AgentHub 自己开的", items: buckets.internal },
     ];
     return all.filter((g) => g.items.length > 0);
-  }, [sessions, attention]);
+  }, [sessions, attention, currentId]);
 
   // 折叠状态记在本机，下次进来保持一致；没记录过的按默认（已处理、内部会话收起）
   const [openMap, setOpenMap] = useState<Record<string, boolean>>(() => {
