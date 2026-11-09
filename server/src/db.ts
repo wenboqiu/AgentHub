@@ -759,9 +759,9 @@ export function historyTimes(items: { at: number | null; sourceId: string | null
   return out
 }
 
-export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string; at?: string } & MessageMeta)[]): Promise<Message[]> {
+export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string; at?: string; images?: string[] } & MessageMeta)[]): Promise<Message[]> {
   const snapshot = items
-    .map(it => ({ role: it.role, text: cleanText(it.text, MESSAGE_TEXT_MAX), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null }))
+    .map(it => ({ role: it.role, text: cleanText(it.text, MESSAGE_TEXT_MAX), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null, images: historyImageJson(it.images) }))
     .filter(it => it.text)
     .slice(-KEEP_MESSAGES)
   const client = await pool.connect()
@@ -815,9 +815,9 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
     const times = historyTimes(deduped, prevTimes, base.rows[0].t.getTime())
     for (let i = 0; i < deduped.length; i++) {
       await client.query(
-        `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
-         VALUES ($1, $2, null, $3, $4, $6, $7, $5::timestamptz)`,
-        [userId, sessionId, deduped[i].role, deduped[i].text, new Date(times[i]), deduped[i].sourceId, deduped[i].branchPoint],
+        `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, images, created_at)
+         VALUES ($1, $2, null, $3, $4, $6, $7, $8, $5::timestamptz)`,
+        [userId, sessionId, deduped[i].role, deduped[i].text, new Date(times[i]), deduped[i].sourceId, deduped[i].branchPoint, deduped[i].images ? JSON.stringify(deduped[i].images) : null],
       )
     }
     // 活动计数按当前消息重算：历史是整体替换的，按增量累计会重复入账
@@ -922,6 +922,13 @@ export async function appendEventMessages(
 
 export function nativeKey(value: unknown): string | null {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null
+}
+
+/** 历史快照里的图片落库前收一遍：只收 data URL（jsonb 里存超大串没意义），上限 8MB/张 */
+function historyImageJson(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null
+  const out = raw.filter((u): u is string => typeof u === 'string' && u.startsWith('data:image/') && u.length <= 8_000_000)
+  return out.length ? out : null
 }
 export async function getMessage(pool: pg.Pool,userId:number,sessionId:string,id:number):Promise<Message|null> {
   const r=await pool.query<MessageRow>('SELECT m.*,f.rating FROM messages m LEFT JOIN message_feedback f ON f.user_id=m.user_id AND f.session_id=m.session_id AND f.source_id=m.source_id WHERE m.user_id=$1 AND m.session_id=$2 AND m.id=$3',[userId,sessionId,id])

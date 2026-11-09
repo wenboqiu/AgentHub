@@ -24,6 +24,9 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
 const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 const HISTORY_COUNT: usize = 50;
+/// Codex rollout 整读的上限。图像生成技能会把成品图以 base64 整段写进行里（一行可达数 MB），
+/// 按字节截尾会把几乎全部对话截掉、只余最后一条回复，所以这里必须整读而不是 4MB 窗口。
+const CODEX_ROLLOUT_MAX: u64 = 512 * 1024 * 1024;
 const TEXT_MAX: usize = 16000;
 /// 「正在做什么」那行只显示尾巴：思考原文截到 200 字，也不往 WS 上传大段文字
 const ACTIVITY_MAX: usize = 200;
@@ -848,6 +851,13 @@ pub fn codex_event(method: &str, params: &Value) -> Option<CodexEvent> {
                     (!t.trim().is_empty()).then(|| CodexEvent::Agent(t.to_string()))
                 }
                 "commandExecution" => item.get("command").and_then(|c| c.as_str()).map(|c| CodexEvent::Command(c.to_string())),
+                // 新版 Codex 把扩展工具（图像生成等）都归到 type:"Extension"，按 kind 区分；
+                // image_gen.generation 完成后 savedPath 是本机文件路径
+                "Extension" => match item.get("kind").and_then(|k| k.as_str()) {
+                    Some("image_gen.generation") => item.get("savedPath").and_then(|p| p.as_str()).filter(|_| item.get("failure").is_none()).map(|p| CodexEvent::Image(p.to_string())),
+                    _ => None,
+                },
+                // 老版协议的图片事件，留着兼容旧 codex.exe
                 // 生成失败（没有 savedPath / 带 failure）不算图片事件
                 "imageGeneration" => item.get("savedPath").and_then(|p| p.as_str()).filter(|_| item.get("failure").is_none()).map(|p| CodexEvent::Image(p.to_string())),
                 "imageView" => item.get("path").and_then(|p| p.as_str()).map(|p| CodexEvent::Image(p.to_string())),
@@ -1180,7 +1190,7 @@ pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<crate::mess
         }
         "codex" => {
             let p = find_codex_rollout(&home.join(".codex").join("sessions"), key).ok_or("没找到这个会话的本地记录")?;
-            let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
+            let text = read_tail(&p, CODEX_ROLLOUT_MAX).map_err(|e| format!("读取失败：{e}"))?;
             Ok(crate::message_history::parse("codex", &text, HISTORY_COUNT))
         }
         "zcode" => crate::zcode_exec::history(key, HISTORY_COUNT).ok_or("没找到这个会话的本地记录".into()),
@@ -3629,6 +3639,14 @@ mod tests {
         let p = json!({"item":{"type":"commandExecution","command":"ls"}});
         assert_eq!(codex_event("item/completed", &p), Some(CodexEvent::Command("ls".into())));
         assert_eq!(codex_event("item/completed", &json!({"item":{"type":"reasoning"}})), None);
+        // 新版协议：图片生成是 Extension 事件
+        let ext = json!({"item":{"type":"Extension","kind":"image_gen.generation","status":"completed","savedPath":"C:/tmp/a.png"}});
+        assert_eq!(codex_event("item/completed", &ext), Some(CodexEvent::Image("C:/tmp/a.png".into())));
+        // 失败的生成不算图片
+        let mut failed = ext.clone(); failed["item"]["failure"] = json!("boom");
+        assert_eq!(codex_event("item/completed", &failed), None);
+        // 其它 Extension（web.search / clock.sleep）不是图片
+        assert_eq!(codex_event("item/completed", &json!({"item":{"type":"Extension","kind":"web.search"}})), None);
         assert_eq!(codex_event("turn/started", &json!({"turn":{"id":"t9"}})), Some(CodexEvent::TurnStarted("t9".into())));
         assert_eq!(codex_event("turn/completed", &json!({"turn":{"id":"t9","status":"completed"}})), Some(CodexEvent::TurnDone { status: "completed".into() }));
         assert_eq!(codex_event("turn/completed", &json!({"turn":{"status":"interrupted"}})), Some(CodexEvent::TurnDone { status: "interrupted".into() }));

@@ -15,6 +15,10 @@ pub struct HistoryMessage {
     /// 没有它，整段历史会被挤到同一瞬间，日历里每个会话的时长就都变成 5 分钟。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
+    /// 消息附图（data URL）：Codex 的生成图在 rollout 里只有 base64，用户附图只有本地路径，
+    /// 都在解析时转成 data URL 挂上来。空 vec 序列化时省略，老服务端不认识也不报错。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
 }
 
 fn key(v: &Value) -> Option<String> { v.as_str().filter(|s| valid_key(s)).map(String::from) }
@@ -47,6 +51,68 @@ pub fn claude_human_input(row: &Value) -> bool {
         Some("peer") => origin["from"].as_str() == Some("AgentHub"),
         _ => false,
     }
+}
+
+/// 历史同步一次最多带的图片总量。生成图是完整 base64（单张可达 4MB），
+/// 不设上限的话一次同步会拖着几十 MB 走 WS，超时还挤占带宽。
+const HISTORY_IMAGE_BUDGET: usize = 48 * 1024 * 1024;
+
+fn push_image(budget: &mut usize, out: &mut Vec<String>, url: String) {
+    if url.len() > *budget {
+        return;
+    }
+    *budget -= url.len();
+    out.push(url);
+}
+
+/// 从 Codex 的图片部件里收集图片：
+/// - `image_url` 是 data URL 的直接收下（图像生成技能把成品图整段写进工具输出）；
+/// - 本地路径的读文件转 data URL，文件已经不在（临时目录被清）就跳过。
+fn collect_images(parts: &Value, out: &mut Vec<String>, budget: &mut usize) {
+    let Some(arr) = parts.as_array() else { return };
+    for p in arr {
+        if p["type"].as_str() != Some("input_image") {
+            continue;
+        }
+        let url = p["image_url"].as_str().unwrap_or("");
+        if url.is_empty() {
+            continue;
+        }
+        if let Some(u) = url.strip_prefix("data:image/") {
+            push_image(budget, out, format!("data:image/{u}"));
+        } else {
+            let path = url.strip_prefix("file://").unwrap_or(url);
+            if let Some(u) = crate::runner::image_data_url(path) {
+                push_image(budget, out, u);
+            }
+        }
+    }
+}
+
+/// 剥用户正文里的 `<image name=… path="C:\…">…</image>` 标签（Codex 记录用户附图的方式，
+/// 正文里就是这种行内标签），返回剥干净的正文与标签里记下的本地文件路径。
+fn strip_codex_image_tags(body: &str) -> (String, Vec<String>) {
+    if !body.contains("<image ") {
+        return (body.to_owned(), Vec::new());
+    }
+    let mut clean = String::with_capacity(body.len());
+    let mut paths = Vec::new();
+    let mut rest = body;
+    while let Some(start) = rest.find("<image ") {
+        clean.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let Some(end) = after.find("</image>") else { break };
+        let tag = &after[..end];
+        if let Some(i) = tag.find("path=\"") {
+            let tail = &tag[i + "path=\"".len()..];
+            if let Some(j) = tail.find('"') {
+                paths.push(tail[..j].to_owned());
+            }
+        }
+        rest = &after[end + "</image>".len()..];
+    }
+    clean.push_str(rest);
+    (clean, paths)
 }
 
 /// 只剥「开头」那几段注入块：`<system-reminder …>…</system-reminder>` 可能叠好几层。
@@ -83,18 +149,28 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
     let mut messages: Vec<HistoryMessage> = Vec::new();
     let mut turn: Option<String> = None;
     let mut final_index: Option<usize> = None;
+    // 等着挂到下一条消息上的图片：工具吐出的生成图、当前用户消息剥出来的附图
+    let mut pending_images: Vec<String> = Vec::new();
+    let mut image_budget: usize = HISTORY_IMAGE_BUDGET;
     for line in data.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if agent == "codex" && v["type"] == "event_msg" {
             let p = &v["payload"];
-            if p["type"] == "task_started" { turn = key(&p["turn_id"]); final_index = None; }
+            if p["type"] == "task_started" { turn = key(&p["turn_id"]); final_index = None; pending_images.clear(); }
             if p["type"] == "task_complete" {
                 if let (Some(index), Some(id)) = (final_index.take(), key(&p["turn_id"]).filter(|id| Some(id) == turn.as_ref())) {
                     messages[index].branch_point = Some(id);
                 }
                 turn = None;
+                pending_images.clear();
             }
-            if p["type"] == "turn_aborted" { final_index = None; turn = None; }
+            if p["type"] == "turn_aborted" { final_index = None; turn = None; pending_images.clear(); }
+            continue;
+        }
+        // 图像生成技能的成品图（base64 data URL）整段躺在工具输出里：收下来，
+        // 挂到紧随其后的那条助手消息上；回合结束还没人认领就作废
+        if agent == "codex" && v["type"] == "response_item" && v["payload"]["type"] == "custom_tool_call_output" {
+            collect_images(&v["payload"]["output"], &mut pending_images, &mut image_budget);
             continue;
         }
         let (role, content, source, branch) = if agent == "claude" {
@@ -132,6 +208,17 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
                         None => continue,
                     }
                 }
+                // 附图以 <image … path="…">…</image> 行内标签记录：转成 data URL 挂到本条消息，
+                // 标签本身从正文剥掉（不剥的话正文里残留一串标签，也没法从历史里看到图）
+                let (clean, paths) = strip_codex_image_tags(&body);
+                for path in &paths {
+                    if let Some(url) = crate::runner::image_data_url(path) {
+                        push_image(&mut image_budget, &mut pending_images, url);
+                    }
+                }
+                if !paths.is_empty() {
+                    body = clean.trim_end().to_owned();
+                }
             }
             (role, body, key(&p["id"]), None)
         };
@@ -139,7 +226,7 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
         if agent == "codex" && role == "assistant" && v["payload"]["phase"] == "final_answer" && turn.is_some() {
             final_index = Some(messages.len());
         }
-        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: source, branch_point: branch, at: at(&v) });
+        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: source, branch_point: branch, at: at(&v), images: std::mem::take(&mut pending_images) });
     }
     let n = messages.len().saturating_sub(limit);
     messages.drain(..n);
@@ -169,7 +256,7 @@ fn parse_workbuddy(data: &str, limit: usize) -> Vec<HistoryMessage> {
             if content.trim_start().starts_with('<') { continue; }
         }
         if content.trim().is_empty() { continue; }
-        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: None, branch_point: None, at: at(&v) });
+        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: None, branch_point: None, at: at(&v), images: Vec::new() });
     }
     let n = messages.len().saturating_sub(limit);
     messages.drain(..n);
@@ -339,5 +426,55 @@ mod tests {
         assert_eq!(messages[0].branch_point.as_deref(),Some("t1"));
         assert!(messages[1].branch_point.is_none());
         assert_eq!(parse("codex",data,1)[0].source_id.as_deref(),Some("m2"));
+    }
+
+    const IMG: &str = "data:image/png;base64,iVBORw0KGgo=";
+
+    #[test]
+    fn codex_generated_images_ride_on_the_next_assistant_message() {
+        let data = format!(
+            r#"{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t1"}}}}
+{{"type":"response_item","payload":{{"type":"message","id":"m1","role":"user","content":[{{"type":"input_text","text":"画一张图"}}]}}}}
+{{"type":"response_item","payload":{{"type":"custom_tool_call_output","id":"ct1","output":[{{"type":"input_text","text":"Script completed"}},{{"type":"input_image","image_url":"{IMG}"}}]}}}}
+{{"type":"response_item","payload":{{"type":"message","id":"m2","role":"assistant","phase":"final_answer","content":[{{"type":"output_text","text":"画好了"}}]}}}}
+{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"t1"}}}}
+{{"type":"event_msg","payload":{{"type":"task_started","turn_id":"t2"}}}}
+{{"type":"response_item","payload":{{"type":"message","id":"m3","role":"assistant","phase":"final_answer","content":[{{"type":"output_text","text":"新回合"}}]}}}}"#
+        );
+        let messages = parse("codex", &data, 50);
+        assert_eq!(messages.len(), 3);
+        // 成品图挂在紧随其后的助手消息上
+        assert_eq!(messages[1].text, "画好了");
+        assert_eq!(messages[1].images, vec![IMG]);
+        // 上一回合的图不外溢：新回合的消息不带图
+        assert!(messages[2].images.is_empty());
+        assert!(messages[0].images.is_empty());
+    }
+
+    #[test]
+    fn codex_user_image_tags_are_stripped_from_text() {
+        // 文件不存在时图转不出来，但标签必须从正文剥掉，人打的话要留下
+        let body = "这个是参考脸部和衣服，出一张立绘\n\n<image name=[Image #1] path=\"C:\\\\Temp\\\\a.png\">\n\n</image>";
+        let row = serde_json::json!({
+            "type":"response_item","payload":{"type":"message","id":"m1","role":"user",
+                "content":[{"type":"input_text","text":body}]}
+        }).to_string();
+        let messages = parse("codex", &row, 50);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "这个是参考脸部和衣服，出一张立绘");
+        assert!(messages[0].images.is_empty());
+    }
+
+    #[test]
+    fn image_budget_stops_the_flood() {
+        // 预算耗尽后不再收集：单张超限的直接丢，后续的也丢，但不能 panic
+        let big = format!("data:image/png;base64,{}", "A".repeat(64));
+        let mut out = Vec::new();
+        let mut budget = 32;
+        collect_images(&serde_json::json!([{"type":"input_image","image_url":big}]), &mut out, &mut budget);
+        assert!(out.is_empty());
+        let small = format!("data:image/png;base64,{}", "B".repeat(8));
+        collect_images(&serde_json::json!([{"type":"input_image","image_url":small},{"type":"input_image","image_url":small}]), &mut out, &mut budget);
+        assert_eq!(out.len(), 1);
     }
 }

@@ -365,6 +365,7 @@ pub fn history(id: &str, limit: usize) -> Option<Vec<crate::message_history::His
             source_id: None,
             branch_point: None,
             at,
+            images: Vec::new(),
         });
     }
     if out.len() > limit {
