@@ -958,7 +958,7 @@ export async function restoreProposal(db: DB, userId: number, id: number): Promi
 export function proposalPatch(raw: unknown): Record<string, unknown> {
   const b = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
   const out: Record<string, unknown> = {}
-  for (const key of ['title', 'notes', 'checklist', 'priority', 'roleId', 'projectId'] as const) {
+  for (const key of ['title', 'notes', 'checklist', 'priority', 'roleId', 'projectId', 'constraints'] as const) {
     if (key in b) out[key] = b[key]
   }
   return out

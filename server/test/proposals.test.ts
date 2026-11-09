@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
+import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, proposalPatch, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
 import { DEFAULT_MANAGER, pickCandidates, quota } from '../src/dispatch-manager.ts'
 import type { Task } from '../src/tasks.ts'
 
@@ -267,4 +267,11 @@ test('ticketMessage：带上工单原话、项目与角色清单，没写正文�
   assert.match(msg, /电脑 DESKTOP-01/)
   // 契约必须先出现：模型先看到格式要求，再看材料
   assert.ok(msg.indexOf('JSON') < msg.indexOf('【人发来的工单】'))
+})
+
+test('proposalPatch：保留执行边界，丢掉白名单外的键', () => {
+  const c = { paths: ['src'], net: false, push: false, scripts: false, note: '' }
+  const out = proposalPatch({ constraints: c, title: 'x', foo: 1 })
+  assert.deepEqual(out, { constraints: c, title: 'x' })
+  assert.ok(!('foo' in out))
 })
