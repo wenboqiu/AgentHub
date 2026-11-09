@@ -74,7 +74,7 @@ export const NO_CONSTRAINTS: TaskConstraints = { paths: [], net: false, push: fa
  * 规则表版本：判定逻辑（DANGEROUS / SENSITIVE / 各命令分类）有实质变化时必须手动递增。
  * 签署 Mandate 时写进快照，事后才能回答「当时按哪一版规则判的」。
  */
-export const RULESET_VERSION = 'referee-2026-11'
+export const RULESET_VERSION = 'referee-2026-11b'
 
 /**
  * 冻结进 Mandate 的完整授权范围：在任务边界之上多了命令类、CLI 工具白名单、最长运行时间。
@@ -227,7 +227,9 @@ const DANGEROUS: [RegExp, string][] = [
   [/\bwget\b[^|]*\|\s*(ba|z)?sh\b/i, '下载即执行'],
   [/\bsudo\b|\bdoas\b/i, '提权'],
   [/\b(chmod|chown)\s+(-R\s+)?(777|000)/i, '放开权限'],
-  [/\b(shutdown|reboot|halt|mkfs|diskpart|format)\b/i, '系统级操作'],
+  [/\b(shutdown|reboot|halt|mkfs|diskpart)\b/i, '系统级操作'],
+  // Windows 格式化磁盘：只认「format 盘符」，别误伤 dart format / npm run format
+  [/\bformat(\.com)?\s+[a-zA-Z]:/i, '格式化磁盘'],
   [/>\s*\/dev\/(sd|nvme|disk)/i, '写裸设备'],
   [/\b(base64|openssl)\b[^|]*-d[^|]*\|\s*(ba)?sh/i, '解码执行'],
 ]
@@ -375,6 +377,93 @@ function gitSub(args: string[]): string {
   return (args[i] ?? '').toLowerCase()
 }
 
+const FLUTTER_TESTS = new Set(['test', 'analyze', 'build', 'format', 'fix', 'doctor', 'devices', 'run', 'clean', '--version'])
+const PUB_READ = new Set(['outdated', 'deps', '--version'])
+const PUB_NET = new Set(['get', 'upgrade', 'add', 'downgrade', 'cache'])
+/** adb shell 里只看不改的命令 */
+const ADB_SHELL_READ = new Set(['getprop', 'dumpsys', 'ps', 'top', 'ls', 'cat', 'id', 'df', 'wm', 'date'])
+const DOCKER_READ = new Set(['ps', 'logs', 'images', 'inspect', 'stats', 'version', 'info', 'top', 'port', 'diff'])
+const COMPOSE_READ = new Set(['ps', 'logs', 'config', 'images', 'ls', 'top', 'version'])
+/** gh 的只读子命令：`gh <组> <动作>` */
+const GH_READ: Record<string, Set<string>> = {
+  pr: new Set(['view', 'list', 'status', 'diff', 'checks']),
+  issue: new Set(['view', 'list', 'status']),
+  run: new Set(['view', 'list', 'watch']),
+  repo: new Set(['view']),
+  release: new Set(['view', 'list']),
+  workflow: new Set(['view', 'list']),
+  auth: new Set(['status']),
+}
+/** gh api 带这些参数就不再是 GET */
+const GH_API_WRITE = /\s(-X|--method|-f|-F|--field|--raw-field|--input)\b/
+
+/**
+ * 日常工具链：Flutter / Dart、adb、docker、gh，以及 sed / awk 的只读写法。
+ * 返回 null = 不归这里管，交给后面的通用规则（sed -i、awk 里调 system 之类仍按「跑脚本」判）。
+ */
+function judgeToolchain(word: string, args: string[], seg: string, policy: RefereePolicy, grants: TaskConstraints): Verdict | null {
+  const sub = (args[1] ?? '').toLowerCase()
+  const tests = (label: string) => policy.allowTests ? allow('tests', `测试/构建：${label}`) : gray('tests-off', '构建测试，但没开测试权限')
+
+  if (word === 'flutter' || word === 'dart') {
+    if (sub === 'pub') {
+      const action = (args[2] ?? '').toLowerCase()
+      if (PUB_READ.has(action)) return allow('read', `查看依赖：${word} pub ${action}`)
+      if (PUB_NET.has(action)) {
+        return grants.net || policy.allowNetwork ? allow('network', `装依赖：${word} pub ${action}`) : gray('network-off', '联网装包，需要人确认')
+      }
+      return unsure('pkg-unknown', `不认识的 pub 子命令：${action || '（空）'}`)
+    }
+    if (FLUTTER_TESTS.has(sub)) return tests(`${word} ${sub}`)
+    return unsure('build-unknown', `不认识的 ${word} 子命令：${sub || '（空）'}`)
+  }
+
+  if (word === 'adb') {
+    // 跳过 -s <serial> / -d / -e 这类设备选择参数
+    let i = 1
+    while (i < args.length && args[i].startsWith('-')) i += args[i] === '-s' ? 2 : 1
+    const action = (args[i] ?? '').toLowerCase()
+    if (['devices', 'logcat', 'version', 'get-state', 'get-serialno', 'wait-for-device'].includes(action)) return allow('read', `查看设备：adb ${action}`)
+    if (action === 'shell') {
+      const inner = (args[i + 1] ?? '').toLowerCase()
+      if (ADB_SHELL_READ.has(inner)) return allow('read', `查看设备：adb shell ${inner}`)
+      if (inner === 'pm' && (args[i + 2] ?? '').toLowerCase() === 'list') return allow('read', '查看设备：adb shell pm list')
+      return gray('device', `在设备上执行：adb shell ${inner || '（交互）'}`)
+    }
+    // 把刚出的包装到测试机上是开发闭环的一步
+    if (action === 'install') return tests('adb install')
+    return gray('device', `改动设备：adb ${action || '（空）'}`)
+  }
+
+  if (word === 'docker') {
+    if (sub === 'compose') {
+      const action = (args[2] ?? '').toLowerCase()
+      return COMPOSE_READ.has(action) ? allow('read', `只读：docker compose ${action}`) : gray('docker', `docker compose ${action || '（空）'} 会改动容器`)
+    }
+    return DOCKER_READ.has(sub) ? allow('read', `只读：docker ${sub}`) : gray('docker', `docker ${sub || '（空）'} 会改动容器或镜像`)
+  }
+
+  if (word === 'gh') {
+    if (sub === 'api') return GH_API_WRITE.test(seg) ? gray('gh-write', 'gh api 写操作') : allow('read', 'gh api 只读请求')
+    const action = (args[2] ?? '').toLowerCase()
+    if (GH_READ[sub]?.has(action)) return allow('read', `只读：gh ${sub} ${action}`)
+    return gray('gh-write', `gh ${sub} ${action}`.trim() + ' 会改动 GitHub 上的内容')
+  }
+
+  // sed 不带 -i、脚本里没有 w（写文件）/ e（执行）命令时只是读
+  if (word === 'sed') {
+    if (args.some(a => a === '-i' || a.startsWith('-i') || a.startsWith('--in-place'))) return null
+    if (/(^|[\s;{}'"])[we]\s+\S/.test(args.slice(1).join(' '))) return null
+    return allow('read', '只读：sed')
+  }
+  // awk 不调 system、不 getline、不在程序里重定向时只是读
+  if (word === 'awk' || word === 'gawk') {
+    if (/system\s*\(|getline|>|\|/.test(seg)) return null
+    return allow('read', `只读：${word}`)
+  }
+  return null
+}
+
 /** 判一段命令。返回 null 表示「只读且安全」 */
 function judgeSegment(seg: string, cwd: string, policy: RefereePolicy, grants: TaskConstraints): Verdict | null {
   // 写入位置越界：不管写什么命令，只要重定向到项目外就交给人
@@ -473,6 +562,9 @@ function judgeSegment(seg: string, cwd: string, policy: RefereePolicy, grants: T
     }
     return unsure('pkg-unknown', `不认识的包管理器子命令：${word} ${sub}`)
   }
+
+  const tool = judgeToolchain(word, args, seg, policy, grants)
+  if (tool) return tool
 
   if (TEST_CMDS.has(word)) {
     return policy.allowTests ? allow('tests', `测试/检查：${word}`) : gray('tests-off', '测试检查，但没开测试权限')
@@ -612,6 +704,9 @@ export function verdictLabel(rule: string): string {
     arbitrary: '执行脚本',
     'unknown-tool': '不熟悉的工具',
     'unknown-cmd': '不认识的命令',
+    device: '改动设备',
+    docker: '改动容器',
+    'gh-write': '改动 GitHub',
   }
   return map[rule] ?? rule
 }
