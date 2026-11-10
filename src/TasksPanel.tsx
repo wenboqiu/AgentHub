@@ -1,6 +1,6 @@
 import { ScheduleSummary } from "./ScheduleFields";
 import { useState, type ReactNode } from "react";
-import type { Api, Approval, BoardEntry, Goal, Project, Proposal, Role, Session, Task } from "./lib/api";
+import type { Api, Approval, BoardEntry, Goal, Project, Proposal, Reminder, Role, Session, Task } from "./lib/api";
 import { PriorityBadge } from "./GoalPriority";
 import { ENTITY_SORTERS, SortBar, type EntitySort } from "./lib/sort";
 import Icon from "./Icon";
@@ -32,7 +32,7 @@ type Act = "issue" | "todo" | "unqueue";
 
 export default function TasksPanel({
   api, board, now, projects, roles, proposals, approvals, sessions, autoDispatch, onRefresh, onNotice, onProposal, onSaved, onOpenSession,
-  tasks, goals, onOpen, onCreate,
+  tasks, goals, onOpen, onCreate, reminders, onOpenGoal, onDismissReminder,
 }: {
   api: Api;
   board: { entries: BoardEntry[]; agents: string[] } | null;
@@ -52,6 +52,10 @@ export default function TasksPanel({
   goals: Goal[];
   onOpen(id: number): void;
   onCreate(title: string): Promise<unknown>;
+  /** 到点没处理的时间提醒（App 已按实体当前日程过滤过）：并进「等你处理」，不再在所有 tab 顶部常驻 */
+  reminders: Reminder[];
+  onOpenGoal(id: number): void;
+  onDismissReminder(id: number): void | Promise<void>;
 }) {
   const [sort, setSort] = useState<EntitySort>("updated");
   const [projectId, setProjectId] = useState(""), [roleId, setRoleId] = useState("");
@@ -78,7 +82,9 @@ export default function TasksPanel({
   const stuckEntries = entries.filter(e => e.stuck && passes(taskById.get(e.taskId)));
   const inboxProposals = proposals.filter(p => p.status === "pending" || justIgnored.includes(p.id));
   const waitingProposals = inboxProposals.filter(p => p.status === "pending").length;
-  const inboxCount = pendingApprovals.length + reviewTasks.length + stuckEntries.length + waitingProposals;
+  // 时间提醒跟着项目 / 角色筛选走：任务按自己的项目角色判断；目标没有项目，只在没筛选时出现
+  const inboxReminders = reminders.filter(r => r.entityType === "task" ? passes(taskById.get(r.entityId)) : !projectId && !roleId);
+  const inboxCount = pendingApprovals.length + inboxReminders.length + reviewTasks.length + stuckEntries.length + waitingProposals;
 
   // ---- 在跑 / 待办 / 已完成 ----
   const liveEntries = entries.filter(e => !e.stuck && e.status !== "review" && passes(taskById.get(e.taskId)));
@@ -158,6 +164,20 @@ export default function TasksPanel({
       <div className="inbox-actions"><button className="primary" onClick={stop(() => onOpen(t.id))}>去验收</button></div>
     </li>
   );
+
+  const reminderRow = (r: Reminder) => {
+    const open = () => (r.entityType === "task" ? onOpen(r.entityId) : onOpenGoal(r.entityId));
+    return (
+      <li key={`m${r.id}`} className="inbox-row clickable" onClick={open}>
+        <span className="kind-chip k-remind">提醒</span>
+        <div className="inbox-main">
+          <strong className="inbox-title">{r.entityType === "task" && <span className="task-no">#{r.entityId} </span>}{r.title}</strong>
+          <span className="dim inbox-sub">{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span>
+        </div>
+        <div className="inbox-actions"><button onClick={stop(() => void onDismissReminder(r.id))}>已处理</button></div>
+      </li>
+    );
+  };
 
   const stuckRow = (e: BoardEntry) => {
     const busy = busyId === `t${e.taskId}`;
@@ -281,9 +301,10 @@ export default function TasksPanel({
 
     <section className="inbox">
       <h2>等你处理 {inboxCount > 0 && <span className="count">{inboxCount}</span>}</h2>
-      {pendingApprovals.length + reviewTasks.length + stuckEntries.length + inboxProposals.length === 0 ? <p className="empty">没有等你处理的事</p> : (
+      {pendingApprovals.length + inboxReminders.length + reviewTasks.length + stuckEntries.length + inboxProposals.length === 0 ? <p className="empty">没有等你处理的事</p> : (
         <ul className="list">
           {pendingApprovals.map(approvalRow)}
+          {inboxReminders.map(reminderRow)}
           {reviewTasks.map(reviewRow)}
           {stuckEntries.map(stuckRow)}
           {inboxProposals.map(proposalRow)}

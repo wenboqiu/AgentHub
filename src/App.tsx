@@ -440,15 +440,15 @@ export default function App() {
   const saveTask=(t:Task)=>setTasks(m=>mergeEntity(m,t,"response"));
   const saveGoal=(g:Goal)=>setGoals(m=>mergeEntity(m,g,"response"));
   const taskList=[...tasks.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
-  // 「任务」页收件箱的件数：待授权 + 待验收 + 卡住 + 待确认的任务单 / 建议
-  const inboxCount = approvals.size + taskList.filter(t=>t.status==="review").length + (board?.entries.filter(e=>e.stuck).length ?? 0) + proposalList.filter(p=>p.status==="pending").length;
-  const goalList=[...goals.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
-
+  // 到点没处理的时间提醒：按实体当前日程过滤（改了时间 / 关了提醒 / 做完了就失效）。显示在「任务」页的「等你处理」里
   const activeReminders = [...reminders.values()].filter(r=>{
     const entity = r.entityType === "task" ? tasks.get(r.entityId) : goals.get(r.entityId);
     return entity && entity.status !== "done" && entity.status !== "archived" &&
       (r.kind === "start" ? entity.remindStart && entity.startAt === r.scheduledAt : entity.remindDue && entity.dueAt === r.scheduledAt);
   });
+  // 「任务」页收件箱的件数：待授权 + 时间提醒 + 待验收 + 卡住 + 待确认的任务单 / 建议
+  const inboxCount = approvals.size + activeReminders.length + taskList.filter(t=>t.status==="review").length + (board?.entries.filter(e=>e.stuck).length ?? 0) + proposalList.filter(p=>p.status==="pending").length;
+  const goalList=[...goals.values()].sort((a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt));
   const dismissReminder = async (id:number) => {
     try { await api?.ackReminder(id);setReminders(m=>{const n=new Map(m);n.delete(id);return n;}); }
     catch(e) { say(e instanceof Error ? e.message : String(e)); }
@@ -568,8 +568,7 @@ export default function App() {
       </header>
       {toast && <div className="toast" role="status">{toast}</div>}
       <main>
-        {activeReminders.length > 0 && <section className="reminder-list" aria-label="时间提醒"><h2>时间提醒（{activeReminders.length}）</h2><ul className="list">{activeReminders.map(r=><li key={r.id} className="reminder-row"><button className="entity-row" onClick={()=>r.entityType === "task" ? openTask(r.entityId) : openGoal(r.entityId)}><span className="entity-main"><strong>{r.title}</strong><span>{r.entityType === "task" ? "任务" : "目标"} · {r.kind === "start" ? "开始时间到了" : "已到截止时间"} · {new Date(r.scheduledAt).toLocaleString()}</span></span></button><button onClick={()=>void dismissReminder(r.id)}>已处理</button></li>)}</ul></section>}
-        <div hidden={tab!=="tasks"}>{api && <TasksPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={proposalList} approvals={[...approvals.values()]} sessions={list} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onNotice={say} onProposal={saveProposal} onSaved={saveTask} onOpenSession={openSession} tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
+        <div hidden={tab!=="tasks"}>{api && <TasksPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={proposalList} approvals={[...approvals.values()]} sessions={list} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onNotice={say} onProposal={saveProposal} onSaved={saveTask} onOpenSession={openSession} tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))} reminders={activeReminders} onOpenGoal={openGoal} onDismissReminder={dismissReminder}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
         <div hidden={tab!=="stats"}>{api && <StatsView api={api} active={tab==="stats"}/>}</div>
