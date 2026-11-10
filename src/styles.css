@@ -881,6 +881,12 @@ header h1 { white-space: nowrap; }
 .proposal-suggest-title { font-size: 14px; line-height: 1.4; font-weight: 600; overflow-wrap: anywhere; }
 .proposal-suggest-who { font-size: 12px; white-space: nowrap; }
 .proposal-suggest .btns { margin: 0; flex: none; }
+.proposal-suggest-detail { flex-basis: 100%; padding-top: 10px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.7; }
+.proposal-suggest-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.proposal-suggest-detail ul { margin: 8px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+/* 任务单里随内容长高的输入框：不出内部滚动条，全文直接摊开 */
+.auto-text { resize: none; overflow: hidden; }
+.auto-text.single { font-size: 17px; font-weight: 650; line-height: 1.4; }
 .proposal-evidence { margin: 4px 0 10px; }
 .proposal-evidence ul { margin: 8px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.6; }
 .proposal-verdict { margin: 14px 0 4px; padding: 10px 14px; border-radius: 12px; background: var(--ok-bg); color: var(--ok); font-size: 13px; }

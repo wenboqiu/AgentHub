@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
 import BoundsEditor from "./BoundsEditor";
 import type { Api, Delivery, Project, Proposal, ProposalInput, Role, Task, TaskConstraints } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
@@ -23,6 +23,33 @@ const KIND_LABEL: Record<Proposal["kind"], string> = {
 const PRIORITY_LABEL: Record<Task["priority"], string> = { high: "高", medium: "中", low: "低" };
 
 type Form = { title: string; notes: string; checklist: string; priority: Task["priority"]; roleId: string; projectId: string; delivery: Delivery; constraints: TaskConstraints };
+
+// 随内容长高的输入框：任务单的标题、清单、说明经常很长，固定行数会把后半截藏起来。
+// single=true 当单行用（标题）：回车不换行，粘进来的换行折成空格，但长了照样折行显示全文。
+function AutoText({ value, onChange, single, minRows = 1, ...rest }: {
+  value: string; onChange(v: string): void; single?: boolean; minRows?: number;
+} & Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange" | "rows">) {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  const fit = () => {
+    const el = ref.current;
+    // 收在 <details> 里没展开时量不到高度，等展开（onToggle）再量
+    if (!el || !el.offsetParent) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight + el.offsetHeight - el.clientHeight}px`;
+  };
+  useLayoutEffect(fit, [value]);
+  useEffect(() => {
+    const details = ref.current?.closest("details");
+    window.addEventListener("resize", fit);
+    details?.addEventListener("toggle", fit);
+    return () => { window.removeEventListener("resize", fit); details?.removeEventListener("toggle", fit); };
+  }, []);
+  return (
+    <textarea ref={ref} rows={minRows} value={value} className={single ? "auto-text single" : "auto-text"} {...rest}
+      onKeyDown={single ? e => { if (e.key === "Enter") e.preventDefault(); } : undefined}
+      onChange={e => onChange(single ? e.target.value.replace(/\s*\n\s*/g, " ") : e.target.value)} />
+  );
+}
 
 const toForm = (p: Proposal): Form => ({
   title: p.title,
@@ -66,6 +93,7 @@ export default function ProposalCard({
   const [drafting, setDrafting] = useState(false);
   // 「谁来做」的详细配置默认收起，只露一行摘要；菜单同理
   const [whoOpen, setWhoOpen] = useState(false), [menuOpen, setMenuOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
   // 发单没有原会话：不显示「从哪开始」，也不自称来自某个会话
   const isTicket = proposal.kind === "ticket";
@@ -141,6 +169,7 @@ export default function ProposalCard({
   // 会话跑完先让人看「做什么 · 谁来做」，不用对着整张表单做阅读理解。
   // 点「生成任务单」才展开全文——这一步才是「确认要做这件事」。
   if (proposal.stage === "suggest") {
+    const hasDetail = !!proposal.notes || proposal.checklist.length > 0 || proposal.evidence.length > 0 || !!proposal.note;
     const who = proposal.assignee.roleName
       ? `${proposal.assignee.roleName}${agent ? ` · ${AGENT_LABEL[agent] ?? agent}` : ""}`
       : "执行人待定";
@@ -152,11 +181,31 @@ export default function ProposalCard({
           <span className="dim proposal-suggest-who">{who}</span>
         </div>
         <div className="btns">
+          {hasDetail && (
+            <button className="ghost" aria-expanded={detailOpen} onClick={() => setDetailOpen(v => !v)}>
+              {detailOpen ? "收起" : "看详情"}
+            </button>
+          )}
           <button className="primary" disabled={busy || drafting} onClick={() => void makeDraft()}>
             {drafting ? "正在生成…" : "生成任务单"}
           </button>
           <button className="ghost" disabled={busy || drafting} onClick={() => void discard()}>不用了</button>
         </div>
+        {/* 一行标题常常不够下判断（尤其兜底稿的标题只是占位），详情就地展开，不必先生成任务单 */}
+        {detailOpen && (
+          <div className="proposal-suggest-detail">
+            {proposal.notes && <div className="proposal-suggest-notes">{proposal.notes}</div>}
+            {proposal.checklist.length > 0 && (
+              <ul>{proposal.checklist.map((c, i) => <li key={i}>{c}</li>)}</ul>
+            )}
+            {proposal.evidence.length > 0 && (
+              <ul className="dim">
+                {proposal.evidence.slice(0, 8).map((e, i) => <li key={i}>{e.label}：{e.value.slice(0, 160)}</li>)}
+              </ul>
+            )}
+            {proposal.note && <p className="hint">{proposal.note}</p>}
+          </div>
+        )}
       </div>
     );
   }
@@ -200,8 +249,8 @@ export default function ProposalCard({
       </div>
 
       <label className="proposal-what">要做什么
-        <input value={form.title} maxLength={200} disabled={busy}
-          onChange={e => set({ title: e.target.value })} />
+        <AutoText single value={form.title} maxLength={200} disabled={busy}
+          onChange={v => set({ title: v })} />
       </label>
 
       <div className="who-line">
@@ -255,15 +304,15 @@ export default function ProposalCard({
       )}
 
       <label>怎么算完（一行一条，每条会变成验收检查项）
-        <textarea value={form.checklist} rows={3} maxLength={2000} disabled={busy} placeholder="留空就不带检查项"
-          onChange={e => set({ checklist: e.target.value })} />
+        <AutoText value={form.checklist} minRows={3} maxLength={2000} disabled={busy} placeholder="留空就不带检查项"
+          onChange={v => set({ checklist: v })} />
       </label>
 
       <details className="proposal-more">
         <summary>{`更多：说明 · 优先级 · 执行边界${proposal.evidence.length ? ` · 证据 ${proposal.evidence.length} 条` : ""}`}</summary>
         <label>背景与验证方式
-          <textarea value={form.notes} rows={4} maxLength={4000} disabled={busy}
-            onChange={e => set({ notes: e.target.value })} />
+          <AutoText value={form.notes} minRows={4} maxLength={4000} disabled={busy}
+            onChange={v => set({ notes: v })} />
         </label>
         <label>优先级
           <select value={form.priority} disabled={busy} onChange={e => set({ priority: e.target.value as Task["priority"] })}>
