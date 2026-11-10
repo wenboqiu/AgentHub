@@ -11,7 +11,7 @@ pub const SCRIPT_NAME: &str = "agenthub-report.sh";
 const SCRIPT: &str = include_str!("../resources/agenthub-report.sh");
 const NOTIFY_MATCHER: &str = "permission_prompt|agent_needs_input|elicitation_dialog";
 const NOTIFY_TYPES: [&str; 3] = ["permission_prompt", "agent_needs_input", "elicitation_dialog"];
-const EVENTS: [&str; 5] = ["SessionStart", "UserPromptSubmit", "Notification", "Stop", "SessionEnd"];
+const EVENTS: [&str; 6] = ["SessionStart", "UserPromptSubmit", "Notification", "PermissionRequest", "Stop", "SessionEnd"];
 const TAIL_BYTES: u64 = 256 * 1024;
 /// 活动桶回看窗口：hook 每次触发都重扫一遍，服务端对同一桶取 GREATEST，重复上报幂等
 const ACTIVITY_WINDOW_MS: i64 = 90 * 60_000;
@@ -124,6 +124,21 @@ fn read_tail(path: &Path) -> Option<String> {
     Some(text)
 }
 
+/// 「Bash：git commit …」这样的一句话：工具名 + 命令 / 文件 / 提问
+fn permission_summary(v: &Value) -> Option<String> {
+    let tool = str_field(v, "tool_name")?;
+    let input = v.get("tool_input");
+    let detail = ["command", "file_path", "url", "pattern"]
+        .iter()
+        .find_map(|k| input.and_then(|i| i.get(*k)).and_then(Value::as_str))
+        .or_else(|| input.and_then(|i| i.pointer("/questions/0/question")).and_then(Value::as_str));
+    let text = match detail {
+        Some(d) => format!("{tool}：{}", one_line(d, 200)),
+        None => format!("{tool} 需要确认"),
+    };
+    Some(truncate_chars(&text, 300))
+}
+
 pub fn hook_to_event(v: &Value, pid: Option<u32>) -> Option<Event> {
     let session_id = str_field(v, "session_id")?.to_string();
     let name = str_field(v, "hook_event_name")?;
@@ -157,6 +172,11 @@ pub fn hook_to_event(v: &Value, pid: Option<u32>) -> Option<Event> {
             }
             ev.state = "waiting".into();
             ev.summary = str_field(v, "message").map(|m| truncate_chars(m, 300));
+        }
+        // PreToolUse 的 ask、AskUserQuestion 等弹窗不一定触发 Notification，权限对话框出现时由这里接
+        "PermissionRequest" => {
+            ev.state = "waiting".into();
+            ev.summary = permission_summary(v);
         }
         "Stop" => {
             let tail = str_field(v, "transcript_path").and_then(|p| read_tail(Path::new(p)));
@@ -365,6 +385,9 @@ mod tests {
 
         let e = hook_to_event(&base("Notification", r#","notification_type":"permission_prompt","message":"要运行 rm""#), None).unwrap();
         assert_eq!((e.state.as_str(), e.summary.as_deref()), ("waiting", Some("要运行 rm")));
+
+        let e = hook_to_event(&base("PermissionRequest", r#","tool_name":"Bash","tool_input":{"command":"git commit -m x"}"#), None).unwrap();
+        assert_eq!((e.state.as_str(), e.summary.as_deref()), ("waiting", Some("Bash：git commit -m x")));
 
         let e = hook_to_event(&base("Stop", r#","last_assistant_message":"做完了""#), None).unwrap();
         assert_eq!((e.state.as_str(), e.summary.as_deref()), ("done", Some("做完了")));
