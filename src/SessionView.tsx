@@ -8,6 +8,7 @@ import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import AgentAvatar from "./AgentAvatar";
+import { foldRepeats } from "./lib/foldRepeats";
 import SessionSidebar from "./SessionSidebar";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
@@ -596,13 +597,14 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           <p className="empty">读不到豆包窗口：{doubaoErr}</p>
         )}
         <ul className="msgs">
-          {messages.map((m) => (
+          {foldRepeats(messages).map(({ m, count }) => (
             <li key={m.id} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
               {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
               <div className={`msg ${m.role}`}>
                 {/* 人和 agent 的话都按 markdown 渲染（都会贴表格、代码、路径）；
                     tool / system 行还是原文，终端输出里的符号不能被当成格式 */}
                 {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} lenient={session.agent === "codex"} onFile={openFile} /> : m.text}
+                {count > 1 && <span className="msg-repeat" title={`同一条连续出现了 ${count} 次（旧版本重复记录），已折叠`}>×{count}</span>}
                 {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>

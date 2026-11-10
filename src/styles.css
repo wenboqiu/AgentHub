@@ -329,6 +329,7 @@ body.sidebar-resizing { user-select: none; -webkit-user-select: none; }
 .msg.tool, .msg.system { align-self: flex-start; max-width: 100%; background: transparent; padding: 0 4px; font-size: 12px; color: var(--dim); }
 .msg.tool { font-family: ui-monospace, Consolas, monospace; }
 .msg.approval { align-self: stretch; max-width: 100%; background: var(--alert-bg); color: var(--alert); font-size: 14px; }
+.msg-repeat { display: inline-block; margin-left: 8px; padding: 0 6px; border-radius: 8px; font-size: 12px; line-height: 18px; background: var(--card); color: var(--dim); white-space: nowrap; }
 /* 对话流 markdown 渲染的通用样式统一放在文件末尾（.md），这里只留气泡适配 */
 /* 用户气泡是反色底（accent + on-accent）：markdown 里的链接/代码/表格不能再用页面主色，
    否则在自己的气泡里看不见。一律跟着气泡文字色走，块级底色用中性灰叠加（明暗主题都成立） */
