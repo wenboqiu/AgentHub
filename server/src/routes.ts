@@ -1074,6 +1074,19 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     broadcast(req.userId, { type: 'prefs', prefs })
     return { prefs }
   }))
+  // 角色 / 项目 / 项目经理设置改了：推给同账号所有设备，各自重拉（任务页的下拉、筛选、头像都靠这几份清单）。
+  // 写接口散在好几处（含助手草稿确认建角色），统一在响应后判断，不在每个路由里各写一遍
+  const CATALOG_ROUTES: [RegExp, 'roles' | 'projects'][] = [
+    [/^\/roles(\/:id)?$/, 'roles'],
+    [/^\/assistant\/drafts\/:id\/confirm$/, 'roles'],
+    [/^\/dispatch\/manager$/, 'roles'],
+    [/^\/projects(\/:id)?$/, 'projects'],
+  ]
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.method === 'GET' || reply.statusCode >= 400 || !req.userId) return
+    const hit = CATALOG_ROUTES.find(([re]) => re.test(req.routeOptions.url ?? ''))
+    if (hit) broadcast(req.userId, { type: 'catalog', kind: hit[1] })
+  })
   // 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）
   app.get('/roles', async req => serial(async () => ({ roles: await listRoles(pool, req.userId) })))
   app.post('/roles', async req => serial(async () => ({ role: await saveRole(pool, req.userId, req.body) })))
@@ -2182,7 +2195,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         const me = { sock: socket, userId, authSessionId, machine }
         listeners.set(key, me)
         if (agents.length) capsByMachine.set(key, agents)
-        socket.on('close', () => { if (listeners.get(key) === me) listeners.delete(key) })
+        // 在线名单（agents）没变，界面的电脑列表不会自己重拉：单独推一声
+        broadcast(userId, { type: 'machines' })
+        socket.on('close', () => {
+          if (listeners.get(key) !== me) return
+          listeners.delete(key)
+          broadcast(userId, { type: 'machines' })
+        })
         socket.on('error', () => {})
         return
       }

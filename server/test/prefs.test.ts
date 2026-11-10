@@ -89,6 +89,28 @@ describe('账号偏好：agent 头像', () => {
     assert.equal((await call('POST', '/projects', { name: '坏头像项目', avatar: { kind: 'preset', id: 'A B' } })).status, 400)
   })
 
+  it('角色、项目、项目经理改了推 catalog 给同账号；读接口和失败的写不推', async () => {
+    const mine = await connect(a.token), other = await connect(b.token)
+    const count = (kind: string) => mine.filter(m => m.type === 'catalog' && m.kind === kind).length
+    const r = await call('POST', '/roles', { name: '推送测试角色', agent: 'codex' })
+    assert.equal(r.status, 200)
+    await waitFor(mine, m => m.type === 'catalog' && m.kind === 'roles')
+    await call('PATCH', `/roles/${r.body.role.id}`, { title: '改职责' })
+    const p = await call('POST', '/projects', { name: '推送测试项目' })
+    await waitFor(mine, m => m.type === 'catalog' && m.kind === 'projects')
+    await call('DELETE', `/projects/${p.body.project.id}`)
+    await call('PATCH', '/dispatch/manager', { enabled: false })
+    await new Promise(res => setTimeout(res, 100))
+    assert.equal(count('roles'), 3, '建角色、改角色、改项目经理')
+    assert.equal(count('projects'), 2, '建项目、删项目')
+    const before = mine.length
+    await call('GET', '/roles')
+    assert.equal((await call('POST', '/projects', { name: '' })).status, 400)
+    await new Promise(res => setTimeout(res, 100))
+    assert.equal(mine.slice(before).filter(m => m.type === 'catalog').length, 0, '读接口和失败的写不推')
+    assert.equal(other.some(m => m.type === 'catalog'), false, '不推给别的账号')
+  })
+
   it('非法输入 400：未知字段 / agent、坏 id、非图片 data URL、太大', async () => {
     const bad = [
       { theme: 'dark' },
