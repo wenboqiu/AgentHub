@@ -435,7 +435,24 @@ export function nextStepLine(text: string): string {
   return ''
 }
 
-const evidenceGroups = (ev: Evidence[]): string => {
+/** 截短时补省略号，别让人以为话就说到这 */
+const cut = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
+
+/**
+ * 兜底标题的主语：优先回复里的第一个小标题（收尾总结常以「## 结论 / ## 需要你定夺」开头），
+ * 其次回复第一行；都没有再退回会话标题。会话标题可能就是上一张单子的说明原文
+ * （「来源会话：X（…） 会话结尾：…」），这种只取 X。
+ */
+export function fallbackSubject(lastReply: string, sessionTitle: string): string {
+  const lines = lastReply.split(/\n+/)
+  const heading = lines.find(l => /^\s*#{1,4}\s+\S/.test(l))
+  const first = stripMd(heading ?? lines.find(l => stripMd(l).length >= 4) ?? '')
+  if (first.length >= 4) return cut(first, 60)
+  const quoted = /^来源会话：(.+?)（/.exec(sessionTitle.trim())
+  return cut((quoted?.[1] ?? sessionTitle).trim() || '本次会话', 60)
+}
+
+const evidenceGroups =(ev: Evidence[]): string => {
   const byKind = new Map<string, string[]>()
   for (const e of ev) {
     const list = byKind.get(e.kind) ?? []
@@ -531,7 +548,7 @@ export function heuristicDraft(input: {
   if (lastReply.trim().length >= 40) {
     return {
       kind: 'followup',
-      title: `跟进：${(session.title || '本次会话').slice(0, 60)}`,
+      title: `跟进：${fallbackSubject(lastReply, session.title)}`,
       notes: [
         `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
         `会话结尾：\n${lastReply.slice(-1000)}`,

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, proposalPatch, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
+import { assigneeOf, fallbackSubject, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, proposalPatch, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
 import { DEFAULT_MANAGER, pickCandidates, quota } from '../src/dispatch-manager.ts'
 import type { Task } from '../src/tasks.ts'
 
@@ -56,6 +56,16 @@ test('明确说了下一步：用它当标题', () => {
   assert.ok(d)
   assert.equal(d.kind, 'followup')
   assert.equal(d.title, '下一步：把刷新逻辑也补上')
+})
+
+test('兜底标题：取回复的小标题，不拿上一张单子的说明当会话名', () => {
+  const noisy = { ...session, title: '来源会话：验收一下视频代码改动（claude · HomeMedia） 会话结尾： ## 需要你定夺 **`server/src/routes/upload.t' }
+  const withHead = heuristicDraft({ session: noisy, task: null, lastReply: '看过了。\n\n## 上传接口验收结论\n分片逻辑没问题，大文件超时仍在复现，断点续传的进度条偶尔回退，日志里没有报错。', evidence: [] })
+  assert.equal(withHead?.title, '跟进：上传接口验收结论')
+  // 回复里没有像样的一行：退回会话名，且只取「来源会话：」后面那段
+  assert.equal(fallbackSubject('', noisy.title), '验收一下视频代码改动')
+  // 太长截断时带省略号
+  assert.ok(fallbackSubject('x'.repeat(100), '').endsWith('…'))
 })
 
 test('回复太短或没有产出：不出意见', () => {
