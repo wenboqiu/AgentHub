@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  judgeApproval, judgeCommand, shellSegments, firstWord, detailPaths, DEFAULT_POLICY,
+  judgeApproval, judgeCommand, shellSegments, firstWord, detailPaths, commandText, DEFAULT_POLICY,
   NO_CONSTRAINTS, normalizeConstraints, hasConstraints, boundaryLine, type RefereePolicy,
 } from '../src/referee.ts'
 
@@ -173,6 +173,31 @@ test('边界清洗：绝对路径与 .. 逃逸不算声明', () => {
   assert.match(boundaryLine({ ...NO_CONSTRAINTS, paths: ['server/src'], net: true }), /只能改 server\/src/)
   // 什么都没声明就不往系统提示里塞噪音
   assert.equal(boundaryLine(NO_CONSTRAINTS), '')
+})
+
+test('ZCode 的命令审批是入参 JSON：取出 command 再判，不再一律「看不懂」', () => {
+  const zc = (command: string) => JSON.stringify({ command, description: '说明' })
+  const home = 'D:\\Work2\\HomeMedia'
+  const z = (command: string) => judgeApproval({ tool: 'Bash', detail: zc(command), cwd: home, policy: on })
+  // 线上真实出现过、被判成「看不懂」的几条
+  assert.equal(z(`cd "${home}" && git diff --stat | tail -5 && git log --oneline -3 && echo`).action, 'allow')
+  assert.equal(z(`grep -n "type MediaRow" -A 25 "${home}\\server\\src\\routes\\library.ts"`).action, 'allow')
+  assert.equal(z(`cd "${home}" && git diff --stat -- server/src/ 2>/dev/null`).action, 'allow')
+  // 取出来之后照样按规则判：推远端、强推、越界不因为换了包装就放行
+  assert.equal(z('git push origin main').tier, 'gray')
+  assert.equal(z('git push --force origin main').tier, 'danger')
+  assert.equal(z('rm -rf build').tier, 'danger')
+  // 嵌在 input 里也认；不是对象（Codex 的 argv 数组）照旧不拼接
+  assert.equal(commandText(JSON.stringify({ input: { command: 'ls' } })), 'ls')
+  assert.equal(commandText('["git","push"]'), '["git","push"]')
+  assert.equal(commandText('git status'), 'git status')
+})
+
+test('丢弃输出（/dev/null、NUL）不算输出到项目外；真写到项目外仍是硬红线', () => {
+  assert.equal(act('Bash', 'git diff --stat 2>/dev/null'), 'allow')
+  assert.equal(act('Bash', 'ls > NUL'), 'allow')
+  assert.equal(act('Bash', 'npm test 2>&1'), 'allow')
+  assert.equal(judge('Bash', 'echo hi > /tmp/x.txt').tier, 'danger')
 })
 
 test('工具链：Flutter / Dart 测试构建放行，pub get 按联网判', () => {
