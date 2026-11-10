@@ -1912,12 +1912,61 @@ fn workbuddy_script_default() -> Option<PathBuf> {
             roots.push(PathBuf::from(pf).join("WorkBuddy"));
         }
         roots.push(PathBuf::from("C:\\Program Files\\WorkBuddy"));
+        // 装到 D 盘之类的自选位置时，固定路径都找不到；卸载注册表里有它的 exe 路径
+        if let Some(r) = installed_dir_from_registry("WorkBuddy.exe") {
+            roots.push(r);
+        }
         return roots
             .into_iter()
             .map(|r| r.join("resources").join("app.asar.unpacked").join("cli").join("bin").join("codebuddy"))
             .find(|p| p.is_file());
     }
     None
+}
+
+/// Windows 桌面应用装在哪：从卸载注册表（HKCU / HKLM / WOW6432Node）的 DisplayIcon 里找以 `exe` 结尾的那条，
+/// 返回它所在目录。安装时自选了别的盘（例如 `D:\Program Files\WorkBuddy`）只有这里有记录。
+/// 用系统自带的 `reg query`，不为这一处加注册表依赖；只在探测时跑，几十毫秒。
+#[cfg(windows)]
+pub(crate) fn installed_dir_from_registry(exe: &str) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    const HIVES: [&str; 3] = [
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+    HIVES.iter().find_map(|hive| {
+        let out = std::process::Command::new("reg")
+            .args(["query", hive, "/s", "/v", "DisplayIcon"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .ok()?;
+        registry_icon_dir(&String::from_utf8_lossy(&out.stdout), exe).filter(|d| d.join(exe).is_file())
+    })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn installed_dir_from_registry(_exe: &str) -> Option<PathBuf> {
+    None
+}
+
+/// 解析 `reg query … /v DisplayIcon` 的输出：取第一条以 `exe` 结尾（忽略大小写）的路径所在目录。
+/// 值可能带引号、带 `,0` 图标序号。
+fn registry_icon_dir(output: &str, exe: &str) -> Option<PathBuf> {
+    let want = format!("\\{}", exe.to_ascii_lowercase());
+    output.lines().find_map(|line| {
+        let (_, value) = line.split_once("REG_SZ").or_else(|| line.split_once("REG_EXPAND_SZ"))?;
+        let mut v = value.trim().trim_matches('"').to_string();
+        if let Some((path, idx)) = v.rsplit_once(',') {
+            if idx.trim().chars().all(|c| c.is_ascii_digit() || c == '-') {
+                v = path.trim().trim_matches('"').to_string();
+            }
+        }
+        if !v.to_ascii_lowercase().ends_with(&want) {
+            return None;
+        }
+        PathBuf::from(v).parent().map(Path::to_path_buf)
+    })
 }
 
 /// 从 CLI 脚本反推宿主 Electron：
@@ -3260,6 +3309,20 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_install_dir_from_registry_display_icon() {
+        // homelab 上的真实输出：WorkBuddy 装在 D 盘，固定路径都找不到
+        let out = "\r\nHKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\7-Zip\r\n    DisplayIcon    REG_SZ    C:\\Program Files\\7-Zip\\7zFM.exe\r\n\r\n\
+HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\BFD312E9-1019-4F57-9F44-F86246833B50\r\n    DisplayIcon    REG_SZ    D:\\Program Files\\WorkBuddy\\WorkBuddy.exe,0\r\n";
+        assert_eq!(registry_icon_dir(out, "WorkBuddy.exe"), Some(PathBuf::from(r"D:\Program Files\WorkBuddy")));
+        // 带引号、大小写不同也认
+        let quoted = "    DisplayIcon    REG_SZ    \"E:\\Apps\\ZCode\\zcode.exe\",0\r\n";
+        assert_eq!(registry_icon_dir(quoted, "ZCode.exe"), Some(PathBuf::from(r"E:\Apps\ZCode")));
+        // 只是名字里带、不是以它结尾的不算
+        assert_eq!(registry_icon_dir("    DisplayIcon    REG_SZ    C:\\x\\WorkBuddy.exe.bak\r\n", "WorkBuddy.exe"), None);
+        assert_eq!(registry_icon_dir(out, "ZCode.exe"), None);
+    }
 
     /// 真机端到端：起一次 ZCode 派活，确认能拿到会话 id 与助手回复。
     /// 会消耗一次真实模型配额（约 24k input tokens），默认 ignore。

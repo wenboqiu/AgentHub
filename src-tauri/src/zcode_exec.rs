@@ -63,6 +63,10 @@ pub fn find_install() -> Option<Install> {
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
             roots.push(PathBuf::from(local).join("Programs").join("ZCode"));
         }
+        // 装到别的盘时固定路径都找不到，卸载注册表里有 exe 路径
+        if let Some(r) = crate::runner::installed_dir_from_registry("ZCode.exe") {
+            roots.push(r);
+        }
     } else {
         roots.push(PathBuf::from("/opt/ZCode"));
         roots.push(PathBuf::from("/opt/zcode"));
