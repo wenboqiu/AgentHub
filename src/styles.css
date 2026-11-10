@@ -1271,3 +1271,8 @@ button.pg-slot { cursor: pointer; }
 .doubao-images { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .doubao-image { max-width: min(100%, 240px); border-radius: 12px; display: block; }
 .doubao-image.missing { color: var(--dim); font-size: 13px; margin: 0; }
+
+.error-boundary { margin: 24px auto; max-width: 720px; padding: 20px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
+.error-boundary h2 { margin: 0 0 8px; }
+.error-boundary pre { margin: 12px 0; padding: 12px; background: var(--field); border-radius: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; }
+.error-boundary-actions { display: flex; gap: 8px; flex-wrap: wrap; }
