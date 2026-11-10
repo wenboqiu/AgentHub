@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type TextareaHTMLAttributes } from "react";
 import BoundsEditor from "./BoundsEditor";
+import Markdown from "./Markdown";
 import type { Api, Delivery, Project, Proposal, ProposalInput, Role, Task, TaskConstraints } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
 import { planDelivery } from "./lib/delivery";
@@ -194,7 +195,9 @@ export default function ProposalCard({
         {/* 一行标题常常不够下判断（尤其兜底稿的标题只是占位），详情就地展开，不必先生成任务单 */}
         {detailOpen && (
           <div className="proposal-suggest-detail">
-            {proposal.notes && <div className="proposal-suggest-notes">{proposal.notes}</div>}
+            {/* 说明里常夹着会话尾巴的 Markdown（## 小标题、**加粗**、`路径`），原文摊开满屏符号；
+                lenient：规则稿一行一句，单换行也要断开 */}
+            {proposal.notes && <Markdown text={proposal.notes} compact lenient />}
             {proposal.checklist.length > 0 && (
               <ul>{proposal.checklist.map((c, i) => <li key={i}>{c}</li>)}</ul>
             )}
@@ -204,6 +207,7 @@ export default function ProposalCard({
               </ul>
             )}
             {proposal.note && <p className="hint">{proposal.note}</p>}
+            <p className="hint">这是按会话拼的规则稿；点「生成任务单」后项目经理会用模型重写标题和说明，不满意再改或忽略。</p>
           </div>
         )}
       </div>

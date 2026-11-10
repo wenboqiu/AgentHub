@@ -882,7 +882,7 @@ header h1 { white-space: nowrap; }
 .proposal-suggest-who { font-size: 12px; white-space: nowrap; }
 .proposal-suggest .btns { margin: 0; flex: none; }
 .proposal-suggest-detail { flex-basis: 100%; padding-top: 10px; border-top: 1px solid var(--line); font-size: 13px; line-height: 1.7; }
-.proposal-suggest-notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.proposal-suggest-detail .md { overflow-wrap: anywhere; }
 .proposal-suggest-detail ul { margin: 8px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
 /* 任务单里随内容长高的输入框：不出内部滚动条，全文直接摊开 */
 .auto-text { resize: none; overflow: hidden; }
