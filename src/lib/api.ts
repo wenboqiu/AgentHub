@@ -52,6 +52,8 @@ export type ProjectDir = { machine: string | null; cwd: string };
 export type Machine = {
   name: string;
   online: boolean;
+  /** AgentHub 开着、但没开「远程执行」：连着、不接活（老服务端不给这个字段） */
+  listening?: boolean;
   at: string | null;
   /** 这台电脑上报过「装了哪些工具」；空数组 = 没上报（老电脑端），按「不知道」处理，不拦 */
   agents: string[];

@@ -54,7 +54,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: false, graphMode: true, zcodeAutoApprove: "low" };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low" };
 
 /**
  * 气泡图改成默认之后的一次性迁移：老配置里 graphMode 基本是「没选过」的 false，

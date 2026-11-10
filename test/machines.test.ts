@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickMachine } from '../src/lib/machines.ts';
+import { machineTag, pickMachine } from '../src/lib/machines.ts';
 import type { Machine } from '../src/lib/api.ts';
 
 const m = (name: string, online: boolean, agents: string[]): Machine =>
@@ -59,4 +59,22 @@ test('任务上存的机器这次没连上、也不在清单里：仍然留在�
   const pick = pickMachine({ machines: [m('A', true, ['claude'])], online: ['A'], stored: '旧电脑', tool: 'claude' });
   assert.deepEqual(pick.options.map(c => c.name), ['A', '旧电脑']);
   assert.equal(pick.offline, true);
+});
+
+test('开着 AgentHub 但没开远程执行：算 offline（会排队），但单独标出来，不和真离线混在一起', () => {
+  const pick = pickMachine({
+    machines: [m('A', true, ['claude']), { ...m('B', false, ['claude']), listening: true }, m('C', false, [])],
+    online: ['A'],
+    stored: 'B',
+    tool: 'claude',
+  });
+  assert.equal(pick.machine, 'B');
+  assert.equal(pick.offline, true);
+  assert.equal(pick.listening, true);
+  assert.equal(machineTag(pick.candidates.find(c => c.name === 'A')!), '');
+  assert.equal(machineTag(pick.candidates.find(c => c.name === 'B')!), '（开着，没开远程执行）');
+  assert.equal(machineTag(pick.candidates.find(c => c.name === 'C')!), '（离线）');
+  // 老服务端不给 listening：照旧按离线
+  const old = pickMachine({ machines: [m('B', false, [])], online: [], stored: 'B', tool: null });
+  assert.equal(old.listening, false);
 });

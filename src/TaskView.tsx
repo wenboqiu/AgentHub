@@ -12,7 +12,7 @@ import Markdown from "./Markdown";
 import FilePreview from "./FilePreview";
 import TaskNotes from "./TaskNotes";
 import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
-import { pickMachine } from "./lib/machines";
+import { machineTag, pickMachine } from "./lib/machines";
 import { parseQuestions } from "./lib/questions";
 import { ago } from "./lib/time";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
@@ -230,7 +230,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
   const listenOnly = isListenOnly(tool);
   // 候选电脑：上报过能跑这个工具的，或者压根没上报过（老电脑端，当「不知道」放行）；
   // 明确报过没装的直接不列——列出来也派不过去，服务端会拒。规则见 lib/machines.ts
-  const { candidates, usable, options, machine, offline, machineLacks } = pickMachine({ machines, online: agents, stored: task.machine, tool });
+  const { candidates, usable, options, machine, offline, listening, machineLacks } = pickMachine({ machines, online: agents, stored: task.machine, tool });
   // 一条项目配置能不能跑当前工具：绑了电脑的看那台上报的清单；「任意电脑」的看有没有一台能跑。
   // 电脑没上报过清单（老电脑端）当「不知道」放行，与电脑下拉同一套规则（见 lib/machines.ts）
   const fitsTool = (d: ProjectDir): boolean => {
@@ -255,7 +255,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
   const cfgParts = [
     currentRole ? `角色 ${currentRole.name}` : "角色未指定",
     tool ? agentName(tool) : "工具未定",
-    (task.machine || machine) ? `电脑 ${task.machine || machine}${offline ? "（离线）" : ""}` : "电脑待定",
+    (task.machine || machine) ? `电脑 ${task.machine || machine}${!offline ? "" : listening ? "（没开远程执行）" : "（离线）"}` : "电脑待定",
     task.cwd ? `目录 ${task.cwd}` : dirs.length ? "目录自动挑" : "目录未配置",
   ];
   const configSummary = cfgParts.join(" · ");
@@ -314,7 +314,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
     <div className="status-inline">
       <select aria-label="换台电脑" value={pickedMachine} disabled={busy} onChange={e => setPickedMachine(e.target.value)}>
         <option value="">选一台电脑</option>
-        {options.map(c => <option key={c.name} value={c.name}>{c.name}{c.online ? "" : "（离线）"}</option>)}
+        {options.map(c => <option key={c.name} value={c.name}>{c.name}{machineTag(c)}</option>)}
       </select>
       <button className="primary" disabled={busy || !pickedMachine} onClick={() => onGo(pickedMachine)}>确认派发</button>
       <button className="ghost" onClick={() => setPickOpen(false)}>取消</button>
@@ -451,7 +451,9 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
         </div>
       </div>}
       {reason && <p className="who-warn" role="alert">{reason}</p>}
-      {!reason && offline && <p className="dim">{machine} 离线，派发后会在它上线时自动开始</p>}
+      {!reason && offline && <p className="dim">{listening
+        ? `${machine} 开着 AgentHub，但没开「远程执行」：到那台电脑的 设置 → 本机执行与采集 里打开；派发后会排队，开关一开就自动开始`
+        : `${machine} 离线，派发后会在它上线时自动开始`}</p>}
       <div className="action-bar status-actions">
         <button className="primary" disabled={busy || !!reason} onClick={() => void guard(() => runStart({ machine, ...deliveryInput }))}>{offline ? "排队等上线" : "派发"}</button>
         <button disabled={busy || !!reason} onClick={() => { setMessage(notesForAgent(task.notes, attachments ?? []) || task.title); setStarting(true); }}>补一句话再派…</button>
@@ -748,7 +750,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
               // 当前目录来自某条绑了电脑的配置，而这次换到了别的电脑：目录跟着失效，交回服务端按新电脑挑
               const mismatch = chosenDir?.machine && chosenDir.machine !== m;
               patch({ machine: m, ...(mismatch ? { cwd: null } : {}) });
-            }}><option value="">开始时自动选择</option>{options.map(c => <option key={c.name} value={c.name}>{c.name}{c.online ? "" : "（离线）"}{tool && c.agents.length > 0 && !c.agents.includes(tool) ? `（没装 ${agentName(tool)}）` : tool && c.agents.length === 0 ? "（未上报工具）" : ""}</option>)}</select></label>
+            }}><option value="">开始时自动选择</option>{options.map(c => <option key={c.name} value={c.name}>{c.name}{machineTag(c)}{tool && c.agents.length > 0 && !c.agents.includes(tool) ? `（没装 ${agentName(tool)}）` : tool && c.agents.length === 0 ? "（未上报工具）" : ""}</option>)}</select></label>
           </div>
           {currentRole?.agent && <p className="hint">执行工具由角色「{currentRole.name}」决定，要换工具去角色页改它；角色不绑电脑，在哪台干活由这个任务挑。</p>}
           {currentProject && dirs.length > 0 && !projectUsable && <p className="form-error" role="alert">项目「{currentProject.name}」登记的配置所在电脑都装不了 {agentName(tool ?? "")}：这个项目当前不可用。换个角色 / 工具，或在对应电脑上装好再选。</p>}

@@ -65,7 +65,7 @@ function ProfileRow({ index, dir, machines, taken, busy, onChange, onRemove }: {
             <option value="" disabled={anyTaken}>{anyTaken ? "任意电脑（已有一条）" : "任意电脑（哪台都行）"}</option>
             {machines.map(m => (
               <option key={m.name} value={m.name} disabled={taken.has(m.name)}>
-                {m.name}{m.online ? "（在线）" : ""}
+                {m.name}{m.online ? "（在线）" : m.listening ? "（开着，没开远程执行）" : ""}
               </option>
             ))}
             {unknown && <option value={dir.machine!}>{dir.machine}（清单里没有）</option>}

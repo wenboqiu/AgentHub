@@ -690,6 +690,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                 <input type="checkbox" checked={form.remoteEnabled} onChange={(e) => set("remoteEnabled", e.target.checked)} />
                 允许手机远程执行（每次授权仍要在手机上确认）
               </label>
+              <p className="hint">关掉后这台电脑仍显示「开着，没开远程执行」，派给它的单会排队，直到这里重新打开。</p>
 
               <h3>禁止执行的目录（黑名单）</h3>
               <p className="hint">

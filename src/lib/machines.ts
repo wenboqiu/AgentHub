@@ -6,7 +6,11 @@ import type { Machine } from "./api";
  * 原来这些都摊在 TaskView 的渲染体内，改一行就得靠人肉回归；抽成纯函数后
  * 边界（老电脑端没上报工具 / 任务上存的机器没装工具 / 只有一台能跑）都能直接测。
  */
-export type MachineCandidate = { name: string; online: boolean; agents: string[] };
+export type MachineCandidate = { name: string; online: boolean; agents: string[]; /** 开着 AgentHub、没开远程执行 */ listening?: boolean };
+
+/** 下拉里跟在电脑名后面的状态：在线不写；开着但没开远程执行单独说，别和真离线混在一起 */
+export const machineTag = (c: Pick<MachineCandidate, "online" | "listening">): string =>
+  c.online ? "" : c.listening ? "（开着，没开远程执行）" : "（离线）";
 
 export type MachinePick = {
   /** 所有看得见的电脑（含明确没装这个工具的，下拉里要标出来） */
@@ -19,6 +23,8 @@ export type MachinePick = {
   machine: string;
   /** 选中的那台此刻没连着（派活会入队等它上线） */
   offline: boolean;
+  /** 选中的那台开着 AgentHub、只是没开远程执行（也算 offline，提示要去那台电脑上打开开关） */
+  listening: boolean;
   /** 选中的那台明确没装当前工具 */
   machineLacks: boolean;
 };
@@ -35,7 +41,7 @@ export function pickMachine(input: {
 }): MachinePick {
   const { machines, online, stored, tool } = input;
   const candidates: MachineCandidate[] = machines.length
-    ? machines.map(m => ({ name: m.name, online: m.online, agents: m.agents }))
+    ? machines.map(m => ({ name: m.name, online: m.online, agents: m.agents, listening: !!m.listening }))
     : [...new Set([...online, ...(stored ? [stored] : [])])]
       .map(name => ({ name, online: online.includes(name), agents: [] }));
   // 任务上存着的那台可能已经不在这份清单里（改过名 / 老记录）：也要列出来，
@@ -57,6 +63,7 @@ export function pickMachine(input: {
     options,
     machine,
     offline: !!machine && !online.includes(machine),
+    listening: !!machine && !online.includes(machine) && !!candidates.find(c => c.name === machine)?.listening,
     // 上报过清单、且清单里没有它 = 明确没装；没上报过（空清单）不算
     machineLacks: !!tool && caps.length > 0 && !caps.includes(tool),
   };
