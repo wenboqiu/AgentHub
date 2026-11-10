@@ -511,7 +511,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
         <span className="machine">
-          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
+          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}{session.state === "running" && (session.bgTasks ?? 0) > 0 ? ` · ${session.bgTasks} 个后台任务` : ""}</span>
           {!pendingSession && !isDoubao && (
             <button
               className={`icon-button${syncing ? " spin" : ""}`}

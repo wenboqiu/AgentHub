@@ -38,6 +38,8 @@ export type EventIn = {
   summary?: string
   pid?: number | null
   quiet?: boolean
+  /** 主对话这一轮结束但还有几个后台子代理没回报；只对 running 有意义 */
+  bgTasks?: number
   /** 只听不聊的 agent（WorkBuddy）从 transcript 报过来的活动桶，落 session_activity 供日历画跨度 */
   buckets?: { at: string; count: number }[]
   /**
@@ -60,6 +62,8 @@ export type Session = {
   stateSince: string
   acked: boolean
   pid: number | null
+  /** running 时还有几个后台子代理没回报，其余状态恒为 0 */
+  bgTasks: number
   eventAt: string
   updatedAt: string
 }
@@ -128,6 +132,7 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     primary key (user_id, id)
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(user_id, updated_at DESC)')
+  await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bg_tasks integer NOT NULL DEFAULT 0')
   await pool.query(`CREATE TABLE IF NOT EXISTS runs (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -259,6 +264,7 @@ type Row = {
   state_since: Date
   acked: boolean
   pid: number | null
+  bg_tasks: number
   event_at: Date
   updated_at: Date
 }
@@ -276,6 +282,7 @@ function toSession(r: Row): Session {
     stateSince: r.state_since.toISOString(),
     acked: r.acked,
     pid: r.pid,
+    bgTasks: r.bg_tasks ?? 0,
     eventAt: r.event_at.toISOString(),
     updatedAt: r.updated_at.toISOString(),
   }
@@ -332,14 +339,15 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
     : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
+  const bgTasks = ev.state === 'running' && Number.isFinite(ev.bgTasks) ? Math.max(0, Math.min(99, Math.trunc(ev.bgTasks ?? 0))) : 0
   const row = (
     await pool.query<Row>(
-      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
-       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at, bg_tasks)
+       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), $14)
        ON CONFLICT (user_id, id) DO UPDATE SET machine=$3, cwd=$4, project=$5, title=$6, state=$7, summary=$8,
-         state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now()
+         state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now(), bg_tasks=$14
        RETURNING *`,
-      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId],
+      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId, bgTasks],
     )
   ).rows[0]
   // 活动桶随事件顺路上报（WorkBuddy 只读 transcript，没有消息同步）：已有真实消息的桶以更大者为准，不被覆盖

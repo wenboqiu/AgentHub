@@ -235,6 +235,7 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
                           <span className={`si-dot ${STATE_DOT[s.state] ?? "dim"}`} aria-hidden="true" />
                           <span className="si-name">{s.project || "(未知项目)"}</span>
                           {needsAttention && <span className="si-badge">待处理</span>}
+                          {s.state === "running" && (s.bgTasks ?? 0) > 0 && <span className="si-badge dim">{s.bgTasks} 个后台任务</span>}
                           <span className="si-time">{ago(s.updatedAt, now)}</span>
                         </span>
                         {preview && <span className="si-sub">{preview}</span>}

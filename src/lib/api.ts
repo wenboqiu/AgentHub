@@ -246,6 +246,8 @@ export type Session = {
   stateSince: string;
   acked: boolean;
   pid: number | null;
+  /** running 时还有几个后台子代理没回报（旧服务端没有该字段） */
+  bgTasks?: number;
   eventAt: string;
   updatedAt: string;
 };

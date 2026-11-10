@@ -72,10 +72,10 @@ fn tag_value<'a>(block: &'a str, tag: &str) -> Option<&'a str> {
     Some(rest[..rest.find(&format!("</{tag}>"))?].trim())
 }
 
-/// transcript 尾部里是否还有没回报的后台子代理。
+/// transcript 尾部里还有几个没回报的后台子代理。
 /// 启动 = user 行的 `toolUseResult` 带 `agentId` 且 `background` / `isAsync` 为真（forked skill、异步 Agent 都是这个形状）；
 /// 完成 = 后续 user 行里 `<task-notification>` 的 `<task-id>` + 终态 `<status>`。
-fn has_pending_background_agents(tail: &str) -> bool {
+fn count_pending_background_agents(tail: &str) -> usize {
     let now = chrono::Utc::now().timestamp_millis();
     let mut pending = std::collections::HashSet::<String>::new();
     for line in tail.lines() {
@@ -106,7 +106,7 @@ fn has_pending_background_agents(tail: &str) -> bool {
             pending.insert(id.to_string());
         }
     }
-    !pending.is_empty()
+    pending.len()
 }
 
 /// 只读文件末尾 256KB；不是从头读时丢掉第一个不完整的行
@@ -154,6 +154,7 @@ pub fn hook_to_event(v: &Value, pid: Option<u32>) -> Option<Event> {
         summary: None,
         pid: pid.filter(|p| *p > 0),
         quiet: false,
+        bg_tasks: 0,
         buckets: Vec::new(),
        messages: Vec::new(),
     };
@@ -182,8 +183,10 @@ pub fn hook_to_event(v: &Value, pid: Option<u32>) -> Option<Event> {
             let tail = str_field(v, "transcript_path").and_then(|p| read_tail(Path::new(p)));
             // 主会话这一轮结束不等于活干完了：后台子代理还没回报时仍算运行中，别标成「完成待确认」
             // （子代理完成后 CLI 会自己开下一轮，那一轮结束会再来一次 Stop）
-            if tail.as_deref().is_some_and(has_pending_background_agents) {
+            let pending = tail.as_deref().map_or(0, count_pending_background_agents);
+            if pending > 0 {
                 ev.state = "running".into();
+                ev.bg_tasks = pending as u32;
             } else {
                 ev.state = "done".into();
                 ev.summary = str_field(v, "last_assistant_message")
@@ -528,17 +531,19 @@ mod tests {
         let ts = |mins: i64| (now - chrono::Duration::minutes(mins)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let tail = |lines: &[String]| lines.join("\n");
         // 刚放出去、还没回报
-        assert!(has_pending_background_agents(&tail(&[launch_line(&ts(1), "a1")])));
+        assert_eq!(count_pending_background_agents(&tail(&[launch_line(&ts(1), "a1")])), 1);
         // 回报了 -> 不再算
-        assert!(!has_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), notice_line("a1", "completed")])));
+        assert_eq!(count_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), notice_line("a1", "completed")])), 0);
         // 两个任务只回报一个
-        assert!(has_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), launch_line(&ts(4), "a2"), notice_line("a1", "completed")])));
+        assert_eq!(count_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), launch_line(&ts(4), "a2"), notice_line("a1", "completed")])), 1);
+        // 两个都没回报
+        assert_eq!(count_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), launch_line(&ts(4), "a2")])), 2);
         // 非终态通知不算回报
-        assert!(has_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), notice_line("a1", "running")])));
+        assert_eq!(count_pending_background_agents(&tail(&[launch_line(&ts(5), "a1"), notice_line("a1", "running")])), 1);
         // 前台工具结果（没有 background）不算
-        assert!(!has_pending_background_agents(r#"{"type":"user","toolUseResult":{"agentId":"x","status":"completed"}}"#));
+        assert_eq!(count_pending_background_agents(r#"{"type":"user","toolUseResult":{"agentId":"x","status":"completed"}}"#), 0);
         // 遗留的老任务不拦着完成
-        assert!(!has_pending_background_agents(&tail(&[launch_line(&ts(300), "old")])));
+        assert_eq!(count_pending_background_agents(&tail(&[launch_line(&ts(300), "old")])), 0);
 
         let dir = std::env::temp_dir().join(format!("agenthub-bg-stop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -549,11 +554,17 @@ mod tests {
         std::fs::write(&p, tail(&[launch_line(&ts(1), "a1"), assistant.clone()])).unwrap();
         let e = hook_to_event(&hook(&p), None).unwrap();
         assert_eq!(e.state, "running");
+        assert_eq!(e.bg_tasks, 1);
         assert!(e.summary.is_none());
+
+        std::fs::write(&p, tail(&[launch_line(&ts(2), "a1"), launch_line(&ts(1), "a2"), assistant.clone()])).unwrap();
+        let e = hook_to_event(&hook(&p), None).unwrap();
+        assert_eq!((e.state.as_str(), e.bg_tasks), ("running", 2));
 
         std::fs::write(&p, tail(&[launch_line(&ts(3), "a1"), notice_line("a1", "completed"), assistant])).unwrap();
         let e = hook_to_event(&hook(&p), None).unwrap();
         assert_eq!(e.state, "done");
+        assert_eq!(e.bg_tasks, 0);
         assert_eq!(e.summary.as_deref(), Some("已交给子代理"));
         let _ = std::fs::remove_dir_all(dir);
     }

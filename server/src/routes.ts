@@ -234,6 +234,7 @@ function parseEvent(raw: unknown): EventIn | null {
     summary: typeof e.summary === 'string' ? clean(e.summary) : undefined,
     pid: typeof e.pid === 'number' && Number.isInteger(e.pid) && e.pid > 0 ? e.pid : null,
     quiet: e.quiet === true,
+    bgTasks: typeof e.bgTasks === 'number' && Number.isFinite(e.bgTasks) && e.bgTasks > 0 ? Math.trunc(e.bgTasks) : 0,
     expectedAt: e.expectedAt as string | undefined,
     readAt: e.readAt as string | undefined,
     buckets,

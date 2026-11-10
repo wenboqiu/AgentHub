@@ -17,6 +17,10 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Bucket {
@@ -55,6 +59,9 @@ pub struct Event {
     pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub quiet: bool,
+    /// 主对话这一轮结束但还有 N 个后台子代理没回报（只对 running 有意义，0 不上报）
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bg_tasks: u32,
     /// 只听不聊的 agent 顺路报活动桶，服务端落 session_activity 给日历画跨度
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buckets: Vec<Bucket>,
@@ -265,6 +272,7 @@ mod tests {
             summary: None,
             pid: None,
             quiet: false,
+            bg_tasks: 0,
             buckets: Vec::new(),
             messages: Vec::new(),
         }
