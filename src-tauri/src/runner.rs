@@ -165,10 +165,18 @@ pub fn precheck(mode: Mode, key: &str, cwd: &str, denied: &[String]) -> Result<(
 
 /// 角色带来的模型与上下文：空字符串表示「不覆盖执行端默认」。
 /// claude 有真正的系统提示钩子，直接追加到命令行；上下文不会混进用户消息里。
-pub fn claude_role_args(args: &mut Vec<String>, model: &str, instructions: &str) {
+/// `supports_effort`：只有真正的 Claude 认 `--effort`；WorkBuddy / CodeBuddy 只取 model 部分。
+pub fn claude_role_args(args: &mut Vec<String>, model: &str, instructions: &str, supports_effort: bool) {
+    let (model, effort) = split_effort(model);
     if !model.is_empty() {
         args.push("--model".into());
         args.push(model.into());
+    }
+    if supports_effort {
+        if let Some(e) = clean_effort("claude", effort) {
+            args.push("--effort".into());
+            args.push(e.into());
+        }
     }
     if !instructions.is_empty() {
         args.push("--append-system-prompt".into());
@@ -183,7 +191,43 @@ pub fn codex_role_text(text: &str, instructions: &str) -> String {
 
 /// Codex 的模型是进程级配置：`codex -c model="xxx" app-server`（每个 run 一个进程，互不影响）
 pub fn codex_model_args(model: &str) -> Vec<String> {
-    if model.is_empty() { vec![] } else { vec!["-c".into(), format!("model=\"{model}\"")] }
+    let (model, effort) = split_effort(model);
+    let mut out: Vec<String> = vec![];
+    if !model.is_empty() {
+        out.push("-c".into());
+        out.push(format!("model=\"{model}\""));
+    }
+    if let Some(e) = clean_effort("codex", effort) {
+        out.push("-c".into());
+        out.push(format!("model_reasoning_effort=\"{e}\""));
+    }
+    out
+}
+
+/// 角色 model 字符串里的思考强度：`<模型id>@<强度>`，在最后一个 `@` 处切；无 `@` 则强度为空。
+pub fn split_effort(model: &str) -> (&str, &str) {
+    match model.rsplit_once('@') {
+        Some((m, e)) => (m, e),
+        None => (model, ""),
+    }
+}
+
+/// ZCode 的 reasoningLevel：有效强度优先；否则取模型默认（GLM-5-Turbo 只认 enabled/disabled，其余 high）。
+pub fn zcode_reasoning_level(model_id: &str, effort: &str) -> String {
+    clean_effort("zcode", effort)
+        .unwrap_or(if model_id.eq_ignore_ascii_case("GLM-5-Turbo") { "enabled" } else { "high" })
+        .to_string()
+}
+
+/// 强度白名单：不在表里（含空、含引号等任何别的字符）一律 None，忽略强度用默认，
+/// 避免把任意字符串拼进 `-c ...="..."` 之类的命令行参数。
+pub fn clean_effort<'a>(agent: &str, effort: &'a str) -> Option<&'a str> {
+    let allowed: &[&str] = match agent {
+        "claude" | "codex" => &["low", "medium", "high", "xhigh", "max"],
+        "zcode" => &["disabled", "enabled", "low", "high", "max"],
+        _ => &[],
+    };
+    allowed.iter().find(|a| **a == effort).map(|_| effort)
 }
 
 /// 服务端随 `run.start` 下发的授权范围（能力 mandate-v1）。只有 `mandate.mode == "auto"` 才生效；
@@ -2223,7 +2267,7 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
     if let (Some(m), "claude") = (&run.mandate, label) {
         claude_mandate_args(&mut args, m);
     }
-    claude_role_args(&mut args, model, instructions);
+    claude_role_args(&mut args, model, instructions, label == "claude");
     args.extend_from_slice(extra_args);
     cmd.args(args)
     .current_dir(cwd)
@@ -2842,7 +2886,10 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
     const ID_SEND: i64 = 6;
     const ID_STOP: i64 = 7;
 
+    let (model, effort) = split_effort(model);
     let (provider_id, model_id) = crate::zcode_exec::model_selection(model);
+    // 强度：有效值优先；否则取模型默认（GLM-5-Turbo 只认 enabled/disabled，其余保持 high）
+    let reasoning_level = zcode_reasoning_level(&model_id, effort);
     let body = codex_role_text(text, instructions);
     // 与桌面端一致：create 只带 workspace，其它字段走默认；spawn 后等存储就绪再发
     let create = json!({"workspace": {"workspacePath": cwd, "workspaceKey": cwd}});
@@ -3132,7 +3179,7 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                             &json!({"id": ID_SEND, "method": "session/send", "params": {
                                 "sessionId": session_id,
                                 "content": body,
-                                "modelSelection": {"providerId": provider_id, "modelId": model_id, "options": {"reasoningLevel": "high"}}
+                                "modelSelection": {"providerId": provider_id, "modelId": model_id, "options": {"reasoningLevel": reasoning_level}}
                             }})
                             .to_string(),
                         );
@@ -3376,8 +3423,9 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
             }
             run_zcode(run, mode, key, cwd, text, model, instructions, zcode_auto)
         }
-        "workbuddy" => run_workbuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
-        "codebuddy" => run_codebuddy(run, mode, key, cwd, text, images, branch_point, model, instructions),
+        // 这两个 CLI 没有强度参数：把 `@强度` 剥掉，免得漏进命令行
+        "workbuddy" => run_workbuddy(run, mode, key, cwd, text, images, branch_point, split_effort(model).0, instructions),
+        "codebuddy" => run_codebuddy(run, mode, key, cwd, text, images, branch_point, split_effort(model).0, instructions),
         other => run.fail(&format!("不认识的 agent：{other}")),
     }
 }
@@ -3789,15 +3837,57 @@ HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\BFD
         // 空角色不改变任何命令行：行为和没有角色时完全一致
         let mut none = claude_args(Mode::Fresh, "k1", true);
         let before = none.clone();
-        claude_role_args(&mut none, "", "");
+        claude_role_args(&mut none, "", "", true);
         assert_eq!(none, before);
 
         // 有角色：模型和系统提示追加在末尾，原有参数一个不少
         let mut with = claude_args(Mode::Fresh, "k1", true);
-        claude_role_args(&mut with, "opus", "只改测试，不动实现");
+        claude_role_args(&mut with, "opus", "只改测试，不动实现", true);
         let tail = &with[with.len() - 4..];
         assert_eq!(tail, ["--model", "opus", "--append-system-prompt", "只改测试，不动实现"]);
         assert_eq!(&with[..before.len()], &before[..]);
+    }
+
+    #[test]
+    fn effort_rides_in_model_string() {
+        assert_eq!(split_effort("GLM-5.2@max"), ("GLM-5.2", "max"));
+        assert_eq!(split_effort("@high"), ("", "high"));
+        assert_eq!(split_effort("opus"), ("opus", ""));
+        assert_eq!(split_effort("a@b@c"), ("a@b", "c"));
+
+        // Claude：--model 后面跟 --effort
+        let mut a: Vec<String> = vec![];
+        claude_role_args(&mut a, "opus@xhigh", "", true);
+        assert_eq!(a, ["--model", "opus", "--effort", "xhigh"]);
+        // 只有强度没有模型
+        let mut a: Vec<String> = vec![];
+        claude_role_args(&mut a, "@high", "", true);
+        assert_eq!(a, ["--effort", "high"]);
+        // 非法强度被忽略
+        let mut a: Vec<String> = vec![];
+        claude_role_args(&mut a, "opus@\"; rm", "", true);
+        assert_eq!(a, ["--model", "opus"]);
+        // 不支持强度的 CLI：只剥掉 @强度
+        let mut a: Vec<String> = vec![];
+        claude_role_args(&mut a, "glm@high", "", false);
+        assert_eq!(a, ["--model", "glm"]);
+
+        // Codex：两个 -c
+        assert_eq!(
+            codex_model_args("gpt-6-sol@high"),
+            vec!["-c".to_string(), "model=\"gpt-6-sol\"".to_string(), "-c".to_string(), "model_reasoning_effort=\"high\"".to_string()]
+        );
+        assert_eq!(codex_model_args("@max"), vec!["-c".to_string(), "model_reasoning_effort=\"max\"".to_string()]);
+        assert_eq!(codex_model_args("gpt-6-sol@ultra"), vec!["-c".to_string(), "model=\"gpt-6-sol\"".to_string()]);
+
+        assert_eq!(zcode_reasoning_level("glm-5-turbo", ""), "enabled");
+        assert_eq!(zcode_reasoning_level("GLM-5-Turbo", "disabled"), "disabled");
+        assert_eq!(zcode_reasoning_level("GLM-5.3", ""), "high");
+        assert_eq!(zcode_reasoning_level("GLM-5.2", "max"), "max");
+        assert_eq!(zcode_reasoning_level("GLM-5.2", "bogus"), "high");
+        assert_eq!(clean_effort("zcode", "disabled"), Some("disabled"));
+        assert_eq!(clean_effort("zcode", "xhigh"), None);
+        assert_eq!(clean_effort("workbuddy", "high"), None);
     }
 
     #[test]

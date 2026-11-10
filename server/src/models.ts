@@ -40,6 +40,16 @@ const TIER_PICK: Record<string, Record<ModelTier, string>> = {
   codex: { light: 'gpt-5.6-luna', standard: 'gpt-6.1-sol', heavy: 'gpt-6.1-sol' },
 }
 
+/**
+ * 角色的 model 字符串把思考强度编码在末尾：`<模型id>@<强度>`，模型 id 可为空（`@high`）。
+ * 在最后一个 `@` 处切；没有 `@` 则 effort 为空。
+ */
+export function splitModel(raw: string | null | undefined): { model: string; effort: string } {
+  const s = raw ?? ''
+  const i = s.lastIndexOf('@')
+  return i < 0 ? { model: s, effort: '' } : { model: s.slice(0, i), effort: s.slice(i + 1) }
+}
+
 /** 这个工具能不能由项目经理代挑模型；不能就留空，交给执行端自己的默认 */
 export const canPickModel = (agent: string | null | undefined): boolean =>
   !!agent && !!TIER_PICK[agent]
@@ -48,8 +58,11 @@ export function modelForTier(agent: string | null | undefined, tier: ModelTier):
   return (agent ? TIER_PICK[agent]?.[tier] : null) ?? null
 }
 
-/** 模型 id → 一句适用场景；清单外的返回空串 */
+/** 模型 id → 一句适用场景；清单外的返回空串。带 `@强度` 的先拆开再查，有强度就追加「，思考强度 xxx」 */
 export function modelNote(agent: string | null | undefined, id: string | null | undefined): string {
   if (!agent || !id) return ''
-  return MODEL_CATALOG[agent]?.find(m => m.id === id)?.note ?? ''
+  const { model, effort } = splitModel(id)
+  const note = model ? MODEL_CATALOG[agent]?.find(m => m.id === model)?.note ?? '' : ''
+  if (!effort) return note
+  return note ? `${note}，思考强度 ${effort}` : `思考强度 ${effort}`
 }
