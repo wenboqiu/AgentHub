@@ -16,6 +16,10 @@ export type Config = {
   graphMode: boolean;
   /** 仅桌面：ZCode 权限请求的自动放行档位（off | low | medium） */
   zcodeAutoApprove: string;
+  /** 仅桌面：在客户端处理 Claude 终端会话的权限确认 */
+  hookRemoteApprove: boolean;
+  /** 仅桌面：允许在客户端远程「允许」（关着只能拒绝） */
+  hookRemoteAllow: boolean;
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
 
@@ -59,7 +63,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low" };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low", hookRemoteApprove: false, hookRemoteAllow: false };
 
 /**
  * 气泡图改成默认之后的一次性迁移：老配置里 graphMode 基本是「没选过」的 false，

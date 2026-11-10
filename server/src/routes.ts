@@ -22,6 +22,7 @@ import {
   decideApproval,
   expireApproval,
   expireApprovalsOfRuns,
+  expireHookApprovalsOfMachine,
   expirePending,
   failActiveRuns,
   getApproval,
@@ -850,6 +851,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       runs.map(r => r.id),
     )
     for (const a of expired) await pushApproval(userId, a, false)
+    // Claude 终端会话的 hook 审批没有 run：按机器过期，电脑端 hook 那边会自己放弃
+    for (const a of await expireHookApprovalsOfMachine(pool, userId, machine)) await pushApproval(userId, a, false)
     for (const [id, w] of historyWaits) {
       if (w.userId === userId && w.machine === machine) {
         historyWaits.delete(id)
@@ -1917,6 +1920,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const cur = await getApproval(pool, userId, id)
     if (!cur) return reply.code(404).send({ error: '授权请求不存在' })
     if (cur.status !== 'pending') return reply.code(409).send({ error: '这个授权请求已经处理过了' })
+    // Claude 终端会话的 hook 审批：没有 run，机器取自会话；结果用 hook.approval.decide 回给电脑端
+    if (cur.runId.startsWith('hook:')) {
+      const machine = (await getSession(pool, userId, cur.sessionId))?.machine
+      if (!machine || !executors.has(execKey(userId, machine))) return reply.code(409).send({ error: '电脑端不在线' })
+      if (decision === 'allow' && !cur.canAllow) return reply.code(403).send({ error: '这条审批只能拒绝，要远程允许请在电脑端设置里打开' })
+      const done = await decideApproval(pool, userId, id, decision === 'allow' ? 'allowed' : 'denied', 'user')
+      if (!done) return reply.code(409).send({ error: '这个授权请求已经处理过了' })
+      const message = await insertMessage(pool, userId, done.sessionId, null, 'approval', `${decision === 'allow' ? '已允许' : '已拒绝'}：${done.tool} ${done.detail}`)
+      await pushApproval(userId, done, false)
+      pushMessage(userId, message)
+      if (!sendExecutor(userId, machine, { type: 'hook.approval.decide', approvalId: id, decision })) {
+        // 刚好断线：电脑端 hook 已经放弃，终端会弹原生确认框，别让客户端以为生效了
+        return reply.code(409).send({ error: '电脑端不在线，请在终端里处理' })
+      }
+      return { ok: true }
+    }
     const run = await getRun(pool, userId, cur.runId)
     if (!run || !executors.has(execKey(userId, run.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     // Codex 提问：allow 需要带答案 {"问题id": ["选项"]}；deny = 跳过
@@ -2132,6 +2151,31 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         }
         // 项目经理先看：能自己放行就直接让 agent 继续，判不了才弹给人
         await refereeHandle(userId, approval, machine)
+        return
+      }
+      case 'hook.approval': {
+        // Claude 终端会话的权限确认：会话必须已由 hook 事件登记过、且属于这台电脑；一律交人，不走项目经理 / mandate
+        const sessionId = 'claude:' + str(m.sessionKey)
+        const session = str(m.sessionKey) ? await getSession(pool, userId, sessionId) : null
+        if (!session || session.machine !== machine) {
+          sendExecutor(userId, machine, { type: 'hook.approval.created', localId: m.localId, approvalId: '' })
+          return
+        }
+        const tool = cleanText(str(m.tool), 100) || 'tool'
+        const approval = await createApproval(pool, userId, randomUUID(), `hook:${sessionId}`, sessionId, tool, str(m.detail), m.canAllow === true)
+        const message = await insertMessage(pool, userId, sessionId, null, 'approval', approvalHeading(approval.tool, approval.detail))
+        pushMessage(userId, message)
+        sendExecutor(userId, machine, { type: 'hook.approval.created', localId: m.localId, approvalId: approval.id })
+        await pushApproval(userId, approval, true)
+        return
+      }
+      case 'hook.approval.expired': {
+        const cur = await getApproval(pool, userId, str(m.approvalId))
+        if (!cur || !cur.runId.startsWith('hook:')) return
+        const session = await getSession(pool, userId, cur.sessionId)
+        if (!session || session.machine !== machine) return
+        const expired = await expireApproval(pool, userId, cur.id, cur.runId)
+        if (expired) await pushApproval(userId, expired, false)
         return
       }
       case 'run.approvalExpired': {

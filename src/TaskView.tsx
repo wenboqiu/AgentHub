@@ -382,11 +382,12 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
         return <div key={a.id} className="approval-block">
           <p><code>{a.tool}</code> {isQuestion ? "它在问你问题" : a.detail.slice(0, 300)}{!isQuestion && a.detail.length > 300 ? "…" : ""}</p>
           <p className="dim">{[APPROVAL_TIER_LABEL[a.decisionTier], a.decisionReason].filter(Boolean).join(" · ")}</p>
+          {a.canAllow === false && <p className="hint">远程只能拒绝；要远程允许请在电脑端设置里打开</p>}
           <div className="action-bar status-actions">
             {isQuestion
               ? <button className="primary" onClick={() => onSession(a.sessionId)}>去回答</button>
               : <>
-                <button className="primary" disabled={busy} onClick={() => decideApproval(a, "allow")}>允许这一次</button>
+                {a.canAllow !== false && <button className="primary" disabled={busy} onClick={() => decideApproval(a, "allow")}>允许这一次</button>}
                 <button disabled={busy} onClick={() => decideApproval(a, "deny")}>拒绝</button>
                 <button className="ghost" onClick={() => onSession(a.sessionId)}>打开会话</button>
               </>}

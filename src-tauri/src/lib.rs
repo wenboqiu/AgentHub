@@ -35,6 +35,8 @@ mod focus;
 #[cfg(desktop)]
 mod forwarder;
 #[cfg(desktop)]
+mod hook_approval;
+#[cfg(desktop)]
 mod machines;
 #[cfg(desktop)]
 mod remote;
@@ -310,13 +312,20 @@ mod desktop {
                 if let Ok(d) = claude::default_hooks_dir() {
                     claude::refresh_script(&d);
                 }
-                collector::spawn(forwarder.clone(), collector_status.clone());
+                // 已装 hook 的老用户：把 PermissionRequest 组的 timeout 升上去（阻塞等人点按钮需要）
+                if let (Ok(s), Ok(d)) = (claude::default_settings_path(), claude::default_hooks_dir()) {
+                    if claude::hooks_status(&s, &d).installed {
+                        let _ = claude::install_hooks(&s, &d);
+                    }
+                }
+                let hook_bridge = crate::hook_approval::HookBridge::new();
+                collector::spawn(forwarder.clone(), collector_status.clone(), hook_bridge.clone(), shared.clone());
                 codex::spawn(forwarder.clone());
                 crate::doubao::spawn(forwarder.clone());
                 crate::workbuddy::spawn(forwarder.clone());
                 crate::zcode::spawn(forwarder.clone());
                 crate::reconcile::spawn(shared.clone());
-                let remote_status = remote::spawn(shared.clone());
+                let remote_status = remote::spawn(shared.clone(), hook_bridge);
                 app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
                 build_tray(app.handle())?;
                 crate::boot_log("setup done（托盘已建，进入事件循环）");

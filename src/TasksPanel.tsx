@@ -139,13 +139,13 @@ export default function TasksPanel({
         <span className="kind-chip k-approve">待授权</span>
         <div className="inbox-main">
           <strong className="inbox-title">{task && <span className="task-no">#{task.id} </span>}{title}</strong>
-          <span className="dim inbox-sub"><code>{a.tool}</code> {isQuestion ? "它在问你问题" : clip(a.detail, 120)}{a.decisionReason ? ` · ${a.decisionReason}` : ""}</span>
+          <span className="dim inbox-sub"><code>{a.tool}</code> {isQuestion ? "它在问你问题" : clip(a.detail, 120)}{a.decisionReason ? ` · ${a.decisionReason}` : ""}{a.canAllow === false ? " · 远程只能拒绝；要远程允许请在电脑端设置里打开" : ""}</span>
         </div>
         <div className="inbox-actions">
           {isQuestion
             ? <button className="primary" onClick={() => onOpenSession(a.sessionId)}>去回答</button>
             : <>
-              <button className="primary" disabled={busy} onClick={() => void decide(a, "allow")}>允许</button>
+              {a.canAllow !== false && <button className="primary" disabled={busy} onClick={() => void decide(a, "allow")}>允许</button>}
               <button disabled={busy} onClick={() => void decide(a, "deny")}>拒绝</button>
               <button className="ghost" onClick={() => onOpenSession(a.sessionId)}>打开会话</button>
             </>}

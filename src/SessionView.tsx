@@ -686,10 +686,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                       项目经理看过了：{a.decisionReason}。需要你来定。
                     </p>
                   )}
+                  {a.canAllow === false && <p className="hint">远程只能拒绝；要远程允许请在电脑端设置里打开</p>}
                   <div className="btns">
-                    <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
-                      {deciding === a.id ? "处理中…" : "允许"}
-                    </button>
+                    {a.canAllow !== false && (
+                      <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
+                        {deciding === a.id ? "处理中…" : "允许"}
+                      </button>
+                    )}
                     <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
                       {deciding === a.id ? "处理中…" : "拒绝"}
                     </button>

@@ -113,6 +113,15 @@ viewer 的 snapshot 增加 `goals`、`tasks` 数组。新增同账号广播：`{
 
 执行器断线（或被顶掉）时，它名下 queued/running 的 run 标 `failed`（`电脑端断开`），pending 授权标 `expired`。
 
+Claude 终端会话的权限确认（`PermissionRequest` hook，没有 run）用专用消息，不复用 `run.approval`：
+
+| 方向 | 消息 |
+|---|---|
+| 执行器 → 服务端 | `hook.approval {localId, sessionKey, tool, detail, canAllow}`（`sessionKey` 是 Claude 的 session_id，会话 `claude:<sessionKey>` 必须已存在且属于该执行器，否则回 `approvalId:""`；一律交人，不走项目经理 / mandate）、`hook.approval.expired {approvalId}`（等待超时 / 终端已处理：置 expired 并广播） |
+| 服务端 → 执行器 | `hook.approval.created {localId, approvalId}`（`approvalId` 为空串 = 不受理）、`hook.approval.decide {approvalId, decision}`（`allow` / `deny`） |
+
+审批行的 `run_id` 为 `hook:<sessionId>`，`can_allow=false` 时 `POST /approvals/:id` 的 allow 返回 403，只能拒绝；执行器不在线返回 409。执行器断线时该机器上所有 pending 的 hook 审批置 expired。
+
 授权在执行器等待 30 分钟超时后，立即上报 `run.approvalExpired`。服务端核对机器及运行归属，仅将 pending 授权改为 expired 并广播，运行可继续；重复通知无副作用。此修复需要同时更新桌面执行器和服务端。
 
 `run.session` 处理：在一个事务里把临时会话改名为 `<agent>:<sessionKey>`（`runs` / `messages` / `approvals` 的 session_id 一起改）；真实 id 已存在则保留真实行（标题为空时补上临时行的标题）并删除临时行；随后广播 `removed`（临时 id）、`session`（真实行，notify=false）、`session.renamed {from, to}` 和该 run 的最新状态。拿到真实 id 之前 run 失败 / 停止 / 执行器断线，临时会话标 `aborted`（summary 为错误信息，notify=true）。

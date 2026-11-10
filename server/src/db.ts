@@ -208,6 +208,8 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     decided_at timestamptz
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(user_id, session_id, status)')
+  // Claude 终端会话的 hook 审批：电脑端设置里没开「远程允许」时只能拒绝
+  await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS can_allow boolean NOT NULL DEFAULT true')
 }
 
 // 多个进程同时启动（或测试并行）时，CREATE TABLE IF NOT EXISTS 会互相撞，用 advisory lock 串行
@@ -527,6 +529,8 @@ export type Approval = {
   decisionReason: string
   /** 裁决层级：pending 时是「为什么轮不到规则定」，decided 时是「凭什么放的」 */
   decisionTier: string
+  /** false = 只能远程拒绝（Claude 终端 hook 审批，电脑端没开「远程允许」） */
+  canAllow: boolean
   createdAt: string
   decidedAt: string | null
 }
@@ -544,6 +548,7 @@ type ApprovalRow = {
   decision_rule?: string | null
   decision_reason?: string | null
   decision_tier?: string | null
+  can_allow?: boolean | null
   created_at: Date
   decided_at: Date | null
 }
@@ -584,6 +589,7 @@ const toApproval = (r: ApprovalRow): Approval => ({
   decisionRule: r.decision_rule ?? '',
   decisionReason: r.decision_reason ?? '',
   decisionTier: r.decision_tier ?? '',
+  canAllow: r.can_allow !== false,
   createdAt: r.created_at.toISOString(),
   decidedAt: r.decided_at ? r.decided_at.toISOString() : null,
 })
@@ -965,11 +971,11 @@ export async function listMessages(pool: pg.Pool, userId: number, sessionId: str
   return r.rows.map(toMessage)
 }
 
-export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string): Promise<Approval> {
+export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string, canAllow = true): Promise<Approval> {
   // userInput 的 detail 是 questions 的 JSON，放宽上限才能让 UI 渲染完整选项
   const r = await pool.query<ApprovalRow>(
-    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status) VALUES ($1,$6,$2,$3,$4,$5,'pending') RETURNING *",
-    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId],
+    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status, can_allow) VALUES ($1,$6,$2,$3,$4,$5,'pending',$7) RETURNING *",
+    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId, canAllow],
   )
   return toApproval(r.rows[0])
 }
@@ -1013,6 +1019,15 @@ export async function reopenApproval(pool: pg.Pool, userId: number, id: string):
 export async function expireApprovalsOfRuns(pool: pg.Pool, userId: number, runIds: string[]): Promise<Approval[]> {
   if (!runIds.length) return []
   const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = 'expired', decided_at = now() WHERE user_id = $2 AND run_id = ANY($1) AND status = 'pending' RETURNING *", [runIds, userId])
+  return r.rows.map(toApproval)
+}
+
+/** 电脑端断开：它名下 Claude 终端会话（run_id 以 hook: 开头）的 pending 审批全部过期 */
+export async function expireHookApprovalsOfMachine(pool: pg.Pool, userId: number, machine: string): Promise<Approval[]> {
+  const r = await pool.query<ApprovalRow>(
+    "UPDATE approvals a SET status = 'expired', decided_at = now() FROM sessions s WHERE a.user_id = $1 AND a.run_id LIKE 'hook:%' AND a.status = 'pending' AND s.user_id = a.user_id AND s.id = a.session_id AND s.machine = $2 RETURNING a.*",
+    [userId, machine],
+  )
   return r.rows.map(toApproval)
 }
 

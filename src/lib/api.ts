@@ -302,6 +302,8 @@ export type Approval = {
   decisionReason: string;
   /** 裁决层级：danger 硬红线 / gray 看上下文 / unknown 规则看不懂 */
   decisionTier: string;
+  /** false = 只能远程拒绝（Claude 终端权限确认，电脑端没开「远程允许」） */
+  canAllow?: boolean;
   createdAt: string;
   decidedAt: string | null;
   project?: string;

@@ -277,6 +277,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     form.notifyDesktop !== cfg.notifyDesktop ||
     form.remoteEnabled !== cfg.remoteEnabled ||
     form.zcodeAutoApprove !== cfg.zcodeAutoApprove ||
+    form.hookRemoteApprove !== cfg.hookRemoteApprove ||
+    form.hookRemoteAllow !== cfg.hookRemoteAllow ||
     JSON.stringify(denied) !== JSON.stringify(cfg.deniedRoots ?? []);
 
   const save = async () => {
@@ -287,6 +289,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       notifyDesktop: form.notifyDesktop,
       remoteEnabled: form.remoteEnabled,
       zcodeAutoApprove: form.zcodeAutoApprove,
+      hookRemoteApprove: form.hookRemoteApprove,
+      hookRemoteAllow: form.hookRemoteApprove && form.hookRemoteAllow,
       deniedRoots: denied,
     };
     try {
@@ -691,6 +695,15 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                 允许手机远程执行（每次授权仍要在手机上确认）
               </label>
               <p className="hint">关掉后这台电脑仍显示「开着，没开远程执行」，派给它的单会排队，直到这里重新打开。</p>
+              <label className="check">
+                <input type="checkbox" checked={form.hookRemoteApprove} onChange={(e) => set("hookRemoteApprove", e.target.checked)} />
+                在客户端处理 Claude 终端的权限确认
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={form.hookRemoteApprove && form.hookRemoteAllow} disabled={!form.hookRemoteApprove} onChange={(e) => set("hookRemoteAllow", e.target.checked)} />
+                允许在客户端远程放行（风险：手机上点允许就会在电脑上执行）
+              </label>
+              <p className="hint">开启后，终端里的 Claude 弹出权限确认时，客户端会出现一张审批卡，最多等 25 秒；没人处理就回到终端原生确认框。只开第一项时，客户端只能点「拒绝」。</p>
 
               <h3>禁止执行的目录（黑名单）</h3>
               <p className="hint">
