@@ -271,7 +271,7 @@ export default function ProposalCard({
           </select>
         </label>
         <div className="proposal-bounds-edit">
-          <span className="dim">执行边界 · 确认前可改，确认后冻结</span>
+          <span className="dim">执行边界 · 一般不用改，确认后冻结</span>
           <BoundsEditor value={form.constraints} disabled={busy} onChange={c => set({ constraints: c })} />
         </div>
         {proposal.evidence.length > 0 && (

@@ -29,17 +29,6 @@ export type TaskConstraints = {
 export const NO_CONSTRAINTS: TaskConstraints = { paths: [], net: false, push: false, scripts: false, note: "" };
 export const hasConstraints = (c?: TaskConstraints | null): boolean =>
   !!c && (c.paths.length > 0 || c.net || c.push || c.scripts || !!c.note);
-/** 界面上的短标签：这个任务被允许做什么 */
-export function constraintsSummary(c?: TaskConstraints | null): string[] {
-  if (!c) return [];
-  return [
-    c.paths.length ? `只改 ${c.paths.join("、")}` : "",
-    c.net ? "可联网" : "",
-    c.push ? "可推远端" : "",
-    c.scripts ? "可跑脚本" : "",
-    c.note,
-  ].filter(Boolean);
-}
 export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null; /** 授权范围冻结时间；非空 = 范围已签署，不能再改 */ mandateFrozenAt?: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | "autoDispatch" | keyof Schedule>>;
 /** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */

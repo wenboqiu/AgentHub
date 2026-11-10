@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Api, Approval, Attachment, BoardEntry, AttachmentInput, EvidenceKind, FilePreviewData, Goal, Machine, Project, ProjectDir, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
-import { APPROVAL_TIER_LABEL, NO_CONSTRAINTS, constraintsSummary } from "./lib/api";
+import { APPROVAL_TIER_LABEL, NO_CONSTRAINTS } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import BoundsEditor from "./BoundsEditor";
 import Icon from "./Icon";
@@ -675,15 +675,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
           <PrioritySelect value={task.priority ?? "medium"} onChange={priority => patch({ priority })} />
         </div>
         <div className="prop"><span className="prop-label">执行边界</span>
-          {task.mandateFrozenAt
-            ? <div className="bound-chips">
-              {(constraintsSummary(task.constraints).length > 0 ? constraintsSummary(task.constraints) : ["不限目录 · 不联网 · 不推远端 · 不跑脚本"]).map(c => <span key={c} className="bound-chip">{c}</span>)}
-              <span className="dim">· 已冻结</span>
-            </div>
-            : <>
-              <BoundsEditor value={task.constraints ?? NO_CONSTRAINTS} disabled={busy} onChange={constraints => patch({ constraints })} />
-              <span className="dim">第一次派发时冻结</span>
-            </>}
+          <BoundsEditor value={task.constraints ?? NO_CONSTRAINTS} disabled={busy} frozen={!!task.mandateFrozenAt} onChange={constraints => patch({ constraints })} />
         </div>
         <details className="prop task-fold">
           <summary>时间 · 提醒 · 计时</summary>
