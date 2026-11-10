@@ -316,6 +316,16 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     if (stick.current) window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
   }, [flowKey, approvals.length]);
 
+  // 打开对话流即视为处理：进来看这一轮，这条会话自动从待处理区撒下（不再单放「处理」按钮）。
+  // 快照每几秒就换新对象，用 ref 记下已 ack 的会话，避免重复发请求；
+  // 之后会话再次变回 pending（新一轮结束）时照样会再 ack 一次。
+  const autoAcked = useRef(new Set<string>());
+  useEffect(() => {
+    if (!session || !isPending(session) || autoAcked.current.has(session.id)) return;
+    autoAcked.current.add(session.id);
+    onAck();
+  }, [session, onAck]);
+
   if (!session) {
     return (
       <div className="app">
@@ -442,15 +452,6 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       window.setTimeout(() => setNote(""), 3500);
     });
   const stop = () => run && guard("stop", () => api.stop(run.id));
-  // 打开对话流即视为处理：进来看这一轮，这条会话自动从待处理区撒下（不再单放「处理」按钮）。
-  // 快照每几秒就换新对象，用 ref 记下已 ack 的会话，避免重复发请求；
-  // 之后会话再次变回 pending（新一轮结束）时照样会再 ack 一次。
-  const autoAcked = useRef(new Set<string>());
-  useEffect(() => {
-    if (!session || !isPending(session) || autoAcked.current.has(session.id)) return;
-    autoAcked.current.add(session.id);
-    onAck();
-  }, [session, onAck]);
   // 手动同步电脑上的记录；失败要提示（自动同步失败才静默保留旧记录）
   const loadHistory = () => {
     if (syncing || !online) return;
