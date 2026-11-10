@@ -1,4 +1,4 @@
-type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "phone";
+type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "stats" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "phone";
 
 /** Original outline symbols; inherit text colour and remain decorative. */
 export default function Icon({ name }: { name: IconName }) {
@@ -14,6 +14,7 @@ export default function Icon({ name }: { name: IconName }) {
     board: <><rect x="3" y="4" width="5.5" height="16" rx="1.5" /><rect x="9.5" y="4" width="5" height="11" rx="1.5" /><rect x="15.5" y="4" width="5.5" height="8" rx="1.5" /></>,
     goals: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></>,
     calendar: <><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M8 14h3"/></>,
+    stats: <path d="M6 20V11M12 20V4M18 20v-6"/>,
     settings: <><path d="M9 4 10 2h4l1 2 2 1 2 .2 2 3.6-1 1.8v2.8l1 1.8-2 3.6-2 .2-2 1-1 2h-4l-1-2-2-1-2-.2-2-3.6 1-1.8v-2.8L3 8.8l2-3.6L7 5Z" /><circle cx="12" cy="12" r="3" /></>,
     back: <path d="m14 5-7 7 7 7" />,
     plus: <path d="M12 5v14M5 12h14" />,

@@ -265,6 +265,23 @@ export type RunActivity = { runId: string; sessionId: string; kind: "thinking" |
 export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
 export type ActivityBucket = { sessionId: string; at: string; count: number };
+/** 统计指标（一个周期 / 一个拆分行 / 合计），数值全是 number */
+export type StatsMetrics = {
+  sessionsNew: number; sessionsActive: number; messages: number;
+  runs: number; runsDone: number; runsFailed: number; runsStopped: number; runSeconds: number;
+  tokensIn: number; tokensOut: number; costUsd: number; credits: number;
+  tasksCreated: number; tasksDone: number; taskDoneSeconds: number; reviewRejects: number;
+};
+export type StatsGranularity = "day" | "week" | "month";
+export type StatsBy = "none" | "agent" | "project" | "model";
+export type StatsResponse = {
+  granularity: StatsGranularity; from: string; to: string; tz: string;
+  series: ({ period: string } & StatsMetrics)[];
+  totals: StatsMetrics;
+  previous: { from: string; to: string; totals: StatsMetrics };
+  breakdown: { by: StatsBy; rows: ({ key: string } & StatsMetrics)[] };
+  snapshot: { todo: number; doing: number; review: number; done: number };
+};
 export type MessageRole = "user" | "assistant" | "tool" | "approval" | "system";
 export type Message = { id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string; sourceId?: string; branchPoint?: string; rating?: "up"|"down"|null }
 export type ApprovalStatus = "pending" | "allowed" | "denied" | "expired";
@@ -481,6 +498,13 @@ export class Api {
   /** 日历：一段时间内的执行记录（ISO 时间） */
   executions = (from: string, to: string) => this.call<{ executions: Execution[] }>("GET", `/runs?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
   activity = (from: string, to: string) => this.call<{ activity: ActivityBucket[] }>("GET", `/activity?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
+  /** 统计：按日 / 周 / 月的会话、运行、任务数量；from / to 是服务端统计时区下的 YYYY-MM-DD，缺省取各粒度的默认范围 */
+  stats = (p: { from?: string; to?: string; granularity: StatsGranularity; by: StatsBy }) => {
+    const q = new URLSearchParams({ granularity: p.granularity, by: p.by });
+    if (p.from) q.set("from", p.from);
+    if (p.to) q.set("to", p.to);
+    return this.call<StatsResponse>("GET", `/stats?${q}`);
+  };
   decide = (approvalId: string, decision: "allow" | "deny", answers?: Record<string, string[]>) =>
     this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision, ...(answers ? { answers } : {}) });
   history = (sessionId: string) => this.call<{ messages: Message[] }>("POST", `/sessions/${encodeURIComponent(sessionId)}/history`, {});

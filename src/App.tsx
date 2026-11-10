@@ -19,10 +19,11 @@ import Markdown from "./Markdown";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
 import { isInternalSession } from "./lib/internal";
+import StatsView from "./StatsView";
 // proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
 type Detail = {kind:"session";id:string} | {kind:"proposal";id:string} | {kind:"task"|"goal";id:number} | null;
-type Tab = "sessions"|"tasks"|"goals"|"calendar";
-const TAB_LABEL = { sessions:"会话", tasks:"任务", goals:"目标", calendar:"日历" } as const;
+type Tab = "sessions"|"tasks"|"goals"|"calendar"|"stats";
+const TAB_LABEL = { sessions:"会话", tasks:"任务", goals:"目标", calendar:"日历", stats:"统计" } as const;
 
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
@@ -532,7 +533,7 @@ export default function App() {
 
   const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
   // 派单 tab 已下线；看板并入「任务」页，派活统一从那里走
-  const tabs = ["sessions","tasks","goals","calendar"] as const;
+  const tabs = ["sessions","tasks","goals","calendar","stats"] as const;
   const renderList = (items: Session[]) => (
     <ul className="list">
       {items.map((s) => (
@@ -571,6 +572,7 @@ export default function App() {
         <div hidden={tab!=="tasks"}>{api && <TasksPanel api={api} board={board} now={now} projects={projects} roles={roles} proposals={proposalList} approvals={[...approvals.values()]} sessions={list} autoDispatch={!!manager?.enabled} onRefresh={refreshBoard} onNotice={say} onProposal={saveProposal} onSaved={saveTask} onOpenSession={openSession} tasks={taskList} goals={goalList} onOpen={openTask} onCreate={async title=>saveTask(await api.createTask({title}))}/>}</div>
         <div hidden={tab!=="goals"}>{api && <GoalsPanel goals={goalList} tasks={taskList} onOpen={openGoal} onCreate={async (title,priority)=>saveGoal(await api.createGoal({title,priority}))}/>}</div>
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
+        <div hidden={tab!=="stats"}>{api && <StatsView api={api} active={tab==="stats"}/>}</div>
         <div hidden={tab!=="sessions"}>
         <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部标为已处理</button>}</div>
         {cfg.graphMode ? (
