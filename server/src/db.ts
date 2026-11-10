@@ -1,6 +1,7 @@
 import pg from 'pg'
 import { migrateTasks } from './tasks.ts'
 import { migrateNotify } from './notify.ts'
+import { migratePrefs } from './prefs.ts'
 import { migrateDigests } from './digest.ts'
 import { migrateWatchdog } from './watchdog.ts'
 import { migrateReview } from './review.ts'
@@ -212,6 +213,7 @@ export async function migrate(pool: pg.Pool) {
     await migrateAll(client)
     await migrateTasks(client)
     await migrateNotify(client)
+    await migratePrefs(client)
     await migrateDigests(client)
     await migrateWatchdog(client)
     await migrateReview(client)

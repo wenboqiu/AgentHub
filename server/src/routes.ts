@@ -57,6 +57,7 @@ import {
 import { authenticate, type Kick } from './auth.ts'
 import { ackReminder, collectReminders, listReminders } from './reminders.ts'
 import { evaluateNotify, getSettings, saveSettings } from './notify.ts'
+import { getPrefs, savePrefs } from './prefs.ts'
 import { buildFailureDigest, buildReviewDigest, getDigests } from './digest.ts'
 import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } from './watchdog.ts'
 import { taskThread } from './threads.ts'
@@ -1060,6 +1061,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const settings = await saveSettings(pool, req.userId, req.body)
     broadcast(req.userId, { type: 'notify.settings', settings })
     return { settings }
+  }))
+  // 账号级界面偏好（agent 头像）：改了推给同账号所有设备，电脑手机一起换
+  app.get('/prefs', async req => ({ prefs: await getPrefs(pool, req.userId) }))
+  app.patch('/prefs', async req => serial(async () => {
+    const prefs = await savePrefs(pool, req.userId, req.body)
+    broadcast(req.userId, { type: 'prefs', prefs })
+    return { prefs }
   }))
   // 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）
   app.get('/roles', async req => serial(async () => ({ roles: await listRoles(pool, req.userId) })))
