@@ -4,6 +4,9 @@ import Manager from "./Manager";
 import Roles, { RoleEditor } from "./Roles";
 import Projects, { ProjectEditor } from "./Projects";
 import Icon from "./Icon";
+import AvatarSettings from "./AvatarSettings";
+import AgentAvatar from "./AgentAvatar";
+import { AGENT_LABEL } from "./lib/agents";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
 export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
@@ -42,7 +45,7 @@ const fmtTime = (iso: string) => {
 };
 
 /** 设置页的一级条目：点进去才改细节，列表上先给一句现状 */
-function SettingsRow({ icon, title, summary, badge, onClick }: { icon: Parameters<typeof Icon>[0]["name"]; title: string; summary: string; badge?: string; onClick(): void }) {
+function SettingsRow({ icon, title, summary, badge, onClick }: { icon: Parameters<typeof Icon>[0]["name"]; title: string; summary: React.ReactNode; badge?: string; onClick(): void }) {
   return (
     <li>
       <button className="settings-row" onClick={onClick}>
@@ -74,7 +77,7 @@ type Props = {
 };
 
 /** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
-type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "project" | "manager" | "desktop" | "android";
+type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "project" | "manager" | "desktop" | "android" | "avatars";
 
 /** role / project 页的标题跟着那一条的名字走，不在这里写死 */
 const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
@@ -85,6 +88,7 @@ const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
   manager: "项目经理",
   desktop: "本机执行与采集",
   android: "Android 后台提醒",
+  avatars: "agent 头像",
 };
 
 export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) {
@@ -457,6 +461,9 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             )}
 
             <h2>外观</h2>
+            <ul className="settings-list">
+              <SettingsRow icon="user" title="agent 头像" summary={<span className="avatar-strip">{Object.keys(AGENT_LABEL).map((a) => <AgentAvatar key={a} agent={a} size={20} decorative />)}</span>} onClick={() => setPage("avatars")} />
+            </ul>
             <section className="box">
               <label>
                 对话页展示方式
@@ -661,6 +668,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
         )}
 
         {page === "manager" && api && <Manager api={api} />}
+        {page === "avatars" && <AvatarSettings api={api} />}
 
         {page === "desktop" && isDesktop && (
           <>

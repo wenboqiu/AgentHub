@@ -300,6 +300,30 @@ body.sidebar-resizing { user-select: none; -webkit-user-select: none; }
 /* 对话流对齐 WorkBuddy：只有用户消息是气泡，assistant 回复平铺直书，不套框 */
 .msg.assistant { align-self: flex-start; background: transparent; border-radius: 0; padding: 0; }
 .message-entry.assistant > .msg-time { margin: 4px 0 0; }
+/* 回复前的 agent 头像：头像占左列，正文 / 时间 / 操作排在右列 */
+.message-entry.has-avatar { display: grid; grid-template-columns: 32px minmax(0,1fr); column-gap: 10px; align-items: start; }
+.message-entry.has-avatar > .agent-avatar { grid-column: 1; grid-row: 1 / span 3; margin-top: 2px; }
+.message-entry.has-avatar > :not(.agent-avatar) { grid-column: 2; }
+.agent-avatar { display: inline-flex; align-items: center; justify-content: center; flex: none; border-radius: 50%; overflow: hidden; object-fit: cover; line-height: 1; user-select: none; box-shadow: 0 0 0 1px var(--line); }
+.agent-avatar.initial { color: #fff; font-weight: 600; }
+.avatar-strip { display: inline-flex; gap: 4px; vertical-align: middle; }
+.avatar-agents { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
+.avatar-agents button { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--field); color: var(--fg); }
+.avatar-agents button.on { border-color: var(--accent); background: var(--accent-soft); }
+.avatar-presets { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 8px; margin: 8px 0 12px; }
+.avatar-presets button { display: flex; align-items: center; justify-content: center; padding: 4px; aspect-ratio: 1; border-radius: 14px; border: 2px solid transparent; background: var(--field); }
+.avatar-presets button.on { border-color: var(--accent); }
+.avatar-presets button { position: relative; }
+.avatar-tag { position: absolute; bottom: 2px; left: 50%; transform: translateX(-50%); padding: 0 5px; white-space: nowrap; border-radius: 6px; font-size: 10px; line-height: 14px; background: var(--card); color: var(--dim); box-shadow: 0 0 0 1px var(--line); }
+/* 角色 / 项目编辑页的头像一栏 */
+.avatar-field { margin: 4px 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.avatar-field-head { display: flex; align-items: center; gap: 12px; }
+.avatar-field-head > div { flex: 1; min-width: 0; }
+.avatar-field-head p { margin: 2px 0 0; font-size: 13px; }
+.avatar-field .avatar-picker { margin-top: 10px; }
+.role-head > .agent-avatar { margin-right: 2px; }
+/* 网上形象多是透明底的像素 / 立绘：垫白底，深色模式里也看得清 */
+.agent-avatar.mascot { background: #fff; }
 .message-entry.assistant .msg-image { margin-top: 8px; }
 .msg.tool, .msg.system { align-self: flex-start; max-width: 100%; background: transparent; padding: 0 4px; font-size: 12px; color: var(--dim); }
 .msg.tool { font-family: ui-monospace, Consolas, monospace; }

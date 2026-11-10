@@ -7,6 +7,7 @@ import Icon from "./Icon";
 import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
+import AgentAvatar from "./AgentAvatar";
 import SessionSidebar from "./SessionSidebar";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
@@ -571,7 +572,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         )}
         <ul className="msgs">
           {messages.map((m) => (
-            <li key={m.id} className={`message-entry ${m.role}`}>
+            <li key={m.id} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
+              {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
               <div className={`msg ${m.role}`}>
                 {/* 人和 agent 的话都按 markdown 渲染（都会贴表格、代码、路径）；
                     tool / system 行还是原文，终端输出里的符号不能被当成格式 */}
@@ -588,7 +590,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           ))}
           {/* 豆包：窗口里抓到的消息，只读——没有时间、不能分支 / 评价 / 重发 */}
           {doubaoMsgs.map((m, i) => (
-            <li key={`doubao-${i}`} className={`message-entry ${m.role}`}>
+            <li key={`doubao-${i}`} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
+              {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
               <div className={`msg ${m.role}`}><Markdown text={m.text} onFile={openFile} /></div>
             </li>
           ))}

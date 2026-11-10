@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Api, Memory, Project, Role, RoleInput } from "./lib/api";
-import { AGENT_LABEL } from "./lib/agents";
+import { AGENT_LABEL, agentName } from "./lib/agents";
+import { RoleAvatar } from "./AgentAvatar";
+import AvatarField from "./AvatarField";
 import { autoModelRange } from "./lib/models";
 import Assistant from "./Assistant";
 import RoleFields, { BLANK_ROLE, formToInput, roleReady, roleToForm } from "./RoleFields";
@@ -97,8 +99,8 @@ export function RoleEditor({ api, role: initial, onBack, onSaved, onDeleted }: {
     const creating = !role;
     try {
       const r = creating
-        ? await api.createRole(formToInput(form) as RoleInput & { name: string })
-        : await api.updateRole(role.id, formToInput(form));
+        ? await api.createRole({ ...formToInput(form), avatar: form.avatar } as RoleInput & { name: string })
+        : await api.updateRole(role.id, { ...formToInput(form), avatar: form.avatar });
       setRole(r);
       setForm(roleToForm(r));
       onSaved(r);
@@ -129,6 +131,13 @@ export function RoleEditor({ api, role: initial, onBack, onSaved, onDeleted }: {
           <h2>基本信息</h2>
           {dirty && <span className="badge">未保存</span>}
         </div>
+        <AvatarField
+          value={form.avatar}
+          busy={busy}
+          preview={(s, size) => <RoleAvatar role={{ name: form.name || "角色", agent: (form.agent || null) as Role["agent"] }} spec={s} size={size} decorative />}
+          defaultTitle={form.agent ? `默认：跟随 ${agentName(form.agent)} 的头像` : "默认：角色名首字母"}
+          onChange={(avatar) => setForm((f) => ({ ...f, avatar }))}
+        />
         <RoleFields form={form} projects={projects} busy={busy} onChange={(patch) => setForm((f) => ({ ...f, ...patch }))} />
         <div className="btns">
           <button className="primary" disabled={busy || !dirty || !roleReady(form)} onClick={() => void save()}>
@@ -191,6 +200,7 @@ export default function Roles({ api, onEdit }: { api: Api; onEdit(role: Role | n
           {list.map((r) => (
             <div key={r.id} className="profile-card">
               <button type="button" className="role-head" onClick={() => onEdit(r)}>
+                <RoleAvatar role={r} size={28} decorative />
                 <strong>{r.name}</strong>
                 {r.agent && <span className={`tag ${r.agent}`}>{AGENT_LABEL[r.agent] ?? r.agent}</span>}
                 {!r.agent && <span className="badge">缺执行工具</span>}

@@ -43,7 +43,7 @@ export function constraintsSummary(c?: TaskConstraints | null): string[] {
 export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: Delivery; forkFrom: string | null; /** 发单时留空的配置/角色/正文交给项目经理补 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: "high" | "medium" | "low"; title: string; notes: string; status: "todo" | "doing" | "review" | "done"; agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null; /** 授权范围冻结时间；非空 = 范围已签署，不能再改 */ mandateFrozenAt?: string | null };
 export type TaskInput = Partial<Pick<Task, "title" | "notes" | "goalId" | "projectId" | "roleId" | "priority" | "agent" | "machine" | "cwd" | "status" | "checklist" | "constraints" | "autoDispatch" | keyof Schedule>>;
 /** 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）；目录是项目的事 */
-export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; manager: boolean; managerProjects: number[]; createdAt: string; updatedAt: string };
+export type Role = { id: number; name: string; title: string; agent: Task["agent"]; model: string | null; context: string; tools: string[]; tasks: number; manager: boolean; managerProjects: number[]; /** 自定义头像；没有 = 用执行工具的 agent 头像 */ avatar?: AgentAvatarSpec | null; createdAt: string; updatedAt: string };
 export type RoleInput = Partial<Omit<Role, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
 /** 一条目录 = 这个项目在某台电脑上住在哪；machine 为空表示哪台电脑都适用 */
@@ -57,7 +57,7 @@ export type Machine = {
   agents: string[];
 };
 /** 项目：一个代码库的身份与背景知识 + 它在各台电脑上的目录，派活时按当前机器自动挑 */
-export type Project = { id: number; name: string; brief: string; dirs: ProjectDir[]; tasks: number; createdAt: string; updatedAt: string };
+export type Project = { id: number; name: string; brief: string; dirs: ProjectDir[]; /** 自定义头像；没有 = 项目名首字母 */ avatar?: AgentAvatarSpec | null; tasks: number; createdAt: string; updatedAt: string };
 export type ProjectInput = Partial<Omit<Project, "id" | "tasks" | "createdAt" | "updatedAt">>;
 
 /** 角色助手：一句话需求交给电脑端的 agent 整理成草稿，人确认后才建角色 */

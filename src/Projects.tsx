@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Api, BriefEntry, Machine, Project, ProjectDir, ProjectInput } from "./lib/api";
+import type { AgentAvatarSpec, Api, BriefEntry, Machine, Project, ProjectDir, ProjectInput } from "./lib/api";
+import { ProjectAvatar } from "./AgentAvatar";
+import AvatarField from "./AvatarField";
 import Markdown from "./Markdown";
 
 // 项目管理：一个代码库的身份与背景知识 + 它在各台电脑上的目录。
@@ -8,14 +10,15 @@ import Markdown from "./Markdown";
 // 「配置」(profile) = 一台电脑 + 这个项目在那台电脑上的目录：派活时按当前电脑自动挑对应那条，
 // 路径不会串设备；电脑留空 = 哪台都适用，同一台/同一种最多一条（服务端也校验）。
 
-type Form = { name: string; brief: string; dirs: ProjectDir[] };
-const BLANK: Form = { name: "", brief: "", dirs: [] };
-const toForm = (p: Project): Form => ({ name: p.name, brief: p.brief, dirs: p.dirs.map(d => ({ ...d })) });
+type Form = { name: string; brief: string; dirs: ProjectDir[]; avatar: AgentAvatarSpec | null };
+const BLANK: Form = { name: "", brief: "", dirs: [], avatar: null };
+const toForm = (p: Project): Form => ({ name: p.name, brief: p.brief, dirs: p.dirs.map(d => ({ ...d })), avatar: p.avatar ?? null });
 const toInput = (f: Form): ProjectInput => ({
   name: f.name.trim(),
   brief: f.brief.trim(),
   // 没填路径的那条等于还没配完，留着不下发
   dirs: f.dirs.filter(d => d.cwd.trim()).map(d => ({ machine: d.machine, cwd: d.cwd.trim() })),
+  avatar: f.avatar,
 });
 
 /** 电脑下拉里的「其他电脑」：不在清单里的机器名也能手填 */
@@ -231,6 +234,14 @@ export function ProjectEditor({ api, project: initial, onBack, onSaved, onDelete
           <h2>基本信息</h2>
           {dirty && <span className="badge">未保存</span>}
         </div>
+        <AvatarField
+          value={form.avatar}
+          busy={busy}
+          preview={(s, size) => <ProjectAvatar project={{ name: form.name || "项目" }} spec={s} size={size} decorative />}
+          defaultTitle="默认：项目名首字母"
+          hideInitial
+          onChange={(avatar) => setForm(f => ({ ...f, avatar }))}
+        />
         <Fields form={form} machines={machines} busy={busy} onChange={(patch) => setForm(f => ({ ...f, ...patch }))} />
         <div className="btns">
           <button className="primary" disabled={busy || !dirty || !ready} onClick={() => void save()}>
@@ -287,6 +298,7 @@ export default function Projects({ api, onEdit }: { api: Api; onEdit(project: Pr
           {list.map((p) => (
             <div key={p.id} className="profile-card">
               <button type="button" className="role-head" onClick={() => onEdit(p)}>
+                <ProjectAvatar project={p} size={28} decorative />
                 <strong>{p.name}</strong>
                 <span className="dim role-title">
                   {p.dirs.length

@@ -1,4 +1,4 @@
-import type { Project, Role, RoleInput } from "./lib/api";
+import type { AgentAvatarSpec, Project, Role, RoleInput } from "./lib/api";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS } from "./lib/agents";
 import ModelPicker from "./ModelPicker";
 
@@ -17,17 +17,20 @@ export type RoleForm = {
   tools: string;
   manager: boolean;
   managerProjects: number[];
+  /** 自定义头像；null = 用执行工具的 agent 头像。只在角色编辑页改，formToInput 不带它（助手草稿确认接口不认） */
+  avatar: AgentAvatarSpec | null;
 };
 
 /** 执行工具必填，所以草稿默认停在 claude 上，不留「未指定」这种半成品 */
 export const BLANK_ROLE: RoleForm = {
-  name: "", title: "", agent: "claude", model: "", context: "", tools: "", manager: false, managerProjects: [],
+  name: "", title: "", agent: "claude", model: "", context: "", tools: "", manager: false, managerProjects: [], avatar: null,
 };
 
 export const roleToForm = (r: Role): RoleForm => ({
   name: r.name, title: r.title, agent: r.agent ?? "", model: r.model ?? "", context: r.context,
   tools: r.tools.join("、"),
   manager: r.manager, managerProjects: r.managerProjects,
+  avatar: r.avatar ?? null,
 });
 
 export const formToInput = (f: RoleForm): RoleInput => ({

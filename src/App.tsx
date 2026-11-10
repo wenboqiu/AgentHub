@@ -20,6 +20,7 @@ import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
 import { isInternalSession } from "./lib/internal";
 import StatsView from "./StatsView";
+import { loadAvatarPrefs, setAvatarPrefs } from "./lib/avatars";
 // proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
 type Detail = {kind:"session";id:string} | {kind:"proposal";id:string} | {kind:"task"|"goal";id:number} | null;
 type Tab = "sessions"|"tasks"|"goals"|"calendar"|"stats";
@@ -255,6 +256,8 @@ export default function App() {
       },
       onAuthExpired: expire,
       onSnapshot: (list, ag, aps, gs, ts, rs) => {
+        // 每次连上（含断线重连）都重读一次头像：离线期间别的设备可能改过
+        void loadAvatarPrefs(api);
         setReminders(new Map(rs.map(r=>[r.id,r])));
         // 快照里的提醒是「所有未 ack 的」，大多是历史欠账：全弹的话每次启动/重连都会重放旧通知。
         // 只把刚到期（5 分钟内，覆盖短暂离线窗口）的当新事件弹，其余标记已通知（列表里仍可见，等 ack）。
@@ -335,6 +338,7 @@ export default function App() {
       // 服务端刚把正文重新同步进库（WorkBuddy 跑完一轮先同步正文再攒任务单）：打开着的会话立刻重读一次，
       // 否则页面上会先看到任务单，正文还停在上一轮
       onSessionHistory: (sessionId) => { if (openIdRef.current === sessionId) bus.emit({ kind: "resync" }); },
+      onPrefs: setAvatarPrefs,
     });
   }, [api, bus, expire]);
 
