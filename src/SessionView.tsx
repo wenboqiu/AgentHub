@@ -18,6 +18,7 @@ import { clockAt, fullAt } from "./lib/time";
 import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary } from "./lib/runMeta";
 import Markdown from "./Markdown";
 import FilePreview from "./FilePreview";
+import DoubaoImage from "./DoubaoImage";
 import { parseQuestions } from "./lib/questions";
 
 const STATE_LABEL: Record<string, string> = {
@@ -66,6 +67,30 @@ type Props = {
 export { isPendingSession, sendBlockReason, isStuckRunning, STALE_RUNNING_MS } from "./lib/sendBlock";
 
 const NOT_FOUND_GRACE_MS = 5000;
+
+/** 豆包消息正文里单独成行的「[图片]」是图片位（第 k 个对应 images[k]）；其余相邻行合并成文字段，连续的图并排 */
+type DoubaoPart = { kind: "text"; text: string } | { kind: "images"; slots: number[] };
+function doubaoParts(text: string): DoubaoPart[] {
+  const parts: DoubaoPart[] = [];
+  let slot = 0;
+  let buf: string[] = [];
+  const flush = () => {
+    if (buf.length) parts.push({ kind: "text", text: buf.join("\n") });
+    buf = [];
+  };
+  for (const line of text.split("\n")) {
+    if (line === "[图片]") {
+      flush();
+      const last = parts[parts.length - 1];
+      if (last && last.kind === "images") last.slots.push(slot++);
+      else parts.push({ kind: "images", slots: [slot++] });
+    } else {
+      buf.push(line);
+    }
+  }
+  flush();
+  return parts;
+}
 
 export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals, onAck }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -592,7 +617,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           {doubaoMsgs.map((m, i) => (
             <li key={`doubao-${i}`} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
               {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
-              <div className={`msg ${m.role}`}><Markdown text={m.text} onFile={openFile} /></div>
+              <div className={`msg ${m.role}`}>
+                {doubaoParts(m.text).map((part, k) => part.kind === "text"
+                  ? <Markdown key={k} text={part.text} lenient onFile={openFile} />
+                  : <div key={k} className="doubao-images">
+                      {part.slots.map((slot) => <DoubaoImage key={slot} id={m.images?.[slot]?.id ?? null} w={m.images?.[slot]?.w} h={m.images?.[slot]?.h} />)}
+                    </div>)}
+              </div>
             </li>
           ))}
         </ul>

@@ -20,7 +20,12 @@ export type Config = {
 export type RemoteInfo = { connected: boolean; lastError: string | null };
 
 /** 豆包客户端不落盘正文，只能读它窗口里已经渲染出来的消息 */
-export type DoubaoVisible = { title: string; messages: { role: "user" | "assistant"; text: string }[] };
+export type DoubaoImageRef = { id: string; w: number; h: number };
+export type DoubaoVisible = {
+  title: string;
+  /** images 按文本里 `[图片]` 行的顺序一一对应；对不上缓存的是 null */
+  messages: { role: "user" | "assistant"; text: string; images: (DoubaoImageRef | null)[] }[];
+};
 
 export type HooksStatus = { installed: boolean; scriptExists: boolean; settingsExists: boolean };
 export type CollectorInfo = {
@@ -111,5 +116,7 @@ export const desktop = {
   agentModels: (agent: string, refresh = false) => invoke<ModelList>("agent_models", { agent, refresh }),
   /** 读豆包窗口里当前渲染出来的消息（UIA，只读；豆包没开就会报错） */
   doubaoVisible: () => invoke<DoubaoVisible>("doubao_visible"),
+  /** 读豆包缓存里的一张图（id 来自 doubaoVisible 的 images），返回 data URL */
+  doubaoImage: (id: string) => invoke<string>("doubao_image", { id }),
   setBadge: (count: number) => invoke<void>("set_badge", { count }),
 };

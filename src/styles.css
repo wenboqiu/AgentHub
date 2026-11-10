@@ -1266,3 +1266,6 @@ button.pg-slot { cursor: pointer; }
 .stats-view th, .stats-view td { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
 .stats-view th:first-child, .stats-view td:first-child { text-align: left; }
 .stats-note { margin: 0; color: var(--dim); font-size: 12px; overflow-wrap: anywhere; }
+.doubao-images { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.doubao-image { max-width: min(100%, 240px); border-radius: 12px; display: block; }
+.doubao-image.missing { color: var(--dim); font-size: 13px; margin: 0; }

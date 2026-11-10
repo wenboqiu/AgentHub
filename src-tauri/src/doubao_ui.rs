@@ -11,6 +11,9 @@
 //!   用户是右对齐的气泡 `... container-xxxx`；类名换了就退回几何判断（内容起点偏右算用户）；
 //! - 正文 = 行内所有 Text 节点，按树序拼；容器 Text 和它的子节点同名，按「矩形更小且被包住」去重。
 //!
+//! - 图片：UIA 拿不到字节，`[图片]` 行只记渲染宽高；真实图片由 `doubao_cache` 读 Chromium
+//!   磁盘缓存按批匹配（组内顺序未验证，可能错位），对不上的位置 `images[k]` 为 null。
+//!
 //! 不做任何写入：不点按钮、不发消息、不碰 cookie。
 
 use serde::Serialize;
@@ -25,7 +28,7 @@ use windows::Win32::System::Variant::{
 };
 use windows::Win32::UI::Accessibility::{
     CUIAutomation, IUIAutomation, IUIAutomation2, IUIAutomationElement, IUIAutomationTreeWalker,
-    UIA_ButtonControlTypeId, UIA_NamePropertyId, UIA_PROPERTY_ID,
+    UIA_ButtonControlTypeId, UIA_ImageControlTypeId, UIA_NamePropertyId, UIA_PROPERTY_ID,
     UIA_TextControlTypeId, TreeScope_Descendants,
 };
 
@@ -35,6 +38,17 @@ use windows::Win32::UI::Accessibility::{
 pub struct VisibleMessage {
     pub role: String,
     pub text: String,
+    /// 按文本里 `[图片]` 行的出现顺序一一对应；对不上缓存的是 None（null）
+    pub images: Vec<Option<ImageOut>>,
+}
+
+/// 匹配到的缓存图：id 交给 `doubao_image` 命令取字节
+#[derive(Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageOut {
+    pub id: String,
+    pub w: u32,
+    pub h: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -47,6 +61,10 @@ pub struct DoubaoWindow {
 
 const MAX_MESSAGES: usize = 40;
 const MAX_TEXT: usize = 8000;
+/// 小于这个边长的图片当图标 / 头像，不进正文
+const IMAGE_MIN_PX: i32 = 64;
+/// 图片占位（alt 恒为「image」没信息量，不带）
+const IMAGE_MARK: &str = "[图片]";
 /// 原始树比控制视图大得多，给个上限防止卡死（正常一屏几百个节点）
 const MAX_NODES: usize = 20000;
 
@@ -77,19 +95,35 @@ pub fn read() -> Result<DoubaoWindow, String> {
         // 消息列表没有名字，不是控制元素，FindFirst 看不到，只能在对话区里走原始树
         let mut budget = MAX_NODES;
         let list = find_raw(&walker, &editor, &mut budget, &|el| class_of(el).trim() == "list_items").unwrap_or(editor);
-        let mut messages = Vec::new();
+        let mut pending: Vec<(VisibleMessage, Vec<(i32, i32)>)> = Vec::new();
         let mut budget = MAX_NODES;
         for row in rows(&walker, &list, &mut budget) {
             let Some(role) = role_of(&walker, &row) else { continue };
-            let text = row_text(&walker, &row);
+            let (text, mut sizes) = row_text(&walker, &row);
             // 虚拟列表里还有「今天 08:25」这类日期分隔行，不是消息
             if text.is_empty() || looks_like_divider(&text) {
                 continue;
             }
-            messages.push(VisibleMessage { role, text: clip(clean(&text), MAX_TEXT) });
+            let text = clip(clean(&text), MAX_TEXT);
+            // clean 会从最后一条时间行截断（时间行之后的图是界面元素）：按留下的 `[图片]` 行数对齐尺寸
+            sizes.resize(text.lines().filter(|l| *l == IMAGE_MARK).count(), (0, 0));
+            pending.push((VisibleMessage { role, text, images: Vec::new() }, sizes));
         }
-        if messages.len() > MAX_MESSAGES {
-            messages.drain(..messages.len() - MAX_MESSAGES);
+        // 先丢掉超出的最旧消息，保证 resolve 的入参与最终 messages 同序同长度
+        if pending.len() > MAX_MESSAGES {
+            pending.drain(..pending.len() - MAX_MESSAGES);
+        }
+        let wanted: Vec<Vec<(i32, i32)>> = pending.iter().map(|(_, s)| s.clone()).collect();
+        let mut resolved = crate::doubao_cache::resolve(&wanted);
+        let mut messages = Vec::with_capacity(pending.len());
+        for (i, (mut m, sizes)) in pending.into_iter().enumerate() {
+            let mut got = if i < resolved.len() { std::mem::take(&mut resolved[i]) } else { Vec::new() };
+            got.resize_with(sizes.len(), || None);
+            m.images = got
+                .into_iter()
+                .map(|x| x.map(|r| ImageOut { id: r.id, w: r.w, h: r.h }))
+                .collect();
+            messages.push(m);
         }
         Ok(DoubaoWindow { title, messages })
     }
@@ -274,6 +308,15 @@ unsafe fn texts_of(
     if ct == UIA_ButtonControlTypeId.0 {
         return;
     }
+    // 图片字节拿不到（UIA 只给矩形和 alt），留个占位让前端知道这里有图；头像 / 图标太小，不算
+    if ct == UIA_ImageControlTypeId.0 {
+        if let Some(r) = rect_of(el) {
+            if r.right - r.left >= IMAGE_MIN_PX && r.bottom - r.top >= IMAGE_MIN_PX {
+                out.push((r, IMAGE_MARK.to_string()));
+            }
+        }
+        return;
+    }
     if ct == UIA_TextControlTypeId.0 {
         let text = name_of(el);
         if !text.trim().is_empty() {
@@ -289,8 +332,9 @@ unsafe fn texts_of(
     }
 }
 
-/// 拼一段正文：换行由纵坐标是否变化判断，同一行直接相接（中文常被拆成多段）
-unsafe fn row_text(w: &IUIAutomationTreeWalker, row: &IUIAutomationElement) -> String {
+/// 拼一段正文：换行由纵坐标是否变化判断，同一行直接相接（中文常被拆成多段）。
+/// 同时返回每个 `[图片]` 的渲染 (宽, 高)，顺序与正文里的 `[图片]` 行一致
+unsafe fn row_text(w: &IUIAutomationTreeWalker, row: &IUIAutomationElement) -> (String, Vec<(i32, i32)>) {
     let mut items: Vec<(RECT, String)> = Vec::new();
     let mut budget = MAX_NODES;
     texts_of(w, row, &mut budget, &mut items);
@@ -306,17 +350,24 @@ unsafe fn row_text(w: &IUIAutomationTreeWalker, row: &IUIAutomationElement) -> S
 
     let mut out = String::new();
     let mut prev: Option<RECT> = None;
+    let mut prev_image = false;
+    let mut sizes = Vec::new();
     for (r, t) in keep {
         if let Some(p) = prev {
             let dy = ((r.top + r.bottom) / 2) - ((p.top + p.bottom) / 2);
-            if dy.abs() > 4 {
+            // 图片之间 / 图片与文字之间一律换行（并排的图纵坐标相同，会被误拼成一行）
+            if dy.abs() > 4 || t == IMAGE_MARK || prev_image {
                 out.push('\n');
             }
         }
         out.push_str(t.trim_end());
         prev = Some(*r);
+        prev_image = t == IMAGE_MARK;
+        if prev_image {
+            sizes.push((r.right - r.left, r.bottom - r.top));
+        }
     }
-    out.trim().to_string()
+    (out.trim().to_string(), sizes)
 }
 
 const fn area(r: &RECT) -> i64 {
@@ -377,12 +428,13 @@ mod tests {
     fn json_matches_frontend_shape() {
         let w = DoubaoWindow {
             title: "某个对话 - 豆包".into(),
-            messages: vec![VisibleMessage { role: "user".into(), text: "你好".into() }],
+            messages: vec![VisibleMessage { role: "user".into(), text: "你好".into(), images: vec![] }],
         };
         let v = serde_json::to_value(&w).unwrap();
         assert_eq!(v["title"], "某个对话 - 豆包");
         assert_eq!(v["messages"][0]["role"], "user");
         assert_eq!(v["messages"][0]["text"], "你好");
+        assert_eq!(v["messages"][0]["images"], serde_json::json!([]));
     }
 
     /// 只读本机窗口，必须在豆包开着的时候手动跑：
@@ -394,6 +446,13 @@ mod tests {
         eprintln!("title = {}", w.title);
         for m in &w.messages {
             eprintln!("[{}] {}", m.role, m.text.replace('\n', " / "));
+        }
+        for m in &w.messages {
+            let marks = m.text.lines().filter(|l| *l == IMAGE_MARK).count();
+            assert_eq!(m.images.len(), marks, "images 长度应等于 [图片] 行数");
+            if marks > 0 {
+                eprintln!("    images = {}", serde_json::to_string(&m.images).unwrap());
+            }
         }
         assert!(!w.messages.is_empty());
     }

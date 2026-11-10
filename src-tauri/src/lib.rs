@@ -15,6 +15,8 @@ mod codex_read;
 #[cfg(desktop)]
 mod doubao;
 #[cfg(all(desktop, windows))]
+mod doubao_cache;
+#[cfg(all(desktop, windows))]
 mod doubao_ui;
 #[cfg(desktop)]
 mod workbuddy;
@@ -173,6 +175,22 @@ mod desktop {
         Err("只有 Windows 桌面端能读豆包窗口".into())
     }
 
+    /// 读豆包缓存里的一张图（`doubao_visible` 返回的 images[].id），返回 data URL。
+    #[tauri::command]
+    async fn doubao_image(id: String) -> Result<String, String> {
+        #[cfg(windows)]
+        {
+            return tauri::async_runtime::spawn_blocking(move || crate::doubao_cache::read_data_url(&id))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = id;
+            Err("只有 Windows 桌面端能读豆包图片".into())
+        }
+    }
+
     #[tauri::command]
     fn set_badge(app: AppHandle, count: u32) {
         let Some(t) = app.tray_by_id("main") else { return };
@@ -263,6 +281,7 @@ mod desktop {
                 open_in_terminal,
                 agent_models,
                 doubao_visible,
+                doubao_image,
                 set_badge,
                 show_main_window
             ])
