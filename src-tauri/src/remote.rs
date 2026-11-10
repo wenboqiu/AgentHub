@@ -33,14 +33,17 @@ struct Snapshot {
     server_url: String,
     token: String,
     machine: String,
+    /// 远程执行开没开：没开也连，只是带 exec=off 声明不接活，服务端好显示「开着、没开远程执行」
+    /// 而不是一律「离线」。开关一拨，快照变了就按新身份重连
+    exec: bool,
 }
 
 fn snapshot(cfg: &SharedConfig) -> Option<Snapshot> {
     let c = cfg.read().unwrap();
-    if !c.remote_enabled || c.server_url.trim().is_empty() || c.token.trim().is_empty() {
+    if c.server_url.trim().is_empty() || c.token.trim().is_empty() {
         return None;
     }
-    Some(Snapshot { server_url: c.server_url.trim().to_string(), token: c.token.clone(), machine: c.machine.clone() })
+    Some(Snapshot { server_url: c.server_url.trim().to_string(), token: c.token.clone(), machine: c.machine.clone(), exec: c.remote_enabled })
 }
 
 pub fn urlencode(s: &str) -> String {
@@ -107,6 +110,9 @@ fn build_url(s: &Snapshot, agents: &[&str]) -> Result<String, String> {
     if !agents.is_empty() {
         url.push_str(&format!("&agents={}", agents.join(",")));
     }
+    if !s.exec {
+        url.push_str("&exec=off");
+    }
     Ok(url)
 }
 
@@ -153,8 +159,11 @@ fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result
     })?;
     set_read_timeout(&mut ws, READ_TICK);
     let (out_tx, out_rx) = mpsc::channel::<Value>();
+    // 没开远程执行时用来回「派错了」的失败状态，走同一条发送队列
+    let out_tx_off = out_tx.clone();
     let runner = Runner::new(out_tx, cfg.clone());
-    {
+    // 设置页的「远程执行已连接」只说能接活的那条；exec=off 连着不算
+    if snap.exec {
         let mut s = status.lock().unwrap();
         s.connected = true;
         s.last_error = None;
@@ -176,6 +185,18 @@ fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result
         }
         match ws.read() {
             Ok(Message::Text(t)) => {
+                // 没开远程执行：新服务端不会派东西过来；老服务端不认 exec=off，可能照样派——
+                // 一律不执行，派来的运行直接回失败，别让任务挂在「运行中」
+                if !snap.exec {
+                    if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                        if v.get("type").and_then(Value::as_str) == Some("run.start") {
+                            if let Some(id) = v.get("runId").and_then(Value::as_str) {
+                                let _ = out_tx_off.send(serde_json::json!({"type":"run.status","runId":id,"status":"failed","error":"这台电脑没开「远程执行」：在它的设置 → 本机执行与采集里打开"}));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
                     runner.handle(&v);
                 }
@@ -264,7 +285,7 @@ mod tests {
     use std::sync::RwLock;
 
     fn snap(url: &str) -> Snapshot {
-        Snapshot { server_url: url.into(), token: "t k".into(), machine: "PC-1".into() }
+        Snapshot { server_url: url.into(), token: "t k".into(), machine: "PC-1".into(), exec: true }
     }
 
     #[test]
@@ -285,7 +306,14 @@ mod tests {
     }
 
     #[test]
-    fn only_connects_when_enabled() {
+    fn declares_exec_off_when_remote_disabled() {
+        assert!(!build_url(&snap("https://x"), &[]).unwrap().contains("exec="), "开着远程执行不带参数（老服务端照旧认）");
+        let off = Snapshot { exec: false, ..snap("https://x") };
+        assert!(build_url(&off, &["claude"]).unwrap().ends_with("&agents=claude&exec=off"));
+    }
+
+    #[test]
+    fn connects_when_logged_in() {
         let cfg: SharedConfig = Arc::new(RwLock::new(Config {
             server_url: "http://x".into(),
             token: "t".into(),
@@ -293,9 +321,9 @@ mod tests {
             remote_enabled: false,
             ..Config::default()
         }));
-        assert!(snapshot(&cfg).is_none(), "开关没开不连");
+        assert_eq!(snapshot(&cfg).map(|s| s.exec), Some(false), "开关没开也连，只是声明不接活");
         cfg.write().unwrap().remote_enabled = true;
-        assert!(snapshot(&cfg).is_some());
+        assert_eq!(snapshot(&cfg).map(|s| s.exec), Some(true));
         cfg.write().unwrap().token = "  ".into();
         assert!(snapshot(&cfg).is_none(), "没登录（token 为空）不连");
         cfg.write().unwrap().token = "t".into();

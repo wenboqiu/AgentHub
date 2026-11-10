@@ -17,8 +17,13 @@ pub struct Config {
     /// 旧版这里是 allowedRoots 白名单，语义相反，因此不兼容旧键：老配置读进来等于「黑名单为空」，
     /// 不会因为升级就把原来的工作目录全部封掉。
     pub denied_roots: Vec<String>,
-    /// 总开关：关闭时不连服务端的执行器通道
+    /// 远程执行总开关：关闭时执行器通道仍然连着（服务端据此显示「开着、没开远程执行」），但声明不接活。默认开启
     pub remote_enabled: bool,
+    /// 「远程执行默认开启」的一次性迁移做过没有：老版本默认关、很多电脑从没拨过开关，
+    /// 升级后第一次读配置时打开一次；之后人再关掉就尊重人的选择（save 时总写 true）。
+    /// 字段级 default = false：老配置文件里没有这个键，正好读成「还没迁移」
+    #[serde(default)]
+    pub remote_default_migrated: bool,
     /// 对话页（待处理 / 进行中）用气泡图展示；false = 卡片列表
     pub graph_mode: bool,
     /// ZCode 权限请求的自动放行档位：off = 每条都弹审批卡；low = 只放行 low；
@@ -35,7 +40,8 @@ impl Default for Config {
             notify_desktop: true,
             email: String::new(),
             denied_roots: Vec::new(),
-            remote_enabled: false,
+            remote_enabled: true,
+            remote_default_migrated: true,
             graph_mode: true,
             zcode_auto_approve: "low".into(),
         }
@@ -131,6 +137,10 @@ pub fn load(path: &Path) -> Config {
     if c.machine.trim().is_empty() {
         c.machine = hostname();
     }
+    if !c.remote_default_migrated {
+        c.remote_enabled = true;
+        c.remote_default_migrated = true;
+    }
     c
 }
 
@@ -138,7 +148,9 @@ pub fn save(path: &Path, c: &Config) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let text = serde_json::to_string_pretty(c).map_err(|e| e.to_string())?;
+    // 前端传回来的配置不认识迁移标记（读成 false）：写盘时总记成已迁移，别让下次启动又把人关掉的开关打开
+    let c = Config { remote_default_migrated: true, ..c.clone() };
+    let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
@@ -161,7 +173,8 @@ mod tests {
             notify_desktop: false,
             email: "a@b.c".into(),
             denied_roots: vec!["D:/Tmp".into()],
-            remote_enabled: true,
+            remote_enabled: false,
+            remote_default_migrated: true,
             graph_mode: true,
             zcode_auto_approve: "medium".into(),
         };
@@ -172,7 +185,7 @@ mod tests {
         let d = load(&p);
         assert_eq!(d.server_url, "http://y");
         assert!(d.notify_desktop);
-        assert!(!d.remote_enabled);
+        assert!(d.remote_enabled, "老配置升级：远程执行打开一次");
         // 气泡图是默认展示方式：老配置里没有 graphMode 时按 true 读
         assert!(d.graph_mode);
         assert_eq!(d.zcode_auto_approve, "low", "老配置里没有这个键时按 low 读");
@@ -185,6 +198,24 @@ mod tests {
         std::fs::write(&p, r#"{"serverUrl":"http://z","token":"t","controlToken":"old"}"#).unwrap();
         let o = load(&p);
         assert_eq!((o.server_url.as_str(), o.token.as_str()), ("http://z", "t"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_default_on_and_one_time_migration() {
+        let dir = std::env::temp_dir().join(format!("agenthub-cfg-mig-{}", std::process::id()));
+        let p = config_path(dir.clone());
+        assert!(Config::default().remote_enabled, "新装默认开启远程执行");
+        // 老版本存下的「关」：升级后第一次读打开
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"serverUrl":"http://x","remoteEnabled":false}"#).unwrap();
+        let mut c = load(&p);
+        assert!(c.remote_enabled);
+        // 人之后又关掉：即使前端传来的配置没带迁移标记，写盘后再读也保持关
+        c.remote_enabled = false;
+        c.remote_default_migrated = false;
+        save(&p, &c).unwrap();
+        assert!(!load(&p).remote_enabled, "关掉之后不再被迁移打开");
         let _ = std::fs::remove_dir_all(dir);
     }
 
