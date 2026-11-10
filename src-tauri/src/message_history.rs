@@ -90,6 +90,57 @@ fn collect_images(parts: &Value, out: &mut Vec<String>, budget: &mut usize) {
     }
 }
 
+/// 单张历史图的原始字节上限，与 `runner::image_data_url` 的 4 MiB 一致
+const HISTORY_IMAGE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+fn is_image_mime(m: &str) -> bool {
+    matches!(m, "image/png" | "image/jpeg" | "image/webp" | "image/gif")
+}
+
+/// Claude 的用户附图：user 消息 content 里顶层的 `{"type":"image","source":{"type":"base64","media_type","data"}}`。
+/// 只看顶层——`tool_result` 里嵌的图是工具输出（Read 一张图、截图），不是用户在对话里贴的。
+fn collect_claude_images(parts: &Value, out: &mut Vec<String>, budget: &mut usize) {
+    let Some(arr) = parts.as_array() else { return };
+    for p in arr {
+        if p["type"].as_str() != Some("image") || p["source"]["type"].as_str() != Some("base64") {
+            continue;
+        }
+        let (Some(mime), Some(data)) = (p["source"]["media_type"].as_str(), p["source"]["data"].as_str()) else { continue };
+        // base64 长度 ≈ 字节数 × 4/3
+        if !is_image_mime(mime) || data.is_empty() || data.len() / 4 * 3 > HISTORY_IMAGE_MAX_BYTES {
+            continue;
+        }
+        push_image(budget, out, format!("data:{mime};base64,{data}"));
+    }
+}
+
+/// WorkBuddy 的用户附图：content 里的 `{"type":"image_blob_ref","blob_path","mime"}`，图本体在本机
+/// `~\.workbuddy\blobs\<xx>\<sha256>`（没有扩展名，所以按 mime 而不是扩展名判类型）。
+/// 文件不在 / 太大 / 路径不在 blobs 目录下就跳过。
+fn collect_workbuddy_images(parts: &Value, out: &mut Vec<String>, budget: &mut usize) {
+    use base64::Engine as _;
+    let Some(arr) = parts.as_array() else { return };
+    for p in arr {
+        if p["type"].as_str() != Some("image_blob_ref") {
+            continue;
+        }
+        let (Some(path), Some(mime)) = (p["blob_path"].as_str(), p["mime"].as_str()) else { continue };
+        let path = std::path::Path::new(path);
+        if !is_image_mime(mime) || !path.components().any(|c| c.as_os_str() == "blobs") {
+            continue;
+        }
+        let Ok(meta) = std::fs::metadata(path) else { continue };
+        if !meta.is_file() || meta.len() as usize > HISTORY_IMAGE_MAX_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        push_image(budget, out, format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+    }
+}
+
+/// 只有图、没有字的用户消息：给个占位正文，免得整条被当空消息丢掉
+const IMAGE_ONLY_TEXT: &str = "[图片]";
+
 /// 剥用户正文里的 `<image name=… path="C:\…">…</image>` 标签（Codex 记录用户附图的方式，
 /// 正文里就是这种行内标签），返回剥干净的正文与标签里记下的本地文件路径。
 fn strip_codex_image_tags(body: &str) -> (String, Vec<String>) {
@@ -197,6 +248,10 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
             if role == "user" && !agenthub_input &&
                 ["This session is being continued", "[Request interrupted by user"]
                     .iter().any(|p| content.trim_start().starts_with(p)) { continue; }
+            // 用户在终端里贴的图：挂到这条用户消息上（过滤掉的行不收，免得漏到下一条）
+            if role == "user" {
+                collect_claude_images(&v["message"]["content"], &mut pending_images, &mut image_budget);
+            }
             (role, content, source, branch)
         } else {
             if v["type"] != "response_item" || v["payload"]["type"] != "message" { continue; }
@@ -235,6 +290,11 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
             }
             (role, body, key(&p["id"]), None)
         };
+        let content = if agent == "claude" && role == "user" && content.trim().is_empty() && !pending_images.is_empty() {
+            IMAGE_ONLY_TEXT.to_owned()
+        } else {
+            content
+        };
         if content.trim().is_empty() || (agent == "codex" && role == "user" && content.trim_start().starts_with('<')) {
             // 被丢掉的用户消息，它的内嵌图不能漏到下一条消息上
             if role == "user" { pending_images.clear(); }
@@ -256,6 +316,7 @@ pub fn parse(agent: &str, data: &str, limit: usize) -> Vec<HistoryMessage> {
 /// 注入块处理与 workbuddy.rs 的 user_text 同规则：剥 system-reminder / user_query 包裹，纯注入消息跳过。
 fn parse_workbuddy(data: &str, limit: usize) -> Vec<HistoryMessage> {
     let mut messages: Vec<HistoryMessage> = Vec::new();
+    let mut image_budget: usize = HISTORY_IMAGE_BUDGET;
     for line in data.lines() {
         let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
         if v["type"] != "message" { continue; }
@@ -272,8 +333,14 @@ fn parse_workbuddy(data: &str, limit: usize) -> Vec<HistoryMessage> {
             // 剩下的还是注入块（cb_summary / task-notification 等），不当用户消息
             if content.trim_start().starts_with('<') { continue; }
         }
+        // 附图（只有用户消息会带）：过了上面的注入块过滤才收，免得漏到别的消息上
+        let mut images = Vec::new();
+        if role == "user" {
+            collect_workbuddy_images(&v["content"], &mut images, &mut image_budget);
+            if content.trim().is_empty() && !images.is_empty() { content = IMAGE_ONLY_TEXT.to_owned(); }
+        }
         if content.trim().is_empty() { continue; }
-        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: None, branch_point: None, at: at(&v), images: Vec::new() });
+        messages.push(HistoryMessage { role: role.into(), text: truncate_history_text(&content), source_id: None, branch_point: None, at: at(&v), images });
     }
     let n = messages.len().saturating_sub(limit);
     messages.drain(..n);
@@ -518,5 +585,60 @@ mod tests {
         let small = format!("data:image/png;base64,{}", "B".repeat(8));
         collect_images(&serde_json::json!([{"type":"input_image","image_url":small},{"type":"input_image","image_url":small}]), &mut out, &mut budget);
         assert_eq!(out.len(), 1);
+    }
+    #[test]
+    fn claude_user_pasted_images_ride_on_the_user_message() {
+        let png = r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}"#;
+        let data = [
+            // 带字 + 贴图
+            format!(r#"{{"type":"user","uuid":"u1","origin":{{"kind":"human"}},"message":{{"content":[{{"type":"text","text":"看这张图"}},{png}]}}}}"#),
+            // 工具输出里嵌的图不是用户贴的，不收
+            format!(r#"{{"type":"user","uuid":"u2","message":{{"content":[{{"type":"tool_result","tool_use_id":"t","content":[{png}]}}]}}}}"#),
+            r#"{"type":"assistant","uuid":"a1","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"看到了"}]}}"#.to_string(),
+            // 只有图没有字：保留，正文是占位
+            format!(r#"{{"type":"user","uuid":"u3","message":{{"content":[{png}]}}}}"#),
+            // 后台通知行（被过滤）带图也不能漏到下一条
+            format!(r#"{{"type":"user","uuid":"u4","origin":{{"kind":"task-notification"}},"message":{{"content":[{png}]}}}}"#),
+            r#"{"type":"assistant","uuid":"a2","message":{"stop_reason":"end_turn","content":[{"type":"text","text":"收到"}]}}"#.to_string(),
+        ]
+        .join("\n");
+        let m = parse("claude", &data, 50);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m[0].images, vec![IMG]);
+        assert!(m[1].images.is_empty());
+        assert_eq!(m[2].text, "[图片]");
+        assert_eq!(m[2].images, vec![IMG]);
+        assert_eq!(m[3].text, "收到");
+        assert!(m[3].images.is_empty());
+        // 不认识的 mime 不收
+        let bad = r#"{"type":"user","uuid":"u","message":{"content":[{"type":"text","text":"x"},{"type":"image","source":{"type":"base64","media_type":"image/svg+xml","data":"AAAA"}}]}}"#;
+        assert!(parse("claude", bad, 50)[0].images.is_empty());
+    }
+
+    #[test]
+    fn workbuddy_image_blob_refs_become_data_urls() {
+        let dir = std::env::temp_dir().join(format!("agenthub-wb-img-{}", std::process::id())).join("blobs").join("ab");
+        std::fs::create_dir_all(&dir).unwrap();
+        let blob = dir.join("abcdef0123"); // 没有扩展名
+        std::fs::write(&blob, b"\x89PNG\r\n\x1a\n").unwrap();
+        let esc = |p: &std::path::Path| p.to_string_lossy().replace('\\', "\\\\");
+        let line = |text: &str, path: &str| format!(
+            r#"{{"type":"message","role":"user","timestamp":1,"content":[{{"type":"input_text","text":"{text}"}},{{"type":"image_blob_ref","blob_path":"{path}","mime":"image/png"}}]}}"#
+        );
+        let data = [
+            line("看图", &esc(&blob)),
+            line("", &esc(&blob)),
+            // 文件已经没了、路径不在 blobs 下：只留文字
+            line("丢了", &esc(&dir.join("missing"))),
+            line("越界", &esc(&std::env::temp_dir().join("x.png"))),
+        ]
+        .join("\n");
+        let m = parse("workbuddy", &data, 50);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m[0].images, vec!["data:image/png;base64,iVBORw0KGgo="]);
+        assert_eq!(m[1].text, "[图片]");
+        assert_eq!(m[1].images.len(), 1);
+        assert!(m[2].images.is_empty() && m[3].images.is_empty());
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap().parent().unwrap());
     }
 }
