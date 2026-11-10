@@ -190,8 +190,9 @@ export async function pickProjectDir(
  * 一台候选电脑：online = 此刻有执行器连着；at = 最近一次在这台上干活的时间；
  * agents = 这台电脑上报过能跑的工具（claude / codex / zcode / workbuddy / codebuddy）。空 = 不知道（老客户端从没上报过），
  * 界面按「不确定」处理，别把没上报的机器一律判成不支持。
+ * listening = AgentHub 开着、但没开「远程执行」（连着、不接活）；online 为 true 时它一定是 false。
  */
-export type Machine = { name: string; online: boolean; at: string | null; agents: string[] }
+export type Machine = { name: string; online: boolean; listening: boolean; at: string | null; agents: string[] }
 
 /**
  * 一个账号下见过的电脑，给项目配置的下拉框用：
@@ -201,7 +202,7 @@ export type Machine = { name: string; online: boolean; at: string | null; agents
  * 排序按「在线优先，其次最近用过」，人一眼能挑到常用的那台。
  */
 export async function listMachines(
-  db: DB, user: number, online: string[], caps: Map<string, string[]> = new Map(),
+  db: DB, user: number, online: string[], caps: Map<string, string[]> = new Map(), listening: string[] = [],
 ): Promise<Machine[]> {
   const [sessions, runs, projectDirs] = await Promise.all([
     db.query(`SELECT machine, max(updated_at) AS at FROM sessions
@@ -216,7 +217,7 @@ export async function listMachines(
     const iso = at ? at.toISOString() : null
     const cur = seen.get(name)
     // 同一台可能在会话和运行里都有记录：留更近的那个时间
-    if (!cur || (iso && (!cur.at || iso > cur.at))) seen.set(name, { name, online: cur?.online ?? false, at: iso, agents: cur?.agents ?? [] })
+    if (!cur || (iso && (!cur.at || iso > cur.at))) seen.set(name, { name, online: cur?.online ?? false, listening: false, at: iso, agents: cur?.agents ?? [] })
   }
   for (const r of sessions.rows as { machine: string; at: Date | null }[]) touch(r.machine, r.at)
   for (const r of runs.rows as { machine: string; at: Date | null }[]) touch(r.machine, r.at)
@@ -228,14 +229,16 @@ export async function listMachines(
       if (typeof m === 'string' && m) touch(m, null)
     }
   }
-  for (const name of online) touch(name, null)
+  for (const name of [...online, ...listening]) touch(name, null)
   for (const m of seen.values()) {
     m.online = online.includes(m.name)
+    m.listening = !m.online && listening.includes(m.name)
     // 能力由执行器连上来时上报；离线保留最近一次上报的结果（只能来自内存，重启后清空）
     m.agents = caps.get(m.name) ?? []
   }
   return [...seen.values()].sort((a, b) =>
     Number(b.online) - Number(a.online)
+    || Number(b.listening) - Number(a.listening)
     || (b.at ?? '').localeCompare(a.at ?? '')
     || a.name.localeCompare(b.name))
 }

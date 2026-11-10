@@ -221,6 +221,36 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.equal((await h.call('GET', '/machines', undefined, other.token)).body.machines.some((m: any) => m.name === pc), false)
   })
 
+  it('开着 AgentHub 但没开远程执行：显示「连着、不接活」，派活不选它；打开开关后转成在线', async () => {
+    const pc = `listen-pc-${stamp}`
+    await h.connect(`role=agent&machine=${pc}&capabilities=reply-branch-v1,role-v1&agents=claude&exec=off`)
+    const machine = async () => {
+      for (let i = 0; i < 200; i++) {
+        const m = ((await h.call('GET', '/machines')).body.machines as any[]).find(x => x.name === pc)
+        if (m) return m
+        await new Promise(r => setTimeout(r, 10))
+      }
+      throw new Error('清单里没有这台')
+    }
+    const m = await machine()
+    assert.equal(m.online, false)
+    assert.equal(m.listening, true)
+    assert.deepEqual(m.agents, ['claude'], '工具清单照样上报')
+    assert.equal((await h.call('GET', '/control/status')).body.agents.includes(pc), false, '不算能接活的在线电脑')
+    // 往它上面派活：当离线处理（排队），不会真发过去
+    const t = await h.task({ agent: 'claude', machine: pc, cwd: 'D:\\Listen' })
+    const r = await h.call('POST', `/tasks/${t.id}/start`, {})
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    assert.equal(r.body.queued, true, JSON.stringify(r.body))
+
+    // 打开远程执行：同一台电脑用 exec 连上来，顶掉不接活的那条，排队的单投递过来
+    const msgs = await h.executor(pc, 'claude')
+    const on = await machine()
+    assert.equal(on.online, true)
+    assert.equal(on.listening, false)
+    await waitFor(() => msgs.some(x => x.type === 'run.start'))
+  })
+
   it('电脑上报装了哪些工具；没上报过的老电脑不判成不支持', async () => {
     const pc = `caps-pc-${stamp}`
     const old = `caps-old-${stamp}`

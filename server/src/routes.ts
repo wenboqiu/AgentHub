@@ -352,6 +352,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const clients = new Set<Conn>()
   // (userId, machine) -> 在线执行器连接
   const executors = new Map<string, Exec>()
+  // (userId, machine) -> 开着 AgentHub、但没开「远程执行」的电脑（exec=off 连上来，不接活）。
+  // 单独一张表：executors 里永远只有能接活的，派活 / 续聊 / 读历史那些「在不在线」的判断都不用改
+  const listeners = new Map<string, Conn & { machine: string }>()
+  const listeningList = (userId: number) =>
+    [...listeners.values()].filter(e => e.userId === userId).map(e => e.machine).sort()
   // (userId, machine) -> 这台电脑上报过能跑哪些工具（claude / codex / zcode）。
   // 执行器断线也留着：给离线电脑派活是常事，靠它判断「这台装没装这个工具」。
   // 只放内存——重启后等电脑再连一次就补上；空数组 = 从没上报过（老客户端），按「不知道」处理。
@@ -1201,7 +1206,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { ok: true }
   }))
   // 可选电脑：项目配置里的下拉项——在线执行器 + 这个账号用过的机器，离线也列出来
-  app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId), capsOfUser(req.userId)) })))
+  app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId), capsOfUser(req.userId), listeningList(req.userId)) })))
   // 电脑改名：本机名一变，旧名下的会话 / 运行 / 项目目录一起挪过去，别留一台「不存在的电脑」
   app.post('/machines/rename', async req => serial(async () => {
     const b = object(req.body ?? {})
@@ -2156,6 +2161,31 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         return
       }
       const key = execKey(userId, machine)
+      // 同一台电脑只留一条连接：开关来回拨时，新连接顶掉另一种身份的旧连接
+      const oldListener = listeners.get(key)
+      if (oldListener) {
+        listeners.delete(key)
+        try { oldListener.sock.close(4000, '被新连接顶掉') } catch {}
+      }
+      // exec=off：开着 AgentHub 但没开「远程执行」。只登记「在线、不接活」和工具清单，
+      // 不进 executors，服务端也不会给它发任何指令；它发来的消息一律不理
+      if (q.get('exec') === 'off') {
+        const agents = parseAgents(q.get('agents'))
+        const old = executors.get(key)
+        if (old) {
+          executors.delete(key)
+          try { old.sock.close(4000, '被新连接顶掉') } catch {}
+          pushAgents(userId)
+          await serial(() => dropExecutor(userId, machine))
+        }
+        if (socket.readyState !== 1) return
+        const me = { sock: socket, userId, authSessionId, machine }
+        listeners.set(key, me)
+        if (agents.length) capsByMachine.set(key, agents)
+        socket.on('close', () => { if (listeners.get(key) === me) listeners.delete(key) })
+        socket.on('error', () => {})
+        return
+      }
       // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）、mandate-v1（认 run.start.mandate，auto 档下按范围关掉 CLI 逐动作审批）
       const caps = new Set((q.get('capabilities') ?? '').split(',').map(s => s.trim()).filter(Boolean))
       // agents 是这台电脑装有哪几个工具：老客户端不带这个参数 = 不知道，保留上次上报的结果
