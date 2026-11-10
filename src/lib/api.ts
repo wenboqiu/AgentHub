@@ -8,6 +8,10 @@ export type NotifySettings = {
   minPriority: "high" | "medium" | "low";
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
+/** agent 头像：不设 = 首字母；preset = 内置 emoji（id 见 lib/avatars）；image = 自定义图片（96×96 data URL） */
+export type AgentAvatarSpec = { kind: "preset"; id: string } | { kind: "image"; data: string };
+/** 账号级界面偏好，跨设备同步 */
+export type Prefs = { avatars: Partial<Record<string, AgentAvatarSpec>> };
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: "high" | "medium" | "low"; status: "active" | "done" | "archived"; createdAt: string; updatedAt: string; doneAt: string | null };
 /** 任务的执行边界：派活时定下来，代批先按它判，也拼进执行者的系统提示 */
 export type TaskConstraints = {
@@ -473,6 +477,9 @@ export class Api {
   ackReminder = (id: number) => this.call("POST", `/reminders/${id}/ack`);
   notifySettings = async () => (await this.call<{ settings: NotifySettings }>("GET", "/notify/settings")).settings;
   saveNotifySettings = async (patch: Partial<NotifySettings>) => (await this.call<{ settings: NotifySettings }>("PATCH", "/notify/settings", patch)).settings;
+  prefs = async () => (await this.call<{ prefs: Prefs }>("GET", "/prefs")).prefs;
+  /** avatars.<agent> = null 恢复默认头像 */
+  savePrefs = async (patch: { avatars: Record<string, AgentAvatarSpec | null> }) => (await this.call<{ prefs: Prefs }>("PATCH", "/prefs", patch)).prefs;
   ack = (id: string) => this.call("POST", `/sessions/${encodeURIComponent(id)}/ack`);
   ackAll = () => this.call("POST", "/sessions/ack-all");
 
@@ -542,6 +549,8 @@ export type Handlers = {
   onProposal(p: Proposal): void;
   /** 服务端把某条会话的原生正文重新同步进了库（WorkBuddy 跑完一轮时会先同步） */
   onSessionHistory(sessionId: string): void;
+  /** 账号偏好（agent 头像）在别的设备上改了 */
+  onPrefs?(prefs: Prefs): void;
   /** 服务端以 4401 关闭连接：登录已失效，不再自动重连 */
   onAuthExpired(): void;
 };
@@ -640,6 +649,7 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "proposal") h.onProposal(m.proposal);
         else if (m.type === "session.history") h.onSessionHistory(m.sessionId);
         else if (m.type === "agents") h.onAgents(m.agents ?? []);
+        else if (m.type === "prefs" && m.prefs) h.onPrefs?.(m.prefs);
       } catch {
         /* 忽略坏消息 */
       }
