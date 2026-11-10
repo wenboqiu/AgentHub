@@ -22,6 +22,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const RUN_TIMEOUT: Duration = Duration::from_secs(2 * 3600);
+/// 等后台任务时，超过这么久没有任何新输出就按原行为结束
+const BG_WAIT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(3);
 const HISTORY_COUNT: usize = 50;
 /// Codex rollout 整读的上限。图像生成技能会把成品图以 base64 整段写进行里（一行可达数 MB），
@@ -538,6 +540,121 @@ pub enum ClaudeMsg {
     Tool { name: String, summary: String },
     Approval { request_id: String, tool: String, detail: String, input: Value },
     Result { subtype: String, usage: Option<Usage>, model: String },
+    /// 后台任务（异步 Agent / 后台 Bash）已启动，带任务 id
+    BgStarted(String),
+    /// 后台任务进入终态（completed/failed/stopped/killed），带任务 id
+    BgDone(String),
+    /// `system/background_tasks_changed`：当前仍在跑的后台任务全集（以它为准覆盖本地集合）
+    BgSet(Vec<String>),
+    /// result 行的 `queued_turn_count` > 0：CLI 还排着下一轮（比如后台通知），紧跟在 Result 前发出
+    QueuedTurns,
+}
+
+/// user 行里的所有文本：message.content 是字符串、text 块、或 tool_result 的 content（字符串 / text 块数组）
+fn user_line_texts(v: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match v.pointer("/message/content") {
+        Some(Value::String(s)) => out.push(s.clone()),
+        Some(Value::Array(items)) => {
+            for it in items {
+                match it.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(t) = it.get("text").and_then(|t| t.as_str()) {
+                            out.push(t.to_string());
+                        }
+                    }
+                    Some("tool_result") => match it.get("content") {
+                        Some(Value::String(s)) => out.push(s.clone()),
+                        Some(Value::Array(parts)) => {
+                            for p in parts {
+                                if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                                    out.push(t.to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// 取 `marker` 之后的一个 token（字母数字、`_`、`-`）
+fn token_after(text: &str, marker: &str) -> Option<String> {
+    let rest = text[text.find(marker)? + marker.len()..].trim_start();
+    let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+    if id.is_empty() { None } else { Some(id) }
+}
+
+/// 一段文本里所有 `<tag>…</tag>` 的内容
+fn tag_values<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
+    let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find(&open) {
+        let after = &rest[i + open.len()..];
+        let Some(j) = after.find(&close) else { break };
+        out.push(after[..j].trim());
+        rest = &after[j + close.len()..];
+    }
+    out
+}
+
+fn bg_status_final(s: &str) -> bool {
+    matches!(s.trim().to_lowercase().as_str(), "completed" | "failed" | "stopped" | "killed")
+}
+
+/// 从一行 user 消息里识别后台任务的启动 / 完成：
+/// 启动 = 工具结果里的 `Async agent launched`（`agentId: xxx`）或 `running in background with ID: xxx`（`tool_use_result.agentId` / `backgroundTaskId` 也认）；
+/// 完成 = `<task-notification>` 里 `<task-id>` + 终态 `<status>`（一条通知可带多个任务）。
+fn parse_bg_user_line(v: &Value) -> Vec<ClaudeMsg> {
+    let mut out = Vec::new();
+    for text in user_line_texts(v) {
+        if text.contains("<task-notification>") {
+            // 按 <task-notification> 块拆开，每块各自取 task-id 与 status
+            for block in text.split("<task-notification>").skip(1) {
+                let block = block.split("</task-notification>").next().unwrap_or(block);
+                let final_status = tag_values(block, "status").iter().any(|s| bg_status_final(s));
+                if final_status {
+                    for id in tag_values(block, "task-id") {
+                        if !id.is_empty() {
+                            out.push(ClaudeMsg::BgDone(id.to_string()));
+                        }
+                    }
+                }
+            }
+        } else if text.starts_with("Async agent launched") {
+            if let Some(id) = token_after(&text, "agentId:") {
+                out.push(ClaudeMsg::BgStarted(id));
+            }
+        } else if let Some(id) = token_after(&text, "running in background with ID:") {
+            out.push(ClaudeMsg::BgStarted(id));
+        }
+    }
+    if out.is_empty() {
+        // 结构化结果兜底（stdout 上是 tool_use_result，transcript 里是 toolUseResult）
+        let r = v.get("tool_use_result").or_else(|| v.get("toolUseResult"));
+        if let Some(r) = r {
+            let async_agent = r.get("isAsync").and_then(|b| b.as_bool()) == Some(true) || r.get("status").and_then(|s| s.as_str()) == Some("async_launched");
+            if async_agent {
+                if let Some(id) = r.get("agentId").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+                    out.push(ClaudeMsg::BgStarted(id.to_string()));
+                }
+            } else if let Some(id) = r.get("backgroundTaskId").and_then(|s| s.as_str()).filter(|s| !s.is_empty()) {
+                out.push(ClaudeMsg::BgStarted(id.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// 后台任务集合是否允许结束本次运行（空 = 可以结束）
+pub fn should_finish(pending: &std::collections::HashSet<String>) -> bool {
+    pending.is_empty()
 }
 
 /// 解析 claude stream-json 的一行；不关心的类型返回空
@@ -588,7 +705,35 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeMsg> {
             let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("unknown").to_string();
             // result 事件自带实测模型 id（比角色配的更真），随用量一起上报
             let model = v.get("model").and_then(Value::as_str).unwrap_or("").to_string();
+            if v.get("queued_turn_count").and_then(Value::as_u64).unwrap_or(0) > 0 {
+                out.push(ClaudeMsg::QueuedTurns);
+            }
             out.push(ClaudeMsg::Result { subtype, usage: usage_from(&v), model });
+        }
+        Some("user") => out.extend(parse_bg_user_line(&v)),
+        // 实测（Claude Code，2026-11）：后台任务的生命周期以 system 行输出——
+        // task_started{task_id,is_backgrounded} → task_notification{task_id,status} → background_tasks_changed{tasks:[…]}；
+        // 后台全部完成后 CLI 会自己开下一轮（result.origin.kind = "task-notification"），不需要我们补消息
+        Some("system") => {
+            let sub = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+            let id = v.get("task_id").and_then(|s| s.as_str()).unwrap_or("");
+            match sub {
+                "task_started" if !id.is_empty() && v.get("is_backgrounded").and_then(Value::as_bool) != Some(false) => {
+                    out.push(ClaudeMsg::BgStarted(id.to_string()));
+                }
+                "background_tasks_changed" => {
+                    let ids = v.get("tasks").and_then(|t| t.as_array()).map(|a| a.iter()
+                        .filter_map(|t| t.get("task_id").and_then(|s| s.as_str()).map(str::to_string)).collect()).unwrap_or_default();
+                    out.push(ClaudeMsg::BgSet(ids));
+                }
+                s if s.contains("task_notification") => {
+                    let st = v.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                    if !id.is_empty() && bg_status_final(st) {
+                        out.push(ClaudeMsg::BgDone(id.to_string()));
+                    }
+                }
+                _ => {}
+            }
         }
         _ => {}
     }
@@ -1957,6 +2102,12 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
     let mut approvals = Approvals::default();
     let mut finish: Option<Finish> = None;
     let mut session_reported = mode == Mode::Resume;
+    // 后台任务（异步 Agent / 后台 Bash）：只对 claude 系生效。收到 Result 时若还有没完成的，
+    // 不关 stdin、不结束，等后台任务完成后 CLI 自动开下一轮的那次 Result。
+    let mut pending_bg: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut bg_waiting = false; // 已收到一次 Result 但因后台任务未完成而继续等
+    let mut queued_turns = false; // 本行 result 声明还有排队的下一轮
+    let mut last_line = Instant::now();
     while finish.is_none() {
         if start.elapsed() > RUN_TIMEOUT {
             run.message("system", "运行超过 2 小时，已强制停止");
@@ -1965,6 +2116,7 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
         }
         match run.rx.recv_timeout(Duration::from_millis(500)) {
             Ok(RunMsg::Line(l)) => {
+                last_line = Instant::now();
                 if !session_reported {
                     match claude_init_session(&l, mode, key) {
                         ClaudeInit::NewId(id) => {
@@ -1992,9 +2144,16 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
                 for m in parsed {
                     match m {
                         // 正文已经作为消息进对话流了，这里把「正在做什么」清掉，回到中性提示
-                        ClaudeMsg::Text(_) => run.activity("idle", ""),
-                        ClaudeMsg::Thinking(t) => run.activity("thinking", &t),
+                        ClaudeMsg::Text(_) => {
+                            bg_waiting = false;
+                            run.activity("idle", "")
+                        }
+                        ClaudeMsg::Thinking(t) => {
+                            bg_waiting = false;
+                            run.activity("thinking", &t)
+                        }
                         ClaudeMsg::Tool { name, summary } => {
+                            bg_waiting = false;
                             run.message("tool", &format!("{name} {summary}"));
                             run.activity("tool", &format!("{name} {summary}"));
                         }
@@ -2010,9 +2169,25 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
                             if let Some(u) = usage {
                                 run.usage_model(&u, &model);
                             }
-                            stdin = None; // 关闭 stdin，进程自己退出
-                            finish = Some(if subtype == "success" { Finish::Done } else { Finish::Failed(format!("运行结束：{subtype}")) });
+                            let queued = std::mem::take(&mut queued_turns);
+                            if subtype == "success" && (!should_finish(&pending_bg) || queued) && stdin.is_some() {
+                                bg_waiting = true;
+                                run.activity("idle", &format!("等待后台任务完成（{} 个）", pending_bg.len()));
+                            } else {
+                                stdin = None; // 关闭 stdin，进程自己退出
+                                finish = Some(if subtype == "success" { Finish::Done } else { Finish::Failed(format!("运行结束：{subtype}")) });
+                            }
                         }
+                        ClaudeMsg::BgStarted(id) => {
+                            pending_bg.insert(id);
+                        }
+                        ClaudeMsg::BgDone(id) => {
+                            pending_bg.remove(&id);
+                        }
+                        ClaudeMsg::BgSet(ids) => {
+                            pending_bg = ids.into_iter().collect();
+                        }
+                        ClaudeMsg::QueuedTurns => queued_turns = true,
                     }
                 }
             }
@@ -2053,6 +2228,15 @@ fn run_claude_like(run: &Run, cli: &ClaudeLikeCli, label: &str, mode: Mode, key:
         for p in approvals.expired(Instant::now(), &run.out, &run.run_id) {
             run.message("system", "授权等待超时，已拒绝");
             answer_claude(&mut stdin, &p, false, sdk_style);
+        }
+        if bg_waiting && finish.is_none() {
+            let quiet = last_line.elapsed();
+            if quiet > BG_WAIT_TIMEOUT {
+                // 兜底：后台任务迟迟没有动静，按原行为结束
+                run.message("system", "后台任务等待超时，已结束本次运行");
+                stdin = None;
+                finish = Some(Finish::Done);
+            }
         }
     }
     let f = finish.unwrap();
@@ -3344,6 +3528,55 @@ mod tests {
         assert_eq!(codex_model_args("gpt-5-codex"), vec!["-c".to_string(), "model=\"gpt-5-codex\"".to_string()]);
         assert_eq!(codex_role_text("修一个 bug", ""), "修一个 bug");
         assert_eq!(codex_role_text("修一个 bug", "先写测试"), "先写测试\n\n---\n\n修一个 bug");
+    }
+
+    #[test]
+    fn claude_background_task_lines() {
+        // Agent 异步启动：文本以 Async agent launched 开头，带 agentId
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"Async agent launched successfully.\nagentId: a24d3b079594f4810 (internal ID)"}]}}"#;
+        assert_eq!(parse_claude_line(line), vec![ClaudeMsg::BgStarted("a24d3b079594f4810".into())]);
+        // 结构化结果兜底
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]},"tool_use_result":{"isAsync":true,"status":"async_launched","agentId":"abc123"}}"#;
+        assert_eq!(parse_claude_line(line), vec![ClaudeMsg::BgStarted("abc123".into())]);
+        // 后台 Bash
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"Command running in background with ID: bx9k2. Output is being written to: /tmp/x"}]}}"#;
+        assert_eq!(parse_claude_line(line), vec![ClaudeMsg::BgStarted("bx9k2".into())]);
+        // 完成通知：一条带两个任务，其中一个还在跑的不算
+        let line = r#"{"type":"user","message":{"role":"user","content":"<task-notification><task-id>a1</task-id><status>completed</status></task-notification>\n<task-notification><task-id>a2</task-id><status>running</status></task-notification>\n<task-notification><task-id>a3</task-id><status>killed</status></task-notification>"}}"#;
+        assert_eq!(parse_claude_line(line), vec![ClaudeMsg::BgDone("a1".into()), ClaudeMsg::BgDone("a3".into())]);
+        // 普通 user 行不识别
+        assert!(parse_claude_line(r#"{"type":"user","message":{"role":"user","content":"hello"}}"#).is_empty());
+        // system 形态
+        assert_eq!(
+            parse_claude_line(r#"{"type":"system","subtype":"task_notification","task_id":"z1","status":"completed"}"#),
+            vec![ClaudeMsg::BgDone("z1".into())]
+        );
+    }
+
+    #[test]
+    fn pending_bg_decides_finish() {
+        let mut p = std::collections::HashSet::new();
+        assert!(should_finish(&p));
+        p.insert("a".to_string());
+        assert!(!should_finish(&p));
+        p.remove("a");
+        assert!(should_finish(&p));
+    }
+
+    /// 实测 claude -p stream-json 的后台任务行（2026-11，字段截短）
+    #[test]
+    fn claude_background_system_lines() {
+        assert_eq!(parse_claude_line(r#"{"type":"system","subtype":"task_started","task_id":"b5pfo810k","is_backgrounded":true,"task_type":"local_bash"}"#),
+            vec![ClaudeMsg::BgStarted("b5pfo810k".into())]);
+        assert_eq!(parse_claude_line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b5pfo810k","task_type":"local_bash"}]}"#),
+            vec![ClaudeMsg::BgSet(vec!["b5pfo810k".into()])]);
+        assert_eq!(parse_claude_line(r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#), vec![ClaudeMsg::BgSet(vec![])]);
+        assert_eq!(parse_claude_line(r#"{"type":"system","subtype":"task_notification","task_id":"b5pfo810k","status":"completed"}"#),
+            vec![ClaudeMsg::BgDone("b5pfo810k".into())]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","queued_turn_count":1}"#),
+            vec![ClaudeMsg::QueuedTurns, ClaudeMsg::Result { subtype: "success".into(), usage: None, model: String::new() }]);
+        assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","queued_turn_count":0}"#),
+            vec![ClaudeMsg::Result { subtype: "success".into(), usage: None, model: String::new() }]);
     }
 
     #[test]
