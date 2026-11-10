@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type { Api, Approval, Attachment, BoardEntry, AttachmentInput, EvidenceKind, Goal, Machine, Project, ProjectDir, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { Api, Approval, Attachment, BoardEntry, AttachmentInput, EvidenceKind, FilePreviewData, Goal, Machine, Project, ProjectDir, Review, ReviewItem, Role, Session, Task, TaskArtifact, TaskDigests, TaskInput, ThreadEvent } from "./lib/api";
 import { APPROVAL_TIER_LABEL, NO_CONSTRAINTS, constraintsSummary } from "./lib/api";
 import { TASK_LABEL } from "./TasksPanel";
 import BoundsEditor from "./BoundsEditor";
@@ -9,6 +9,7 @@ import { PrioritySelect } from "./GoalPriority";
 import Checklist from "./Checklist";
 import InlineField from "./InlineField";
 import Markdown from "./Markdown";
+import FilePreview from "./FilePreview";
 import TaskNotes from "./TaskNotes";
 import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
 import { pickMachine } from "./lib/machines";
@@ -26,6 +27,9 @@ const AGENT_OPTIONS = DISPATCHABLE_AGENTS.map(value => ({ value, label: AGENT_LA
 const toIso = (v: string) => v ? new Date(v).toISOString() : null;
 /** 一条项目配置（电脑 + 目录）的唯一标识：电脑可能为空（哪台都行），拼上目录才不重 */
 const dirKey = (d: ProjectDir) => `${d.machine ?? ""}\u0000${d.cwd}`;
+
+/** 证据里的「文件」可能是去掉协议的 URL：首段含 `.`（且不以 `.` 开头，排除 .claude/…）并且后面还有 `/` */
+const looksLikeUrl = (v: string) => { const i = v.indexOf("/"); return i > 0 && !v.startsWith(".") && v.slice(0, i).includes("."); };
 
 /**
  * 任务详情是单页：头部（标题 / 状态 / 执行摘要）→ 状态卡（按任务状态变形态，主操作都在这）
@@ -48,6 +52,8 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
   const [fresh, setFresh] = useState(false);
   const [pickOpen, setPickOpen] = useState(false), [pickedMachine, setPickedMachine] = useState("");
   const [pokeOpen, setPokeOpen] = useState(false), [poke, setPoke] = useState("");
+  const [filePreview, setFilePreview] = useState<{ path: string; load: () => Promise<FilePreviewData> } | null>(null);
+  const openFile = useCallback((path: string) => setFilePreview({ path, load: () => api.taskFile(task.id, path) }), [api, task.id]);
   const [replyOpen, setReplyOpen] = useState(false), [evidenceOpen, setEvidenceOpen] = useState<EvidenceKind | null>(null);
   const [machines, setMachines] = useState<Machine[]>([]);
   // 附件：列表只有元信息，图片的 data URL 按 id 单取（缓存起来，切回来不重下）
@@ -318,12 +324,14 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
       <div className="status-head"><h3>等你验收</h3><span className="dim">{ago(deliveredAt, Date.now())}交付</span></div>
       {lastReply && <div className="status-reply">
         <span className="dim">它说做了什么</span>
-        <div className={`reply-clip ${replyOpen ? "open" : ""}`}><Markdown text={lastReply} /></div>
+        <div className={`reply-clip ${replyOpen ? "open" : ""}`}><Markdown text={lastReply} onFile={openFile} /></div>
         {replyLong && <button className="link" onClick={() => setReplyOpen(v => !v)}>{replyOpen ? "收起" : "展开全文"}</button>}
       </div>}
       {evidenceGroups.length > 0 && <div className="evidence">
         <div className="evidence-chips">{evidenceGroups.map(g => <button key={g.k} type="button" className={`pg-chip ev-chip ${evidenceOpen === g.k ? "on" : ""}`} aria-expanded={evidenceOpen === g.k} onClick={() => setEvidenceOpen(evidenceOpen === g.k ? null : g.k)}>{g.label} {g.list.length}</button>)}</div>
-        {evidenceGroups.filter(g => g.k === evidenceOpen).map(g => <ul key={g.k}>{g.list.map((e, i) => <li key={i}><code>{e.value}</code></li>)}</ul>)}
+        {evidenceGroups.filter(g => g.k === evidenceOpen).map(g => <ul key={g.k}>{g.list.map((e, i) => <li key={i}>{g.k !== "file" ? <code>{e.value}</code> : looksLikeUrl(e.value)
+          ? <a href={`https://${e.value}`} target="_blank" rel="noopener noreferrer"><code>{e.value}</code></a>
+          : <button type="button" className="md-file" title="预览文件" onClick={() => openFile(e.value)}><code>{e.value}</code></button>}</li>)}</ul>)}
       </div>}
       <ul className="review-list">
         {reviewItems.map(it => (
@@ -475,6 +483,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
   const lastSession = task.sessionIds[task.sessionIds.length - 1];
 
   return <div className="app">
+    {filePreview && <FilePreview title={filePreview.path} load={filePreview.load} onClose={() => setFilePreview(null)} />}
     <header className="task-header">
       <div className="task-head-row">
         <button className="back-button" onClick={onBack}><Icon name="back" />返回</button>
@@ -560,7 +569,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
             </div>
           ) : (
             <>
-              <div className="artifact-md"><Markdown text={artifact.md} /></div>
+              <div className="artifact-md"><Markdown text={artifact.md} onFile={openFile} /></div>
               <div className="action-bar">
                 <button disabled={busy} onClick={() => { setArtifactDraft(artifact.md); setEditingArtifact(true); }}><Icon name="edit" />编辑</button>
                 <button disabled={busy} onClick={rebuildArtifact}>按最新会话重建</button>

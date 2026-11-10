@@ -361,6 +361,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   }
   // 等待执行器返回的历史请求
   const historyWaits = new Map<string, { userId: number; machine: string; resolve: (r: HistoryResult) => void }>()
+  // 等待执行器返回的文件预览请求
+  type FileResult = { path?: string; text?: string; size?: number; truncated?: boolean; error?: string }
+  const fileWaits = new Map<string, { userId: number; machine: string; resolve: (r: FileResult) => void }>()
   // 每个 run 最近一次「正在做什么」：执行器实时上报，只放内存（不需要持久化），
   // 中途打开会话时随 /messages 一起下发，界面才不会一进来就空着
   const liveActivity = new Map<string, LiveActivity>()
@@ -830,6 +833,37 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         w.resolve({ messages: [], error: '电脑端断开' })
       }
     }
+    for (const [id, w] of fileWaits) {
+      if (w.userId === userId && w.machine === machine) {
+        fileWaits.delete(id)
+        w.resolve({ error: '电脑端断开' })
+      }
+    }
+  }
+
+  /** 向电脑端要一个项目内文件的文本（file.request 往返）。null = 没及时回 */
+  async function requestFile(userId: number, machine: string, cwd: string, path: string): Promise<FileResult | null> {
+    if (!executors.has(execKey(userId, machine))) return { error: '电脑端不在线' }
+    const requestId = randomUUID()
+    const waiting = new Promise<FileResult | null>(resolve => {
+      const timer = setTimeout(() => {
+        fileWaits.delete(requestId)
+        resolve(null)
+      }, historyTimeoutMs)
+      fileWaits.set(requestId, {
+        userId,
+        machine,
+        resolve: r => {
+          clearTimeout(timer)
+          resolve(r)
+        },
+      })
+    })
+    if (!sendExecutor(userId, machine, { type: 'file.request', requestId, cwd, path })) {
+      fileWaits.delete(requestId)
+      return { error: '电脑端不在线' }
+    }
+    return waiting
   }
 
   /** 向电脑端要一份原生日志（history.request 往返）。null = 电脑端没及时回 */
@@ -1300,6 +1334,35 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await deleteArtifact(pool,req.userId,id)
     return { ok: true }
   }))
+  // ---------- 文件预览：文件在执行任务的电脑上，经 WS 向执行器要；由执行器校验必须落在 cwd 内 ----------
+  // 读接口不进 serial：一次往返最长等 historyTimeoutMs，不能把全局队列占住。
+  const previewFile = async (userId: number, machine: string | null, cwd: string | null, raw: unknown, reply: { code: (n: number) => { send: (b: unknown) => unknown } }) => {
+    const path = typeof raw === 'string' ? raw : ''
+    if (!path.trim() || path.length > 1000 || path.includes('\0')) return reply.code(400).send({ error: '路径不合法' })
+    if (!machine) return reply.code(409).send({ error: '找不到执行这个任务的电脑' })
+    if (!executors.has(execKey(userId, machine))) return reply.code(409).send({ error: '电脑端不在线' })
+    const res = await requestFile(userId, machine, cwd ?? '', path.trim())
+    if (!res) return reply.code(504).send({ error: '电脑端没有及时响应' })
+    if (res.error) return reply.code(res.error === '电脑端不在线' || res.error === '电脑端断开' ? 409 : res.error.includes('找不到') ? 404 : 400).send({ error: res.error })
+    return { path: res.path ?? path, text: res.text ?? '', size: res.size ?? 0, truncated: !!res.truncated }
+  }
+  app.get('/tasks/:id/file', async (req, reply) => {
+    const id = entityId((req.params as {id:string}).id)
+    const task = await getTask(pool,req.userId,id)
+    let machine = task.machine, cwd = task.cwd
+    if (!machine || !cwd) {
+      // 任务自身没配电脑 / 目录：取挂接会话里最近更新的那个
+      const sessions = (await Promise.all(task.sessionIds.map(s => getSession(pool,req.userId,s)))).filter((s): s is Session => !!s)
+      sessions.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))
+      if (sessions[0]) { machine = machine || sessions[0].machine; cwd = cwd || sessions[0].cwd }
+    }
+    return previewFile(req.userId, machine, cwd, (req.query as {path?: string}).path, reply)
+  })
+  app.get('/sessions/:id/file', async (req, reply) => {
+    const session = await getSession(pool,req.userId,(req.params as {id:string}).id)
+    if (!session) return reply.code(404).send({ error: '会话不存在' })
+    return previewFile(req.userId, session.machine, session.cwd, (req.query as {path?: string}).path, reply)
+  })
   // ---------- 任务附件：图片 / 文件独立存放，备注里只写 attachment:ID 引用 ----------
   // 列表只给元信息（图片的 data URL 按 id 单独取）：读接口不进 serial，否则一次列表会把
   // 全局队列占住，连执行端的事件上报都得排队等它。
@@ -2016,6 +2079,19 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!run || run.machine !== machine) return
         const expired = await expireApproval(pool, userId, str(m.approvalId), run.id)
         if (expired) await pushApproval(userId, expired, false)
+        return
+      }
+      case 'file.result': {
+        const w = fileWaits.get(str(m.requestId))
+        if (!w || w.userId !== userId || w.machine !== machine) return
+        fileWaits.delete(str(m.requestId))
+        w.resolve({
+          path: typeof m.path === 'string' ? m.path : undefined,
+          text: typeof m.text === 'string' ? m.text : undefined,
+          size: typeof m.size === 'number' ? m.size : undefined,
+          truncated: m.truncated === true,
+          error: typeof m.error === 'string' && m.error ? m.error : undefined,
+        })
         return
       }
       case 'history.result': {

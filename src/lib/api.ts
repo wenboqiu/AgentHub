@@ -107,6 +107,7 @@ export type AssistantState = {
 export type Memory = { id: number; roleId: number; projectId: number | null; content: string; source: "manual" | "review"; weight: number; uses: number; lastUsedAt: string | null; createdAt: string; updatedAt: string };
 export type RunBrief = { status: RunStatus; error: string; /** 这一轮用的模型，空 = 执行端默认 */ model?: string | null; updatedAt: string };
 /** 验收证据：从会话记录里摘出的文件变更、命令、测试结果、截图、错误日志 */
+export type FilePreviewData = { path: string; text: string; size: number; truncated: boolean };
 export type EvidenceKind = "file" | "command" | "test" | "shot" | "log";
 export type Evidence = { kind: EvidenceKind; label: string; value: string; at: string | null };
 /** 验收摘要：任务进入待验收时服务端后台预生成，打开详情即见 */
@@ -483,6 +484,9 @@ export class Api {
   decide = (approvalId: string, decision: "allow" | "deny", answers?: Record<string, string[]>) =>
     this.call("POST", `/approvals/${encodeURIComponent(approvalId)}`, { decision, ...(answers ? { answers } : {}) });
   history = (sessionId: string) => this.call<{ messages: Message[] }>("POST", `/sessions/${encodeURIComponent(sessionId)}/history`, {});
+  /** 预览电脑端项目目录里的文件（服务端经 WS 向执行器要，路径由执行器校验必须落在项目目录内） */
+  taskFile = (id: number, path: string) => this.call<FilePreviewData>("GET", `/tasks/${id}/file?path=${encodeURIComponent(path)}`);
+  sessionFile = (id: string, path: string) => this.call<FilePreviewData>("GET", `/sessions/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`);
 }
 
 export type ConnState = "connecting" | "open" | "closed";

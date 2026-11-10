@@ -1190,3 +1190,16 @@ button.pg-slot { cursor: pointer; }
   .page-heading { flex-wrap: wrap; }
   .status-card { padding: 14px 14px; }
 }
+
+/* 文件预览：行内代码里的可点路径 + 弹层 */
+.md-file { display: inline; padding: 0; margin: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; min-height: 0; text-align: left; }
+.md-file code { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }
+.file-preview { width: min(860px, 96vw); max-height: 90vh; }
+.file-preview .modal-head h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.file-preview-pre { margin: 0; padding: 12px; overflow: auto; max-height: calc(90vh - 110px); background: var(--field); border: 1px solid var(--line); border-radius: 10px; font-size: 12.5px; line-height: 1.5; white-space: pre; tab-size: 4; }
+.file-preview-md { overflow: auto; max-height: calc(90vh - 110px); }
+@media (max-width: 600px) {
+  .modal-overlay:has(.file-preview) { padding: 0; }
+  .file-preview { width: 100vw; max-width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; }
+  .file-preview-pre, .file-preview-md { max-height: calc(100vh - 100px); }
+}

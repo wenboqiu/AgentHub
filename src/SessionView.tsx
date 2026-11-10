@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isPending, isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
 import { desktop, isAndroid, isDesktop, type DoubaoVisible } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
@@ -16,6 +16,7 @@ import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
 import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary } from "./lib/runMeta";
 import Markdown from "./Markdown";
+import FilePreview from "./FilePreview";
 import { parseQuestions } from "./lib/questions";
 
 const STATE_LABEL: Record<string, string> = {
@@ -104,6 +105,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [sheetCollapsed, setSheetCollapsed] = useState(false);
   /** 图片预览浮层：当前放大查看的图片（data URL） */
   const [preview, setPreview] = useState<string | null>(null);
+  const [filePreview, setFilePreview] = useState<{ path: string; load: () => ReturnType<Api["sessionFile"]> } | null>(null);
+  const openFile = useCallback((path: string) => setFilePreview({ path, load: () => api.sessionFile(sessionId, path) }), [api, sessionId]);
   /** 待发送的附图（data URL），最多 MAX_IMAGES 张 */
   const [images, setImages] = useState<string[]>([]);
   /** 左侧会话列表是否收起（记住上次的展开状态，宽屏常驻时生效） */
@@ -572,7 +575,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               <div className={`msg ${m.role}`}>
                 {/* 人和 agent 的话都按 markdown 渲染（都会贴表格、代码、路径）；
                     tool / system 行还是原文，终端输出里的符号不能被当成格式 */}
-                {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} lenient={session.agent === "codex"} /> : m.text}
+                {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} lenient={session.agent === "codex"} onFile={openFile} /> : m.text}
                 {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
@@ -586,7 +589,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           {/* 豆包：窗口里抓到的消息，只读——没有时间、不能分支 / 评价 / 重发 */}
           {doubaoMsgs.map((m, i) => (
             <li key={`doubao-${i}`} className={`message-entry ${m.role}`}>
-              <div className={`msg ${m.role}`}><Markdown text={m.text} /></div>
+              <div className={`msg ${m.role}`}><Markdown text={m.text} onFile={openFile} /></div>
             </li>
           ))}
         </ul>
@@ -703,6 +706,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         </>
       )}
       {/* 图片预览浮层：点击消息里的图片打开，点击任意处或 Esc 关闭 */}
+      {filePreview && <FilePreview title={filePreview.path} load={filePreview.load} onClose={() => setFilePreview(null)} />}
       {preview && (
         <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片预览" onClick={() => setPreview(null)}>
           <img src={preview} alt="图片预览" />

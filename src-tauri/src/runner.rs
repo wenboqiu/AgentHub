@@ -740,6 +740,106 @@ pub fn parse_claude_line(line: &str) -> Vec<ClaudeMsg> {
     out
 }
 
+const PREVIEW_MAX: usize = 512 * 1024;
+const PREVIEW_SKIP_DIRS: [&str; 4] = ["node_modules", ".git", "target", "dist"];
+
+#[derive(Debug, PartialEq)]
+pub struct Preview {
+    pub path: String,
+    pub text: String,
+    pub size: u64,
+    pub truncated: bool,
+}
+
+/// 在 cwd 下递归找同名文件（跳过 node_modules / .git / target / dist），最多找 6 个就停
+fn find_by_name(root: &Path, name: &str, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(root) else { return };
+    for e in rd.flatten() {
+        if out.len() > 5 {
+            return;
+        }
+        let p = e.path();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if !PREVIEW_SKIP_DIRS.contains(&n.as_str()) {
+                find_by_name(&p, name, out);
+            }
+        } else if ft.is_file() && e.file_name().to_string_lossy() == name {
+            out.push(p);
+        }
+    }
+}
+
+/// 末尾这几个字节是不是一个被截断的多字节字符的前缀
+fn utf8_incomplete_tail(tail: &[u8]) -> bool {
+    match std::str::from_utf8(tail) {
+        Ok(_) => false,
+        Err(e) => e.error_len().is_none() && e.valid_up_to() == 0,
+    }
+}
+
+/// 预览项目目录内的一个文本文件：路径必须落在 cwd 内，≤512KB，必须是 UTF-8
+pub fn read_preview(cwd: &str, path: &str, denied: &[String]) -> Result<Preview, String> {
+    let cwd = if cwd.trim().is_empty() { crate::workdir::ensure_default()? } else { cwd.to_string() };
+    check_cwd(&cwd, denied).map_err(|_| "这个目录不允许预览".to_string())?;
+    let path = path.trim();
+    if path.is_empty() || path.contains('\0') {
+        return Err("路径无效".into());
+    }
+    let root = std::fs::canonicalize(&cwd).map_err(|_| format!("项目目录不存在：{cwd}"))?;
+    let given = Path::new(path);
+    let mut target = if given.is_absolute() { given.to_path_buf() } else { Path::new(&cwd).join(given) };
+    if !target.exists() && !path.contains('/') && !path.contains('\\') {
+        let mut found = Vec::new();
+        find_by_name(&root, path, &mut found);
+        match found.len() {
+            0 => return Err("找不到文件".into()),
+            1 => target = found.remove(0),
+            _ => {
+                let names: Vec<String> = found
+                    .iter()
+                    .take(5)
+                    .map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().replace('\\', "/"))
+                    .collect();
+                return Err(format!("有多个同名文件：{}", names.join(", ")));
+            }
+        }
+    }
+    let real = std::fs::canonicalize(&target).map_err(|_| "找不到文件".to_string())?;
+    if !real.starts_with(&root) {
+        return Err("只能预览项目目录内的文件".into());
+    }
+    if !real.is_file() {
+        return Err("不是普通文件".into());
+    }
+    let size = std::fs::metadata(&real).map_err(|e| format!("读取失败：{e}"))?.len();
+    let mut buf = Vec::new();
+    {
+        use std::io::Read;
+        let f = std::fs::File::open(&real).map_err(|e| format!("读取失败：{e}"))?;
+        f.take(PREVIEW_MAX as u64).read_to_end(&mut buf).map_err(|e| format!("读取失败：{e}"))?;
+    }
+    let truncated = size > PREVIEW_MAX as u64;
+    let text = match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => {
+            // 截断可能切在多字节字符中间：回退到字符边界；真正的坏字节才算非文本
+            let valid = e.utf8_error().valid_up_to();
+            let bytes = e.into_bytes();
+            if !(truncated && utf8_incomplete_tail(&bytes[valid..])) {
+                return Err("不是文本文件".into());
+            }
+            String::from_utf8(bytes[..valid].to_vec()).map_err(|_| "不是文本文件".to_string())?
+        }
+    };
+    if text.contains('\0') {
+        return Err("不是文本文件".into());
+    }
+    let rel = real.strip_prefix(&root).unwrap_or(&real).to_string_lossy().replace('\\', "/");
+    Ok(Preview { path: rel, text, size, truncated })
+}
+
 /// 用户附图统一走 data URL（`data:image/png;base64,...`），拆成 (media_type, base64)
 pub fn split_data_url(url: &str) -> Option<(&str, &str)> {
     let rest = url.strip_prefix("data:")?;
@@ -3047,6 +3147,17 @@ impl Runner {
                     let _ = out.send(m);
                 });
             }
+            Some("file.request") => {
+                let (out, request_id, cwd, path) = (self.out.clone(), s("requestId"), s("cwd"), s("path"));
+                let denied = self.config.read().unwrap().denied_roots.clone();
+                std::thread::spawn(move || {
+                    let m = match read_preview(&cwd, &path, &denied) {
+                        Ok(p) => json!({"type":"file.result","requestId":request_id,"path":p.path,"text":p.text,"size":p.size,"truncated":p.truncated}),
+                        Err(e) => json!({"type":"file.result","requestId":request_id,"error":e}),
+                    };
+                    let _ = out.send(m);
+                });
+            }
             _ => {}
         }
     }
@@ -3577,6 +3688,72 @@ mod tests {
             vec![ClaudeMsg::QueuedTurns, ClaudeMsg::Result { subtype: "success".into(), usage: None, model: String::new() }]);
         assert_eq!(parse_claude_line(r#"{"type":"result","subtype":"success","queued_turn_count":0}"#),
             vec![ClaudeMsg::Result { subtype: "success".into(), usage: None, model: String::new() }]);
+    }
+
+    fn preview_dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ah-preview-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn read_preview_rules() {
+        let d = preview_dir("rules");
+        let cwd = d.to_string_lossy().to_string();
+        std::fs::create_dir_all(d.join("docs")).unwrap();
+        std::fs::create_dir_all(d.join("a")).unwrap();
+        std::fs::create_dir_all(d.join("b")).unwrap();
+        std::fs::create_dir_all(d.join("node_modules")).unwrap();
+        std::fs::write(d.join("docs/x.md"), "# hi").unwrap();
+        std::fs::write(d.join("a/dup.ts"), "1").unwrap();
+        std::fs::write(d.join("b/dup.ts"), "2").unwrap();
+        std::fs::write(d.join("only.rs"), "fn main(){}").unwrap();
+        std::fs::write(d.join("node_modules/skip.js"), "x").unwrap();
+        std::fs::write(d.join("bin.dat"), [0xffu8, 0xfe, 0x00, 0x01]).unwrap();
+        let outside = d.parent().unwrap().join(format!("ah-outside-{}.txt", std::process::id()));
+        std::fs::write(&outside, "secret").unwrap();
+
+        let p = read_preview(&cwd, "docs/x.md", &[]).unwrap();
+        assert_eq!((p.path.as_str(), p.text.as_str(), p.truncated), ("docs/x.md", "# hi", false));
+        // 裸文件名唯一
+        assert_eq!(read_preview(&cwd, "only.rs", &[]).unwrap().path, "only.rs");
+        let p = read_preview(&cwd, "x.md", &[]).unwrap();
+        assert_eq!(p.path, "docs/x.md");
+        // 多个同名
+        let e = read_preview(&cwd, "dup.ts", &[]).unwrap_err();
+        assert!(e.starts_with("有多个同名文件："), "{e}");
+        assert!(e.contains("a/dup.ts") && e.contains("b/dup.ts"), "{e}");
+        // 找不到 / 被跳过的目录
+        assert_eq!(read_preview(&cwd, "nope.ts", &[]).unwrap_err(), "找不到文件");
+        assert_eq!(read_preview(&cwd, "skip.js", &[]).unwrap_err(), "找不到文件");
+        // 越界
+        let e = read_preview(&cwd, &format!("../{}", outside.file_name().unwrap().to_string_lossy()), &[]).unwrap_err();
+        assert_eq!(e, "只能预览项目目录内的文件");
+        let e = read_preview(&cwd, &outside.to_string_lossy(), &[]).unwrap_err();
+        assert_eq!(e, "只能预览项目目录内的文件");
+        // 目录不是普通文件
+        assert_eq!(read_preview(&cwd, "docs", &[]).unwrap_err(), "不是普通文件");
+        // 非 UTF-8
+        assert_eq!(read_preview(&cwd, "bin.dat", &[]).unwrap_err(), "不是文本文件");
+        // 黑名单
+        assert!(read_preview(&cwd, "only.rs", &[cwd.clone()]).is_err());
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_preview_truncates_at_char_boundary() {
+        let d = preview_dir("trunc");
+        let cwd = d.to_string_lossy().to_string();
+        // 每个「中」3 字节；512KB 不是 3 的倍数，截断点必落在字符中间
+        let big = "中".repeat(PREVIEW_MAX / 3 + 100);
+        std::fs::write(d.join("big.txt"), &big).unwrap();
+        let p = read_preview(&cwd, "big.txt", &[]).unwrap();
+        assert!(p.truncated);
+        assert_eq!(p.size as usize, big.len());
+        assert!(p.text.len() <= PREVIEW_MAX && p.text.chars().all(|c| c == '中'));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -31,12 +31,16 @@ type Props = {
    * 其他通道本来就没问题，保持标准 GFM，不受影响。
    */
   lenient?: boolean;
+  /** 传了就把「像文件路径」的行内代码渲染成可点按钮（点开预览）；调用方用 useCallback 保持引用稳定 */
+  onFile?: (path: string) => void;
 };
+
+const FILE_RE = /^[\w.\-/\\:@]+\.[A-Za-z0-9]{1,8}(:\d+)?$/;
 
 const PLUGINS = [remarkGfm];
 const LENIENT_PLUGINS = [remarkGfm, remarkCjkFriendly, remarkBreaks];
 
-const Markdown = memo(function Markdown({ text, compact = false, lenient = false, attachments, onAttachment, onImage }: Props) {
+const Markdown = memo(function Markdown({ text, compact = false, lenient = false, attachments, onAttachment, onImage, onFile }: Props) {
   const loaded = Array.isArray(attachments);
   const byId = new Map((attachments ?? []).map(a => [a.id, a]));
   // 附件还没读回来时不放行：react-markdown 会把 href 过滤成空，这里正好渲染成纯文本
@@ -49,6 +53,18 @@ const Markdown = memo(function Markdown({ text, compact = false, lenient = false
         remarkPlugins={lenient ? LENIENT_PLUGINS : PLUGINS}
         urlTransform={urlTransform}
         components={{
+          code: ({ className, children }) => {
+            const s = String(children);
+            // 行内代码（没有 language- 类、不含换行）且像文件路径才可点；其余原样渲染
+            if (onFile && !className && !s.includes("\n") && !/\s/.test(s) && !s.startsWith("http") && FILE_RE.test(s)) {
+              const path = s.replace(/:\d+$/, "");
+              return (
+                <button type="button" className="md-file" title="预览文件"
+                  onClick={e => { e.stopPropagation(); onFile(path); }}><code>{s}</code></button>
+              );
+            }
+            return <code className={className}>{children}</code>;
+          },
           a: ({ href, children }) => {
             const id = attachmentId(href);
             if (id === null) {
