@@ -1191,6 +1191,10 @@ button.pg-slot { cursor: pointer; }
   .status-card { padding: 14px 14px; }
 }
 
+/* 任务序号：弱化的 #id，放在任务标题前 */
+.task-no { color: var(--dim); font-weight: 500; font-size: .85em; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin-right: 4px; white-space: nowrap; }
+.detail-head .task-no { align-self: center; flex: none; }
+
 /* 文件预览：行内代码里的可点路径 + 弹层 */
 .md-file { display: inline; padding: 0; margin: 0; border: 0; background: none; color: var(--accent); font: inherit; cursor: pointer; min-height: 0; text-align: left; }
 .md-file code { color: inherit; text-decoration: underline dotted; text-underline-offset: 2px; }

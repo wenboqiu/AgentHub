@@ -489,6 +489,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
         <button className="back-button" onClick={onBack}><Icon name="back" />返回</button>
         <div className="detail-head">
           <button className={`complete-toggle ${done ? "done" : ""}`} aria-pressed={done} title={done ? "标记为未完成" : "标记为完成"} aria-label={done ? "标记为未完成" : "标记为完成"} disabled={busy} onClick={() => patch({ status: done ? "todo" : "done" })}><Icon name="check" /></button>
+          <span className="task-no" title="任务序号">#{task.id}</span>
           <InlineField className="title-field" value={task.title} ariaLabel="任务标题" placeholder="任务标题" maxLength={200} disabled={busy} onSave={title => patch({ title })} />
         </div>
         <span className={`task-status ${task.status}`}>{TASK_LABEL[task.status]}</span>

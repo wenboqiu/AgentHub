@@ -98,7 +98,7 @@ export default function ProposalCard({
       <button className="link proposal-undo" disabled={busy} onClick={() => void unignore()}>撤回</button>
     </p>
   );
-  if (proposal.status === "accepted") return <p className="proposal-verdict">已确认，任务「{proposal.title}」已生成，在任务页继续。</p>;
+  if (proposal.status === "accepted") return <p className="proposal-verdict">已确认，任务{proposal.taskId !== null && <span className="task-no"> #{proposal.taskId}</span>}「{proposal.title}」已生成，在任务页继续。</p>;
 
   const act = async (fn: () => Promise<void>) => {
     onBusy(true); onError("");
@@ -148,7 +148,7 @@ export default function ProposalCard({
       <div className="proposal-card proposal-suggest">
         <div className="proposal-suggest-main">
           <span className={`proposal-kind ${proposal.kind}`}>{KIND_LABEL[proposal.kind]}</span>
-          <strong className="proposal-suggest-title">{proposal.title}</strong>
+          <strong className="proposal-suggest-title">{proposal.taskId !== null && <span className="task-no">#{proposal.taskId} </span>}{proposal.title}</strong>
           <span className="dim proposal-suggest-who">{who}</span>
         </div>
         <div className="btns">

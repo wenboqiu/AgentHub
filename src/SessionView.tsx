@@ -530,7 +530,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       {/* 会话级操作合并为一行：任务关联、新建会话、终端打开 */}
       <div className="task-links">
-        {tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}
+        {tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}><span className="task-no">#{t.id}</span> {t.title}</button>)}
         <button onClick={()=>setLinkingTask(!linkingTask)} aria-expanded={linkingTask}>关联到任务</button>
         {!pendingSession && !isListenOnly(session.agent) && (
           <>
@@ -546,7 +546,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         )}
       </div>
       {canOpenInTerminal && active && <p className="hint">AgentHub 正在运行这个会话，结束后再打开</p>}
-      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={pending==="link"} onClick={()=>guard("link",async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}>{t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/><div className="btns"><button onClick={()=>setLinkingTask(false)}>取消</button></div></div>}
+      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={pending==="link"} onClick={()=>guard("link",async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}><span className="task-no">#{t.id}</span> {t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/><div className="btns"><button onClick={()=>setLinkingTask(false)}>取消</button></div></div>}
       {spawnOpen && !pendingSession && (
         <div className="spawn-panel">
           <h2>{branchMessage ? "从此处分支到新聊天" : "同目录新建会话"}</h2>

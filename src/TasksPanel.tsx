@@ -17,7 +17,7 @@ export function QuickCreate({ placeholder, create, children }: {placeholder: str
   </form>;
 }
 export function TaskRows({tasks,goals,onOpen}: {tasks: Task[]; goals: Goal[]; onOpen(id:number): void}) {
-  return <ul className="list">{tasks.map(t=><li key={t.id}><button className="entity-row" onClick={()=>onOpen(t.id)}><span className="entity-main"><span className="entity-title"><strong>{t.title}</strong><PriorityBadge priority={t.priority}/></span><span className="dim">{goals.find(g=>g.id===t.goalId)?.title ?? "无目标"}{t.sessionIds.length > 0 ? ` · ${t.sessionIds.length} 个会话` : ""}{t.agent ? ` · ${AGENT_LABEL[t.agent] ?? t.agent}` : ""}</span><ScheduleSummary value={t}/>{t.checklist?.length > 0 && <span className="dim">Checklist {t.checklist.filter(i=>i.done).length}/{t.checklist.length}</span>}</span>{t.timerStartedAt && <span className="timer-badge">计时中</span>}<span className={`task-status ${t.status}`}>{TASK_LABEL[t.status]}</span></button></li>)}</ul>;
+  return <ul className="list">{tasks.map(t=><li key={t.id}><button className="entity-row" onClick={()=>onOpen(t.id)}><span className="entity-main"><span className="entity-title"><span className="task-no">#{t.id}</span><strong>{t.title}</strong><PriorityBadge priority={t.priority}/></span><span className="dim">{goals.find(g=>g.id===t.goalId)?.title ?? "无目标"}{t.sessionIds.length > 0 ? ` · ${t.sessionIds.length} 个会话` : ""}{t.agent ? ` · ${AGENT_LABEL[t.agent] ?? t.agent}` : ""}</span><ScheduleSummary value={t}/>{t.checklist?.length > 0 && <span className="dim">Checklist {t.checklist.filter(i=>i.done).length}/{t.checklist.length}</span>}</span>{t.timerStartedAt && <span className="timer-badge">计时中</span>}<span className={`task-status ${t.status}`}>{TASK_LABEL[t.status]}</span></button></li>)}</ul>;
 }
 
 // 任务页 = 收件箱（等你处理）+ 在跑 + 待办 + 已完成。原来的「看板」并进来：
@@ -132,7 +132,7 @@ export default function TasksPanel({
       <li key={`a${a.id}`} className="inbox-row">
         <span className="kind-chip k-approve">待授权</span>
         <div className="inbox-main">
-          <strong className="inbox-title">{title}</strong>
+          <strong className="inbox-title">{task && <span className="task-no">#{task.id} </span>}{title}</strong>
           <span className="dim inbox-sub"><code>{a.tool}</code> {isQuestion ? "它在问你问题" : clip(a.detail, 120)}{a.decisionReason ? ` · ${a.decisionReason}` : ""}</span>
         </div>
         <div className="inbox-actions">
@@ -152,7 +152,7 @@ export default function TasksPanel({
     <li key={`r${t.id}`} className="inbox-row clickable" onClick={() => onOpen(t.id)}>
       <span className="kind-chip k-review">待验收</span>
       <div className="inbox-main">
-        <strong className="inbox-title">{t.title}</strong>
+        <strong className="inbox-title"><span className="task-no">#{t.id} </span>{t.title}</strong>
         <span className="dim inbox-sub">{t.agent ? (AGENT_LABEL[t.agent] ?? t.agent) : "无工具"} · {ago(t.updatedAt, now)}交付</span>
       </div>
       <div className="inbox-actions"><button className="primary" onClick={stop(() => onOpen(t.id))}>去验收</button></div>
@@ -165,7 +165,7 @@ export default function TasksPanel({
       <li key={`s${e.taskId}`} className="inbox-row clickable" onClick={() => onOpen(e.taskId)}>
         <span className="kind-chip k-stuck">卡住</span>
         <div className="inbox-main">
-          <strong className="inbox-title">{e.title}</strong>
+          <strong className="inbox-title"><span className="task-no">#{e.taskId} </span>{e.title}</strong>
           <span className="dim inbox-sub">进行中但没有任何在跑的执行{e.machine && !e.machineOnline ? ` · ${e.machine} 离线` : ""}{e.lastActivityAt ? ` · 最后活动 ${ago(e.lastActivityAt, now)}` : ""}</span>
         </div>
         <div className="inbox-actions">
@@ -207,7 +207,7 @@ export default function TasksPanel({
       <li key={`p${p.id}`} className="inbox-row">
         <span className="kind-chip k-ticket">任务单</span>
         <div className="inbox-main">
-          <strong className="inbox-title">{p.title}</strong>
+          <strong className="inbox-title">{p.taskId !== null && <span className="task-no">#{p.taskId} </span>}{p.title}</strong>
           <span className="dim inbox-sub">{who}</span>
         </div>
         <div className="inbox-actions"><button className="primary" onClick={() => setExpanded(p.id)}>查看并确认</button></div>
@@ -225,7 +225,7 @@ export default function TasksPanel({
       <li key={`l${e.taskId}`} className="inbox-row clickable" onClick={() => onOpen(e.taskId)}>
         <span className={`kind-chip ${e.queued ? "k-queue" : "k-run"}`}>{badge}</span>
         <div className="inbox-main">
-          <strong className="inbox-title">{e.title}</strong>
+          <strong className="inbox-title"><span className="task-no">#{e.taskId} </span>{e.title}</strong>
           <span className="dim inbox-sub">{[e.agent ? (AGENT_LABEL[e.agent] ?? e.agent) : "", e.machine ? `${e.machine}${e.machineOnline ? "" : " · 离线"}` : "", e.queued ? `排队于 ${ago(e.queuedAt ?? e.updatedAt, now)}` : e.lastActivityAt ? `最后活动 ${ago(e.lastActivityAt, now)}` : ""].filter(Boolean).join(" · ")}</span>
         </div>
         <div className="inbox-actions">
@@ -243,7 +243,7 @@ export default function TasksPanel({
     <li key={`d${t.id}`} className="inbox-row clickable" onClick={() => onOpen(t.id)}>
       <span className="kind-chip k-run">进行中</span>
       <div className="inbox-main">
-        <strong className="inbox-title">{t.title}</strong>
+        <strong className="inbox-title"><span className="task-no">#{t.id} </span>{t.title}</strong>
         <span className="dim inbox-sub">{t.agent ? (AGENT_LABEL[t.agent] ?? t.agent) : "无工具"}{t.machine ? ` · ${t.machine}` : ""}</span>
       </div>
     </li>
@@ -257,7 +257,7 @@ export default function TasksPanel({
       <li key={`o${t.id}`} className="inbox-row clickable" onClick={() => onOpen(t.id)}>
         <span className={`prio-dot ${t.priority}`} title={`${PRIO_LABEL[t.priority]}优先级`} />
         <div className="inbox-main">
-          <strong className="inbox-title">{t.title}</strong>
+          <strong className="inbox-title"><span className="task-no">#{t.id} </span>{t.title}</strong>
           <span className="dim inbox-sub">{[goal?.title ?? "无目标", role?.name ?? (t.agent ? (AGENT_LABEL[t.agent] ?? t.agent) : "")].filter(Boolean).join(" · ")} <ScheduleSummary value={t} /></span>
         </div>
         {canDispatch && <div className="inbox-actions"><button disabled={busyId === `t${t.id}`} onClick={stop(() => void dispatch(t))}>派发</button></div>}
