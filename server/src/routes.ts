@@ -511,19 +511,29 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 预摘要：任务进入待验收时预生成验收摘要（调用点都在 serial 内，几条查询不阻塞）
     if (state === 'done') {
       for (const t of tasks) {
-        const digest = await buildReviewDigest(pool,userId,t.id)
-        if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
-        // 交付物快照：签署过 Mandate 的任务进入待验收时落一份（重跑覆盖未验收的）
-        await createDelivery(pool,userId,t.id,digest).catch(e => app.log.warn({ taskId: t.id, err: String(e) }, '写交付物失败'))
-        // 每个任务跑完都要有文档产物：这里用摘要兜底生成一份骨架，执行端以后交的会覆盖它
-        const artifact = await buildArtifact(pool,userId,t.id)
-        if (artifact) broadcast(userId,{type:'task.artifact',taskId:t.id,artifact})
+        const digest = await refreshReview(userId,t)
         // 同时往项目近况里记一句：下次派活时项目经理就知道这个项目刚做完什么
         if (t.projectId !== null) {
           await appendBrief(pool,userId,t.projectId,`「${t.title}」${summarize(digest?.lastReply ?? '','已完成',120)}`,t.id)
         }
       }
+      // 已经在待验收的任务，挂接会话又跑完一轮：重新生成摘要 / 交付物 / 产物骨架（不改状态、不记近况）
+      const moved = new Set(tasks.map(t => t.id))
+      for (const t of await tasksForSession(pool,userId,sessionId)) {
+        if (t.status === 'review' && !moved.has(t.id)) await refreshReview(userId,t)
+      }
     }
+  }
+  // 生成 / 重新生成验收摘要 + 交付物快照 + 产物骨架，并广播
+  const refreshReview = async (userId: number, t: Task) => {
+    const digest = await buildReviewDigest(pool,userId,t.id)
+    if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
+    // 交付物快照：签署过 Mandate 的任务进入待验收时落一份（重跑覆盖未验收的）
+    await createDelivery(pool,userId,t.id,digest).catch(e => app.log.warn({ taskId: t.id, err: String(e) }, '写交付物失败'))
+    // 每个任务跑完都要有文档产物：这里用摘要兜底生成一份骨架，执行端以后交的会覆盖它
+    const artifact = await buildArtifact(pool,userId,t.id)
+    if (artifact) broadcast(userId,{type:'task.artifact',taskId:t.id,artifact})
+    return digest
   }
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
@@ -929,7 +939,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
               .catch(e => { app.log.error(e, '落库会话正文失败'); return 0 })
             if (added) broadcast(req.userId, { type: 'session.history', sessionId: r.session.id })
           }
-          await syncTask(req.userId,r.session.id,r.session.state)
+          // 还有在跑的运行（比如 agent 放出后台子代理后回了句「等通知」）：hook 的 done 不转任务，
+          // 由执行器的 run.status done 来转；running 迁移照常
+          const runBusy = r.session.state === 'done' && !!(await activeRun(pool, req.userId, r.session.id))
+          if (!runBusy) await syncTask(req.userId,r.session.id,r.session.state)
           // 会话跑完：只有挂了未完成任务的会话才攒处理意见（generateProposal 里把关），不挂任务的不产单。
           // 补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，否则「问角色」也会产出一条待办，
           // 细化还会无限套娃。WorkBuddy 的正文只在电脑上：先把这一轮的回复同步进库，再按最新回复攒任务单。
