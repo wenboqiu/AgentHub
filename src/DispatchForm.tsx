@@ -132,7 +132,7 @@ export default function DispatchForm({
       </label>
 
       <p className="hint">发单后项目经理会先把这单补成能开工的任务单，你过一眼，确认了才真的派出去。</p>
-      {project && !dirs.length && <p className="hint">这个项目还没配过目录：去「设置 → 项目 → 编辑」加一条配置（电脑 + 目录）；不配也能发，地方由项目经理现挑。</p>}
+      {project && !dirs.length && <p className="hint">这个项目还没配过目录：单能发，但确认后派不出去——先去「设置 → 项目 → 编辑」加一条（电脑 + 目录）。</p>}
       {blocked && <p className="hint">{blocked}</p>}
       {!blocked && !owner && <p className="hint">选中的项目还没有对应的项目经理：去「设置 → 角色」给它指定一位，或设一位管所有项目的。</p>}
       {!blocked && owner && <p className="hint">这单会交给 <strong>{owner.name}</strong>（{owner.managerProjects.length === 0 ? "管所有项目" : "管这个项目"}）补写；想换人在角色里改管辖范围。</p>}

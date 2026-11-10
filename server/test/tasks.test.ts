@@ -100,8 +100,11 @@ describe('目标与任务', () => {
   })
   it('离线和参数错误不改任务；单机自动选择；消息优先级及 fresh 命令',async()=>{
     const t=await newTask();assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
-    await call('PATCH',`/tasks/${t.id}`,{agent:'claude'});assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
-    await call('PATCH',`/tasks/${t.id}`,{cwd:'D:\\TaskTest'});assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
+    // 缺目录 / 缺电脑是「没地方可去」而不是参数格式错：409，并说清去哪补
+    await call('PATCH',`/tasks/${t.id}`,{agent:'claude'})
+    const noDir=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(noDir.status,409);assert.match(noDir.body.error,/没选项目也没填目录/)
+    await call('PATCH',`/tasks/${t.id}`,{cwd:'D:\\TaskTest'})
+    const noPc=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(noPc.status,409);assert.match(noPc.body.error,/没有可派的电脑/)
     const off=await call('POST',`/tasks/${t.id}/start`,{machine:'离线'});assert.equal(off.status,200)
     assert.equal(off.body.queued,true);assert.ok(off.body.task.queuedAt);assert.equal((await get(t.id)).status,'todo')
     await call('DELETE',`/tasks/${t.id}/queue`);await call('PATCH',`/tasks/${t.id}`,{machine:null})
@@ -120,7 +123,8 @@ describe('目标与任务', () => {
     assert.equal((await call('POST',`/tasks/${t.id}/start`,{text:'\0'})).status,400)
     assert.equal((await call('POST',`/tasks/${t.id}/start`,{agent:'bad'})).status,400)
     const ex2=await connect('role=agent&machine=另一台测试机')
-    assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
+    // 多台在线又没指明哪台：不替人挑，说清在线的是哪几台
+    const many=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(many.status,409);assert.match(many.body.error,/台电脑在线/)
     ex2.ws.close();ex.ws.close();await waitAsync(async()=>!(await call('GET','/control/status')).body.agents.length)
   })
   it('临时 ID 改名合并重复挂接；完成先于改名及 run.status 完成路径',async()=>{

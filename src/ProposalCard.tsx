@@ -249,6 +249,10 @@ export default function ProposalCard({
           )}
         </div>
       )}
+      {/* 目录只能来自项目登记的配置：项目一条都没有，这一单确认了也派不出去，先在这儿说清 */}
+      {project && !project.dirs.length && (
+        <p className="hint">项目「{project.name}」还没登记目录：这样确认会派不出去，先去「设置 → 项目 → 编辑」加一条（电脑 + 目录）。</p>
+      )}
 
       <label>怎么算完（一行一条，每条会变成验收检查项）
         <textarea value={form.checklist} rows={3} maxLength={2000} disabled={busy} placeholder="留空就不带检查项"

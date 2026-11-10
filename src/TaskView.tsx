@@ -245,7 +245,9 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
   const projectUsable = !dirs.length || dirs.some(fitsTool);
   const reason = !tool ? "请选择执行工具"
     : listenOnly ? `${agentName(tool)} 只做状态监听，请在客户端里执行后用「关联已有会话」挂上`
-      : !task.cwd && !dirs.length ? "请选择项目，并在项目里挑一条配置（电脑 + 目录）"
+      : !task.cwd && !dirs.length ? (currentProject
+        ? `项目「${currentProject.name}」还没登记目录：去「设置 → 项目 → 编辑」加一条（电脑 + 目录）`
+        : "请选择项目，并在项目里挑一条配置（电脑 + 目录）")
         : !task.cwd && !projectUsable ? `项目「${currentProject?.name ?? ""}」登记的配置都装不了 ${agentName(tool)}：这个项目当前不可用，换个角色 / 工具，或在对应电脑上装好再选`
           : !machine ? (usable.length ? "请选择电脑" : `没有能跑 ${agentName(tool)} 的电脑：先在装了这个工具的电脑上打开 AgentHub`)
             : machineLacks ? `${machine} 没装 ${agentName(tool)}：换一台电脑，或给这个角色换个工具` : "";

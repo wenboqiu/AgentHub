@@ -641,13 +641,12 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
     const project = await findProject(pool, userId, task.projectId)
     const online = agentList(userId)
-    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台
-    let machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 4000)
+    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台 > 项目目录登记的那台。
+    // 多台在线又都没指明时留空，不替人瞎挑（目录检查之后统一报错）
+    let machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 4000, true)
     // 项目里存着各台电脑的目录，按这次要去的机器挑对应那条，目录才不会串设备
     const dir = await pickProjectDir(pool, userId, project?.id ?? null, machine, online)
     if (!machine && dir?.machine) machine = dir.machine
-    // 项目目录登记成「哪台都行」而又有多台在线：随便挑一台。否则会排进空机器名，永远等不到上线
-    if (!machine && online.length) machine = online[0]
     // WorkBuddy 只做会话监听，不进派活：老角色 / 老任务里存着 workbuddy 的落到 CodeBuddy
     // （同一份 CLI，能自己 /login 的那份），免得历史数据一编辑就报「请选择有效的执行工具」。
     const requested = b.agent ?? role?.agent ?? task.agent
@@ -660,7 +659,18 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (caps?.length && !caps.includes(agent)) {
       throw new TaskError(`${machine} 上没装 ${agent}：换一台电脑，或给这个角色换一个它装了的工具（这台装了 ${caps.join('、')}）`, 409)
     }
-    const cwd = taskText(b.cwd ?? task.cwd ?? dir?.cwd ?? '', '项目目录', 4000)
+    // 目录三级来源：这次请求显式给的 > 任务上存的 > 项目里按机器挑的那条。
+    // 一条都没有时不是「格式不对」而是「没地方可去」：这条得说清去哪补。
+    // 直接交给 taskText 会抛「项目目录须为1–4000字符」——人看着像自己填错了，其实是项目还没登记目录。
+    const pickedCwd = b.cwd ?? task.cwd ?? dir?.cwd ?? ''
+    if (typeof pickedCwd === 'string' && !pickedCwd.trim()) throw new TaskError(project
+      ? `项目「${project.name}」还没登记目录：去「设置 → 项目 → 编辑」给它加一条（电脑 + 目录），再回来派这单`
+      : '这单既没选项目也没填目录：先选一个配过目录的项目，或在任务上选一条目录（设置 → 项目）', 409)
+    const cwd = taskText(pickedCwd, '项目目录', 4000)
+    // 目录有了、电脑还是空：排进空机器名的队列永远等不到上线，直接说清是「多台没指明」还是「一台都没有」
+    if (!machine) throw new TaskError(online.length > 1
+      ? `有 ${online.length} 台电脑在线（${online.join('、')}）：在任务上指定一台再派`
+      : '没有可派的电脑：打开要干活的那台电脑上的 AgentHub，或在任务上指定电脑', 409)
     // 开跑方式：任务上记着「第一次接着哪个会话」（确认任务单时定的），请求里显式给了就用请求的。
     // 能不能续按最终的工具 / 电脑 / 目录现算——角色可能被改过，续不上就退回新会话，不硬来。
     const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : task.startMode

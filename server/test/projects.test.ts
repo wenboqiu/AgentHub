@@ -139,6 +139,19 @@ describe('项目：一个代码库的身份与背景知识', () => {
     assert.match(run.instructions, /这个项目只跑 Node/, '项目背景随派活下发')
   })
 
+  it('项目没登记目录又没给目录：派活要人「去补目录」，而不是报字段格式', async () => {
+    await h.executor(`proj-empty-${stamp}`)
+    const p = await h.project({ name: uniq('无目录项目') })
+    const t = await h.task({ projectId: p.id, agent: 'claude' })
+    const started = await h.call('POST', `/tasks/${t.id}/start`, {})
+    assert.equal(started.status, 409, JSON.stringify(started.body))
+    assert.match(started.body.error, /还没登记目录/, started.body.error)
+    assert.match(started.body.error, new RegExp(p.name), '得点名是哪个项目，人才知道去哪补')
+    // 没派出去的任务留在待办：补好目录再点一次就行
+    const reloaded = (await h.call('GET', '/tasks')).body.tasks.find((x: any) => x.id === t.id)
+    assert.equal(reloaded.status, 'todo')
+  })
+
   it('一个项目存多台电脑的目录：派活按这次要去的机器挑对应那条', async () => {
     const pcA = `proj-a-${stamp}`
     const pcB = `proj-b-${stamp}`
