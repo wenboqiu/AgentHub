@@ -1,6 +1,7 @@
 import type pg from 'pg'
 import { TaskError, object, text, type Task } from './tasks.ts'
 import type { Agent } from './db.ts'
+import { avatarInput, storedAvatar, type AgentAvatar } from './prefs.ts'
 
 // 角色：把一个「谁来做、用什么模型、按什么准则做」存成名字。
 // 执行目录不归角色管——那是项目的事（项目上按电脑存目录，派活时按机器挑）。
@@ -15,6 +16,8 @@ export type Role = {
   manager: boolean
   /** 管哪些项目；空数组 = 所有项目都管。非空时同一项目只允许有一位专属经理 */
   managerProjects: number[]
+  /** 自定义头像；null = 显示执行工具的默认头像 */
+  avatar: AgentAvatar | null
   createdAt: string; updatedAt: string
 }
 
@@ -64,6 +67,8 @@ export async function migrateRoles(db: DB) {
   // manager_projects 为空表示所有项目都归它管，多个经理可以各管一摊。
   await db.query('ALTER TABLE roles ADD COLUMN IF NOT EXISTS manager boolean NOT NULL DEFAULT false')
   await db.query("ALTER TABLE roles ADD COLUMN IF NOT EXISTS manager_projects jsonb NOT NULL DEFAULT '[]'::jsonb")
+  // 自定义头像（内置形象 id / 裁好的小图 data URL）；空 = 用执行工具的默认头像
+  await db.query('ALTER TABLE roles ADD COLUMN IF NOT EXISTS avatar jsonb')
   // 任务只记「用哪个角色」；角色删掉后任务回到未指定，已派活字段不动
   await db.query('ALTER TABLE tasks ADD COLUMN IF NOT EXISTS role_id bigint')
   await db.query(`DO $$ BEGIN
@@ -83,6 +88,7 @@ const row = (r: any): Role => ({
   managerProjects: Array.isArray(r.manager_projects)
     ? r.manager_projects.map(Number).filter((n: number) => Number.isSafeInteger(n) && n > 0)
     : [],
+  avatar: storedAvatar(r.avatar),
   createdAt: r.created_at.toISOString(), updatedAt: r.updated_at.toISOString(),
 })
 
@@ -114,6 +120,7 @@ export async function saveRole(db: DB, user: number, raw: unknown, roleId?: numb
   }
   if ('model' in b) out.model = b.model === null ? null : text(b.model, '模型', MAX_MODEL, true) || null
   if ('context' in b) out.context = text(b.context ?? '', '上下文', MAX_CONTEXT, true)
+  if ('avatar' in b) { const a = avatarInput(b.avatar); out.avatar = a === null ? null : JSON.stringify(a) }
   if ('tools' in b) {
     if (!Array.isArray(b.tools) || b.tools.length > MAX_TOOLS) throw new TaskError(`可用工具最多 ${MAX_TOOLS} 项`)
     const seen = new Set<string>()

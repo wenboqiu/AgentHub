@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import { TaskError, object, text } from './tasks.ts'
+import { avatarInput, storedAvatar, type AgentAvatar } from './prefs.ts'
 
 // 项目：一个代码库（或一条业务线）的身份与背景知识，加上它在各台电脑上的目录。
 // 目录列表（dirs）直接挂在项目上：一条 = 电脑（可空，空 = 哪台都能用）+ 目录路径。
@@ -14,6 +15,8 @@ export type Project = {
   id: number; name: string; brief: string
   /** 每台电脑一条目录；派活时按机器挑 */
   dirs: ProjectDir[]
+  /** 自定义头像；null = 显示项目名首字母 */
+  avatar: AgentAvatar | null
   tasks: number; createdAt: string; updatedAt: string
 }
 
@@ -34,6 +37,8 @@ export async function migrateProjects(db: DB) {
     UNIQUE(user_id, id))`)
   // 目录列表内嵌在项目行里：一条 = 电脑 + 路径，整存整取（编辑时整列替换）
   await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS dirs jsonb NOT NULL DEFAULT '[]'::jsonb`)
+  // 自定义头像；空 = 界面显示项目名首字母
+  await db.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS avatar jsonb')
   // 老数据迁移：目录原来外挂成 profiles（project_profiles 中转），现在收进项目行。
   // 只在旧表还在的时候搬一次；新库从来没有这两张表，直接跳过。
   const legacy = (await db.query(
@@ -77,6 +82,7 @@ export async function migrateProjects(db: DB) {
 const row = (r: any): Project => ({
   id: Number(r.id), name: r.name, brief: r.brief ?? '',
   dirs: dirsOf(r.dirs),
+  avatar: storedAvatar(r.avatar),
   tasks: Number(r.tasks ?? 0),
   createdAt: r.created_at.toISOString(), updatedAt: r.updated_at.toISOString(),
 })
@@ -116,6 +122,7 @@ export async function saveProject(db: DB, user: number, raw: unknown, projectId?
   const b = object(raw), out: Record<string, unknown> = {}
   if (projectId === undefined || 'name' in b) out.name = text(b.name, '项目名', MAX_NAME)
   if ('brief' in b) out.brief = text(b.brief ?? '', '项目说明', MAX_BRIEF, true)
+  if ('avatar' in b) { const a = avatarInput(b.avatar); out.avatar = a === null ? null : JSON.stringify(a) }
   let dirs: ProjectDir[] | null = null
   if ('dirs' in b) {
     if (!Array.isArray(b.dirs) || b.dirs.length > MAX_DIRS) throw new TaskError(`目录最多 ${MAX_DIRS} 条`)

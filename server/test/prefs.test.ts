@@ -68,6 +68,27 @@ describe('账号偏好：agent 头像', () => {
     assert.deepEqual((await call('GET', '/prefs')).body.prefs.avatars, { codex: { kind: 'image', data: png } })
   })
 
+  it('角色、项目的自定义头像：默认 null，可设内置 / 图片，null 清掉，非法 400', async () => {
+    let r = await call('POST', '/roles', { name: '头像测试角色', agent: 'claude' })
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    const role = r.body.role
+    assert.equal(role.avatar, null)
+    r = await call('PATCH', `/roles/${role.id}`, { avatar: { kind: 'preset', id: 'lobster' } })
+    assert.deepEqual(r.body.role.avatar, { kind: 'preset', id: 'lobster' })
+    assert.equal(r.body.role.agent, 'claude', '只改头像不动别的字段')
+    assert.deepEqual((await call('GET', '/roles')).body.roles.find((x: any) => x.id === role.id).avatar, { kind: 'preset', id: 'lobster' })
+    r = await call('PATCH', `/roles/${role.id}`, { avatar: null })
+    assert.equal(r.body.role.avatar, null)
+    assert.equal((await call('PATCH', `/roles/${role.id}`, { avatar: { kind: 'image', data: 'javascript:alert(1)' } })).status, 400)
+
+    r = await call('POST', '/projects', { name: '头像测试项目', avatar: { kind: 'image', data: png } })
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    assert.deepEqual(r.body.project.avatar, { kind: 'image', data: png })
+    r = await call('PATCH', `/projects/${r.body.project.id}`, { avatar: null })
+    assert.equal(r.body.project.avatar, null)
+    assert.equal((await call('POST', '/projects', { name: '坏头像项目', avatar: { kind: 'preset', id: 'A B' } })).status, 400)
+  })
+
   it('非法输入 400：未知字段 / agent、坏 id、非图片 data URL、太大', async () => {
     const bad = [
       { theme: 'dark' },

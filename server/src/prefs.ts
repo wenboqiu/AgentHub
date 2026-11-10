@@ -23,7 +23,17 @@ export async function migratePrefs(db: DB) {
     updated_at timestamptz NOT NULL DEFAULT now())`)
 }
 
-function cleanAvatar(v: unknown): AgentAvatar {
+/** 角色 / 项目的 avatar 字段：null = 不设（界面显示默认头像） */
+export function avatarInput(v: unknown): AgentAvatar | null {
+  return v === null ? null : cleanAvatar(v)
+}
+/** 库里读出来的 avatar jsonb：坏数据当没设 */
+export function storedAvatar(v: unknown): AgentAvatar | null {
+  if (v === null || v === undefined) return null
+  try { return cleanAvatar(v) } catch { return null }
+}
+
+export function cleanAvatar(v: unknown): AgentAvatar {
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new TaskError('头像必须是对象')
   const o = v as Record<string, unknown>
   if (o.kind === 'preset') {
