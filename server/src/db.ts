@@ -17,6 +17,7 @@ import { migrateMandate, pruneMandateDecisions } from './mandate.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
 import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
 import { isInternalTitle } from './session-kind.ts'
+import { migrateStats } from './stats.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
@@ -234,6 +235,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateReferee(client)
     // Mandate 快照 / 决策留痕 / 交付物 / 授权模式；给 tasks 与 approvals 加列，必须排在两者建表之后
     await migrateMandate(client)
+    // 数据统计：给 sessions 加 first_seen_at、建日汇总表；依赖 tasks / projects / review_items / session_activity，排在所有迁移之后
+    await migrateStats(client)
     // profiles 实体已废弃（执行目录收进项目）：各处引用清完后删表兜底（CASCADE 清残留约束）
     await client.query('DROP TABLE IF EXISTS profiles CASCADE')
   } finally {
@@ -437,6 +440,10 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
       if (keepPending && real.title !== pending.title) {
         out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
       }
+      // 同一个会话只算一次新建：保留下来的真实行取两者较早的首次出现时间（LEAST 忽略 NULL）
+      await client.query(
+        'UPDATE sessions SET first_seen_at = LEAST(first_seen_at, (SELECT first_seen_at FROM sessions WHERE user_id = $1 AND id = $3)) WHERE user_id = $1 AND id = $2',
+        [userId, to, from])
       await client.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, from])
     }
     for (const t of ['runs', 'messages', 'approvals']) {

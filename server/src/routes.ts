@@ -109,6 +109,7 @@ import {
 } from './proposals.ts'
 import { composeTicket, getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
+import { StatsParamError, queryStats, resolveStatsTz, rollupStats } from './stats.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
 import { ATTACHMENT_BODY_LIMIT, addAttachment, assertRefs, attachmentData, deleteAttachment, listAttachments, prepareAttachment, readableNotes, stripRef } from './attachments.ts'
 
@@ -121,6 +122,8 @@ type Sock = {
 }
 
 export type RouteOptions = {
+  // 统计页：同一用户两次触发汇总刷新的最短间隔（毫秒），默认 60 秒
+  statsRefreshMs?: number
   // 等执行器返回历史记录的最长时间（毫秒），测试里调短
   historyTimeoutMs?: number
   reminderIntervalMs?: number
@@ -340,6 +343,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const queueTtlMs = opts.queueTtlMs ?? 24 * 3600_000
   const queueDrainLimit = opts.queueDrainLimit ?? 3
   const queueMaxAttempts = opts.queueMaxAttempts ?? 3
+  // 统计：用户 -> 上次刷新汇总的时间（内存态）
+  const statsRefreshMs = opts.statsRefreshMs ?? 60_000
+  const statsRefreshed = new Map<number, number>()
   // 反复失败计数（内存态，服务重启清零）
   const spree = new AbortSpreeTracker(opts.abortSpreeCount ?? 3, opts.abortSpreeWindowMs ?? 2 * 3600_000)
   const clients = new Set<Conn>()
@@ -1856,6 +1862,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const to = q.to ? new Date(q.to) : new Date()
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime()) || from > to) return reply.code(400).send({ error: 'from/to 时间格式不合法' })
     return { activity: await listActivity(pool, req.userId, from, to) }
+  })
+
+  // 统计：读接口，不进 serial()。查询前对当前用户做一次节流刷新，界面数据准实时
+  app.get('/stats', async (req, reply) => {
+    const userId = req.userId
+    const tz = await resolveStatsTz(pool, m => app.log.warn(m))
+    const last = statsRefreshed.get(userId) ?? 0
+    if (Date.now() - last >= statsRefreshMs) {
+      statsRefreshed.set(userId, Date.now())
+      await rollupStats(pool, { userId, tz }).catch(e => req.log.error(e, '统计刷新失败'))
+    }
+    try {
+      return await queryStats(pool, userId, req.query as Record<string, string | undefined>, tz)
+    } catch (e) {
+      if (e instanceof StatsParamError) return reply.code(400).send({ error: e.message })
+      throw e
+    }
   })
 
   app.post('/approvals/:id', async (req, reply) => {
