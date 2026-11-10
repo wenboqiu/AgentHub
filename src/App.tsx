@@ -482,6 +482,8 @@ export default function App() {
           setView("list");
           // 设置页里改过项目经理（现在是角色上的标记）：回到主界面时把经理名单和开关一起刷新
           void api?.dispatchManager().then(st => { setManager(st.manager); setRoles(st.roles ?? []); }).catch(() => {});
+          // 项目也可能在设置里新建 / 改名 / 删了：任务页的项目下拉、筛选、头像都靠这份列表，回来时重拉
+          void api?.projects().then(setProjects).catch(() => {});
         }}
         onSaved={(c, opts) => {
           setCfg(c);
