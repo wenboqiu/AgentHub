@@ -35,7 +35,7 @@ const looksLikeUrl = (v: string) => { const i = v.indexOf("/"); return i > 0 && 
  * 任务详情是单页：头部（标题 / 状态 / 执行摘要）→ 状态卡（按任务状态变形态，主操作都在这）
  * → 说明 / 产物 / 过程；属性放右侧栏，窄屏落到下面。删除等危险操作收进标题栏「···」菜单。
  */
-export default function TaskView({ task, goals, sessions, agents, api, boardEntry, approvals, roles, projects, digest: liveDigest, artifact: liveArtifact, onArtifact, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; boardEntry?: BoardEntry; approvals: Approval[]; roles: Role[]; projects: Project[]; digest?: TaskDigests; artifact?: TaskArtifact; onArtifact(a: TaskArtifact): void; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
+export default function TaskView({ task, goals, sessions, agents, api, boardEntry, approvals, roles, projects, machineTick = 0, digest: liveDigest, artifact: liveArtifact, onArtifact, onBack, onSession, onSaved, onDeleted }: { task: Task; goals: Goal[]; sessions: Session[]; agents: string[]; api: Api; boardEntry?: BoardEntry; approvals: Approval[]; roles: Role[]; projects: Project[]; /** 电脑状态变了但在线名单没变时 +1（服务端推 machines） */ machineTick?: number; digest?: TaskDigests; artifact?: TaskArtifact; onArtifact(a: TaskArtifact): void; onBack(): void; onSession(id: string): void; onSaved(t: Task): void; onDeleted(): void }) {
   const [busy, setBusy] = useState(false), [err, setErr] = useState(""), [saved, setSaved] = useState(false);
   const [starting, setStarting] = useState(false), [message, setMessage] = useState(""), [linking, setLinking] = useState(false);
   const [configOpen, setConfigOpen] = useState(false), [menuOpen, setMenuOpen] = useState(false);
@@ -111,7 +111,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
     let alive = true;
     api.machines().then(ms => { if (alive) setMachines(ms); }, () => { if (alive) setMachines([]); });
     return () => { alive = false; };
-  }, [api, onlineKey]);
+  }, [api, onlineKey, machineTick]);
   const digest: TaskDigests | null = liveDigest ?? fetchedDigest;
   const artifact = liveArtifact ?? fetchedArtifact;
   const takeArtifact = (a: TaskArtifact) => { setFetchedArtifact(a); onArtifact(a); };

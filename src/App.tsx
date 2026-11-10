@@ -162,6 +162,8 @@ export default function App() {
   const [manager,setManager] = useState<DispatchManager|null>(null);
   const [roles,setRoles] = useState<Role[]>([]);
   const [projects,setProjects] = useState<Project[]>([]);
+  // 电脑状态变了但在线名单没变时 +1，任务详情据此重拉电脑列表
+  const [machineTick,setMachineTick] = useState(0);
   // 派活看板：排队 / 在跑 / 卡住 的聚合视图
   const [board,setBoard] = useState<{entries: BoardEntry[]; agents: string[]} | null>(null);
   const openId = detail?.kind === "session" ? detail.id : null;
@@ -339,6 +341,11 @@ export default function App() {
       // 否则页面上会先看到任务单，正文还停在上一轮
       onSessionHistory: (sessionId) => { if (openIdRef.current === sessionId) bus.emit({ kind: "resync" }); },
       onPrefs: setAvatarPrefs,
+      onCatalog: (kind) => {
+        if (kind === "projects") void api.projects().then(setProjects).catch(() => {});
+        else void api.dispatchManager().then(st => { setManager(st.manager); setRoles(st.roles ?? []); }).catch(() => {});
+      },
+      onMachines: () => setMachineTick(n => n + 1),
     });
   }, [api, bus, expire]);
 
@@ -529,7 +536,7 @@ export default function App() {
     }
     if(detail.kind === "task") {
       const task=tasks.get(detail.id);
-      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} boardEntry={board?.entries.find(e=>e.taskId===task.id)} approvals={[...approvals.values()].filter(a=>task.sessionIds.includes(a.sessionId))} roles={roles} projects={projects} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
+      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} boardEntry={board?.entries.find(e=>e.taskId===task.id)} approvals={[...approvals.values()].filter(a=>task.sessionIds.includes(a.sessionId))} roles={roles} projects={projects} machineTick={machineTick} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
     }
     if(detail.kind === "goal") {
       const goal=goals.get(detail.id);

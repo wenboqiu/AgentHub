@@ -542,6 +542,10 @@ export type Handlers = {
   onSessionHistory(sessionId: string): void;
   /** 账号偏好（agent 头像）在别的设备上改了 */
   onPrefs?(prefs: Prefs): void;
+  /** 角色 / 项目（含项目经理设置）在某台设备上改了：重拉对应清单 */
+  onCatalog?(kind: "roles" | "projects"): void;
+  /** 电脑状态变了但在线名单没变（例如「开着，没开远程执行」的电脑连上 / 断开）：重拉电脑列表 */
+  onMachines?(): void;
   /** 服务端以 4401 关闭连接：登录已失效，不再自动重连 */
   onAuthExpired(): void;
 };
@@ -641,6 +645,8 @@ export function connect(url: string, token: string, h: Handlers) {
         else if (m.type === "session.history") h.onSessionHistory(m.sessionId);
         else if (m.type === "agents") h.onAgents(m.agents ?? []);
         else if (m.type === "prefs" && m.prefs) h.onPrefs?.(m.prefs);
+        else if (m.type === "catalog" && (m.kind === "roles" || m.kind === "projects")) h.onCatalog?.(m.kind);
+        else if (m.type === "machines") h.onMachines?.();
       } catch {
         /* 忽略坏消息 */
       }
