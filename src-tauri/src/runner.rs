@@ -2734,6 +2734,67 @@ fn zcode_auto_allows(policy: &str, risk: &str) -> bool {
     cap > 0 && r > 0 && r <= cap
 }
 
+/// 迟到的重发在多久内还按同一个决定回
+const ZCODE_PERM_REMEMBER: Duration = Duration::from_secs(120);
+
+/// ZCode 的权限请求在没及时收到答复时会按退避（约 0 / 1 / 2 / 4 / 8 / 10 秒）重发：
+/// `params.requestId` 相同，JSON-RPC 的 id 每次不同。逐条建卡，同一条命令就会弹出五六张、得一张张点。
+/// 这里按请求把重发合并：等人决定期间的重发只记下 id；决定后同组所有 id 一起答复；
+/// 刚决定过的请求又迟到重发一次，直接按同样的决定回。
+#[derive(Default)]
+struct ZcodePermDedup {
+    /// 还在等人决定：组键 -> (首条请求的 id，之后重发来的 id)
+    pending: HashMap<String, (Value, Vec<Value>)>,
+    /// 刚决定过：组键 -> (决定，时间)
+    decided: HashMap<String, (bool, Instant)>,
+}
+
+#[derive(Debug, PartialEq)]
+enum ZcodePerm {
+    /// 新请求：照常建审批卡
+    New,
+    /// 同一个请求的重发，已经有卡在等：只记下 id
+    Merged,
+    /// 刚决定过的请求又重发：直接按这个决定答复
+    Answer(bool),
+}
+
+impl ZcodePermDedup {
+    /// 组键：toolCallId 优先（同一次工具调用的重发一定相同；两次不同的调用即使命令一样也不同），
+    /// 其次 requestId；都没有就按工具 + 入参（同一条命令）
+    fn group(params: &Value, tool: &str, detail: &str) -> String {
+        for k in ["toolCallId", "requestId"] {
+            if let Some(s) = params.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()) {
+                return format!("{k}:{s}");
+            }
+        }
+        format!("tool:{tool}\n{detail}")
+    }
+
+    fn arrive(&mut self, group: &str, id: &Value, now: Instant) -> ZcodePerm {
+        self.decided.retain(|_, (_, at)| now.duration_since(*at) < ZCODE_PERM_REMEMBER);
+        if let Some((allow, _)) = self.decided.get(group) {
+            return ZcodePerm::Answer(*allow);
+        }
+        if let Some((_, extra)) = self.pending.get_mut(group) {
+            extra.push(id.clone());
+            return ZcodePerm::Merged;
+        }
+        self.pending.insert(group.to_string(), (id.clone(), Vec::new()));
+        ZcodePerm::New
+    }
+
+    /// 首条请求（建卡的那条）有了决定：返回同组还没答复的重发 id，并记住这个决定
+    fn resolve(&mut self, first: &Value, allow: bool, now: Instant) -> Vec<Value> {
+        let Some(group) = self.pending.iter().find(|(_, (f, _))| f == first).map(|(g, _)| g.clone()) else {
+            return Vec::new();
+        };
+        let (_, extra) = self.pending.remove(&group).unwrap_or_default();
+        self.decided.insert(group, (allow, now));
+        extra
+    }
+}
+
 fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &str, instructions: &str, zcode_auto: &str) {
     if mode == Mode::Fork {
         return run.fail("ZCode 暂不支持按回复分叉：可以同目录新开会话，或直接在会话里继续聊");
@@ -2793,6 +2854,7 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
     let debug = std::env::var("AGENTHUB_ZCODE_DEBUG").is_ok();
     let mut create_deadline = Instant::now() + ZCODE_CREATE_TIMEOUT;
     let mut approvals = Approvals::default();
+    let mut perms = ZcodePermDedup::default();
     let mut session_id = key.to_string();
     let mut created = false;
     let mut stop_deadline: Option<Instant> = None;
@@ -3010,7 +3072,14 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
                                 run.message("system", &format!("已自动放行（{risk} 风险）：{}", head.chars().take(160).collect::<String>()));
                                 write_line(&mut stdin, &zcode_response(&id, zcode_decision(true)));
                             } else {
-                                approvals.add(&run.out, &run.run_id, &tool, &detail, id, ZCODE_PERMISSION, Value::Null);
+                                let group = ZcodePermDedup::group(v.get("params").unwrap_or(&Value::Null), &tool, &detail);
+                                match perms.arrive(&group, &id, Instant::now()) {
+                                    ZcodePerm::New => approvals.add(&run.out, &run.run_id, &tool, &detail, id, ZCODE_PERMISSION, Value::Null),
+                                    ZcodePerm::Merged => {}
+                                    ZcodePerm::Answer(allow) => {
+                                        write_line(&mut stdin, &zcode_response(&id, zcode_decision(allow)));
+                                    }
+                                }
                             }
                         }
                         ZCODE_USER_INPUT => {
@@ -3086,12 +3155,17 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
             Ok(RunMsg::Shutdown) => finish = Some(Finish::Silent),
             Ok(RunMsg::Created { local_id, approval_id }) => {
                 if let Some((p, allow)) = approvals.created(local_id, approval_id, &run.out, &run.run_id) {
-                    write_line(&mut stdin, &zcode_response(&p.key, zcode_decision(allow)));
+                    for id in std::iter::once(p.key.clone()).chain(perms.resolve(&p.key, allow, Instant::now())) {
+                        write_line(&mut stdin, &zcode_response(&id, zcode_decision(allow)));
+                    }
                 }
             }
             Ok(RunMsg::Decide { approval_id, allow }) => {
                 if let Some((p, allow)) = approvals.decide(&approval_id, allow) {
-                    write_line(&mut stdin, &zcode_response(&p.key, zcode_decision(allow)));
+                    // 同一个请求重发来的那几次一起答复
+                    for id in std::iter::once(p.key.clone()).chain(perms.resolve(&p.key, allow, Instant::now())) {
+                        write_line(&mut stdin, &zcode_response(&id, zcode_decision(allow)));
+                    }
                 }
             }
             Ok(RunMsg::Answer { approval_id, answers }) => {
@@ -3109,7 +3183,9 @@ fn run_zcode(run: &Run, mode: Mode, key: &str, cwd: &str, text: &str, model: &st
         }
         for p in approvals.expired(Instant::now(), &run.out, &run.run_id) {
             run.message("system", "授权等待超时，已拒绝");
-            write_line(&mut stdin, &zcode_response(&p.key, zcode_decision(false)));
+            for id in std::iter::once(p.key.clone()).chain(perms.resolve(&p.key, false, Instant::now())) {
+                write_line(&mut stdin, &zcode_response(&id, zcode_decision(false)));
+            }
         }
     }
     let f = finish.unwrap();
@@ -3309,6 +3385,35 @@ fn execute(run: &Run, denied: &[String], agent: &str, mode: &str, key: &str, cwd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zcode_permission_retries_merge_into_one_card() {
+        let t0 = Instant::now();
+        let mut d = ZcodePermDedup::default();
+        let params = json!({"requestId": "perm_1", "toolCallId": "call_1", "toolName": "Bash"});
+        let g = ZcodePermDedup::group(&params, "Bash", "git diff");
+        // ZCode 按退避重发：第一条建卡，后面几条只记 id
+        assert_eq!(d.arrive(&g, &json!(101), t0), ZcodePerm::New);
+        assert_eq!(d.arrive(&g, &json!(102), t0), ZcodePerm::Merged);
+        assert_eq!(d.arrive(&g, &json!(103), t0), ZcodePerm::Merged);
+        // 别的请求不受影响
+        // 另一次调用（toolCallId 不同），即使命令一样也单独建卡
+        let other = ZcodePermDedup::group(&json!({"requestId": "perm_2", "toolCallId": "call_2"}), "Bash", "git diff");
+        assert_eq!(d.arrive(&other, &json!(201), t0), ZcodePerm::New);
+        // 点一次允许：首条之外，重发的 102 / 103 一起答复
+        assert_eq!(d.resolve(&json!(101), true, t0), vec![json!(102), json!(103)]);
+        // 决定之后又迟到重发：直接按同样的决定回，不再建卡
+        assert_eq!(d.arrive(&g, &json!(104), t0 + Duration::from_secs(5)), ZcodePerm::Answer(true));
+        // 记忆过期后同一个 requestId 当新请求
+        assert_eq!(d.arrive(&g, &json!(105), t0 + ZCODE_PERM_REMEMBER + Duration::from_secs(1)), ZcodePerm::New);
+        // 重发时 requestId 变了也没关系，按 toolCallId 认
+        assert_eq!(ZcodePermDedup::group(&json!({"requestId": "perm_9", "toolCallId": "call_1"}), "Bash", "x"), g);
+        // 没有 requestId / toolCallId：按工具 + 入参合并
+        assert_eq!(ZcodePermDedup::group(&json!({}), "Bash", "ls"), ZcodePermDedup::group(&Value::Null, "Bash", "ls"));
+        assert_ne!(ZcodePermDedup::group(&json!({}), "Bash", "ls"), ZcodePermDedup::group(&json!({}), "Bash", "pwd"));
+        // 不认识的首条 id：什么都不答
+        assert!(d.resolve(&json!(999), false, t0).is_empty());
+    }
 
     #[test]
     fn finds_install_dir_from_registry_display_icon() {
