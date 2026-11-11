@@ -17,6 +17,7 @@ import {
   createApproval,
   createPendingSession,
   createRun,
+  lastRunModel,
   createTaskRun,
   annotateApproval,
   decideApproval,
@@ -1187,7 +1188,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!session) throw new TaskError('助手会话已经不在了，重新开始一次', 409)
     if (!executors.has(execKey(req.userId, session.machine))) throw new TaskError('那台电脑不在线', 409)
     if (await activeRun(pool, req.userId, session.id)) throw new TaskError('上一句还在想，等它回完再说', 409)
-    const run = await createRun(pool, req.userId, randomUUID(), session.id, session.machine)
+    const prev = await lastRunModel(pool, req.userId, session.id)
+    const run = await createRun(pool, req.userId, randomUUID(), session.id, session.machine, null, prev)
     const message = await insertMessage(pool, req.userId, session.id, run.id, 'user', request)
     await markDispatch(pool, req.userId, run.id)
     pushRun(req.userId, run)
@@ -1196,6 +1198,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       type: 'run.start', runId: run.id, sessionId: session.id, agent: session.agent,
       sessionKey: session.id.slice(session.id.indexOf(':') + 1), cwd: session.cwd,
       text: followupMessage(request), mode: 'resume',
+      ...(prev.model ? { model: prev.model } : {}),
     })
     if (!sent) {
       const failed = await setRunStatus(pool, req.userId, run.id, 'failed', '电脑端不在线')
@@ -1787,12 +1790,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running' && !stuckRunning(session)) return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
-      const run = await createRun(pool, userId, randomUUID(), id, session.machine)
+      const prev = await lastRunModel(pool, userId, id)
+      const run = await createRun(pool, userId, randomUUID(), id, session.machine, null, prev)
       const message = await insertMessage(pool, userId, id, run.id, 'user', clean, {}, images.length ? images : null)
-      return { code: 200, run, message, session } as const
+      return { code: 200, run, message, session, prev } as const
     })
     if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
-    const { run, message, session } = res as Extract<typeof res, { code: 200 }>
+    const { run, message, session, prev } = res as Extract<typeof res, { code: 200 }>
     pushRun(userId, run)
     pushMessage(userId, message)
     // 后续消息只是上下文，不是授权：这条会话挂着签过 Mandate 的任务，就原样带上那份冻结快照，
@@ -1809,6 +1813,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       text: clean,
       ...(images.length ? { images } : {}),
       mode: 'resume',
+      ...(prev.model ? { model: prev.model } : {}),
       ...mandate,
     })
     if (!sent) {

@@ -610,6 +610,13 @@ export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id
   return toRun(r.rows[0])
 }
 
+/** 追问沿用这条会话上一轮实际用的模型（含思考强度）：执行端每轮都是新进程，不带 model 就会落回写死的默认模型 */
+export async function lastRunModel(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string): Promise<RunModel> {
+  const r = await pool.query<{ model: string }>("SELECT model FROM runs WHERE user_id = $1 AND session_id = $2 AND model IS NOT NULL AND model <> '' ORDER BY created_at DESC LIMIT 1", [userId, sessionId])
+  const model = r.rows[0]?.model
+  return model ? { model, note: '沿用会话上一轮的模型' } : {}
+}
+
 // 任务手动计时：不依赖任何会话的执行记录；标题做快照，任务删掉也还能看懂
 export async function createTaskRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, taskId: number): Promise<Run> {
   const r = await pool.query<RunRow>(
