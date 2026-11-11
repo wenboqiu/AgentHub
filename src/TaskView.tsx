@@ -335,6 +335,10 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
           ? <a href={`https://${e.value}`} target="_blank" rel="noopener noreferrer"><code>{e.value}</code></a>
           : <button type="button" className="md-file" title="预览文件" onClick={() => openFile(e.value)}><code>{e.value}</code></button>}</li>)}</ul>)}
       </div>}
+      {(review?.decisions?.length ?? 0) > 0 && <div className="decisions">
+        <span className="dim">它自己拍板的 {review!.decisions!.length} 个决定（难逆的在前）</span>
+        <ul>{review!.decisions!.map((d, i) => <li key={i} className={`decision ${d.reversible}`}><strong>{d.text}</strong>{d.reason && <span className="dim"> · {d.reason}</span>}{d.reversible === "hard" && <span className="badge">难逆</span>}</li>)}</ul>
+      </div>}
       <ul className="review-list">
         {reviewItems.map(it => (
           <li key={it.id} className={`review-item ${it.status}`}>

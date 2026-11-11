@@ -63,7 +63,7 @@ import { getPrefs, savePrefs } from './prefs.ts'
 import { buildFailureDigest, buildReviewDigest, getDigests } from './digest.ts'
 import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } from './watchdog.ts'
 import { taskThread } from './threads.ts'
-import { addReviewItem, decideReviewItem, getReview } from './review.ts'
+import { addReviewItem, decideReviewItem, getReview, DECISION_RULE } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
 import { AUTO_ALLOW_PER_TASK_HOUR, acceptTask, createDelivery, decisionStats, getDelivery, getMandate, getMandateMode, judgeByMandate, recentAutoAllowCount, recordDecision, setMandateMode, signMandate, tagApproval, type Mandate, type MandateMode } from './mandate.ts'
@@ -749,6 +749,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       }),
       // 任务自己声明的边界：一开始就告诉它，省得做一半被卡住
       boundaryLine(task.constraints),
+      DECISION_RULE,
     ].filter(Boolean).join('\n\n')
     // 模型谁定：角色写了就听角色的；没写就由项目经理按任务的复杂度，在同工具里挑一档。
     // 挑中的模型和理由一起落进 run，事后能回答「这轮为什么用 opus」。

@@ -14,7 +14,39 @@ export type EvidenceKind = 'file' | 'command' | 'test' | 'shot' | 'log'
 export type Evidence = { kind: EvidenceKind; label: string; value: string; at: string | null }
 export type ItemStatus = 'pending' | 'pass' | 'fail'
 export type ReviewItem = { id: number; key: string; title: string; status: ItemStatus; note: string; manual: boolean; updatedAt: string }
-export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] }
+export type Decision = { text: string; reason: string; reversible: 'easy' | 'hard' | 'unknown'; at: string }
+export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[]; decisions: Decision[] }
+
+/** 写进派活指令的约定：agent 自己拍板时留一行记录，验收页统一摘出来给人复核 */
+export const DECISION_RULE = [
+  '遇到需要选择的岔路时，在不打断的前提下自己拍板继续做，并在回复里单独写一行记录：',
+  '决定：<选了什么>；原因：<为什么>；可逆性：易 或 难',
+  '可逆性为「难」的操作（删除数据、对外发布、花钱、改动授权范围之外的东西）不要自己拍板，先停下来问。',
+].join('\n')
+
+const DECISION_RE = /^[\s>*\-\d.、]*(?:\*\*)?决定(?:\*\*)?[:：]\s*(.+)$/
+// 从 agent 的回复里摘出「决定：X；原因：Y；可逆性：易/难」。纯文本匹配，宁可少抓；难逆的排前面。
+export function harvestDecisions(msgs: { role: string; text: string; createdAt: string }[]): Decision[] {
+  const out: Decision[] = []
+  const seen = new Set<string>()
+  for (const m of msgs) {
+    if (m.role === 'user') continue
+    for (const raw of m.text.split('\n').slice(0, 300)) {
+      const hit = DECISION_RE.exec(raw.trim())
+      if (!hit) continue
+      const parts = hit[1].split(/[;；]/).map(s => s.trim()).filter(Boolean)
+      const text = (parts[0] ?? '').slice(0, 200)
+      if (!text || seen.has(text)) continue
+      const reasonPart = parts.find(p => /^原因[:：]/.test(p))
+      const revPart = parts.find(p => /^可逆性[:：]/.test(p)) ?? ''
+      const reversible = /难/.test(revPart) ? 'hard' : /易/.test(revPart) ? 'easy' : 'unknown'
+      seen.add(text)
+      out.push({ text, reason: (reasonPart ?? '').replace(/^原因[:：]\s*/, '').slice(0, 200), reversible, at: m.createdAt })
+    }
+  }
+  const rank = { hard: 0, unknown: 1, easy: 2 }
+  return out.sort((a, b) => rank[a.reversible] - rank[b.reversible]).slice(0, 30)
+}
 
 const LABEL: Record<EvidenceKind, string> = { file: '文件变更', command: '执行命令', test: '测试结果', shot: '截图', log: '错误日志' }
 const CAP: Record<EvidenceKind, number> = { file: 15, command: 10, test: 6, shot: 6, log: 5 }
@@ -217,6 +249,15 @@ async function reviewEvidence(pool: pg.Pool, userId: number, taskId: number, tas
   return harvestEvidence(msgs.map(m => ({ role: m.role, text: m.text, createdAt: m.createdAt })))
 }
 
+async function reviewDecisions(pool: pg.Pool, userId: number, taskId: number): Promise<Decision[]> {
+  const rows = (await pool.query<{ session_id: string }>(
+    'SELECT session_id FROM task_sessions WHERE user_id=$1 AND task_id=$2 ORDER BY created_at, session_id',
+    [userId, taskId],
+  )).rows
+  const msgs = (await Promise.all(rows.map(r => listMessages(pool, userId, r.session_id, 200)))).flat()
+  return harvestDecisions(msgs.map(m => ({ role: m.role, text: m.text, createdAt: m.createdAt })))
+}
+
 export async function getReview(pool: pg.Pool, userId: number, taskId: number): Promise<Review> {
   const task = await getTask(pool, userId, taskId)
   await syncReviewItems(pool, userId, taskId, task.checklist)
@@ -224,5 +265,6 @@ export async function getReview(pool: pg.Pool, userId: number, taskId: number): 
     items: await listReviewItems(pool, userId, taskId),
     evidence: await reviewEvidence(pool, userId, taskId, task),
     standards: await listStandards(pool, userId),
+    decisions: await reviewDecisions(pool, userId, taskId),
   }
 }

@@ -1286,3 +1286,7 @@ button.pg-slot { cursor: pointer; }
 .error-boundary h2 { margin: 0 0 8px; }
 .error-boundary pre { margin: 12px 0; padding: 12px; background: var(--field); border-radius: 12px; font-size: 12px; white-space: pre-wrap; word-break: break-all; max-height: 40vh; overflow: auto; }
 .error-boundary-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.decisions ul { margin: 6px 0 0; padding-left: 18px; }
+.decision.hard { color: var(--alert); }
+.decision .badge { margin-left: 8px; }

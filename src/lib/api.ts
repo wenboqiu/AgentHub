@@ -120,7 +120,8 @@ export type AttachmentInput = { kind: "image" | "file"; name: string; mime: stri
 export type BriefEntry = { id: number; text: string; taskId: number | null; at: string };
 /** 验收检查项：来自任务清单（或人工添加），可判通过/打回，打回原因沉淀为标准 */
 export type ReviewItem = { id: number; key: string; title: string; status: "pending" | "pass" | "fail"; note: string; manual: boolean; updatedAt: string };
-export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] };
+export type Decision = { text: string; reason: string; reversible: "easy" | "hard" | "unknown"; at: string };
+export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[]; decisions?: Decision[] };
 
 /** 处理意见：会话跑完后攒出来的「接下来做什么」，确认后才变成任务 */
 /** ticket = 人直接发的粗单：没有会话，项目经理细化后由人确认才派发 */
