@@ -26,8 +26,11 @@ import { ASSISTANT_TITLE, CONTRACT_HEADS, PROPOSAL_TITLE } from './session-kind.
 
 type DB = Pick<pg.Pool, 'query'>
 
-/** ticket = 人直接发的一张粗单：没有会话，先让人写一句话，项目经理细化后再由人确认派发 */
-export type ProposalKind = 'continue' | 'followup' | 'fix' | 'ticket'
+/**
+ * ticket = 人直接发的一张粗单：没有会话，先让人写一句话，项目经理细化后再由人确认派发
+ * decide = 会话停下来等人拍板（「需要你定夺」）：不是派给 agent 的活，进收件箱让人去原会话回复
+ */
+export type ProposalKind = 'continue' | 'followup' | 'fix' | 'ticket' | 'decide'
 export type ProposalOrigin = 'heuristic' | 'agent'
 /**
  * 开跑方式：
@@ -136,7 +139,7 @@ const MAX_NOTES = 4000
 const MAX_ITEMS = 20
 const MAX_ITEM = 200
 const MAX_EVIDENCE = 6
-/** 没声明去向时的默认：接着做 / 回去修沿用上下文，新的一段工作（含人直接发的单）从零开始 */
+/** 没声明去向时的默认：接着做 / 回去修 / 拍板后接着干沿用上下文，新的一段工作（含人直接发的单）从零开始 */
 const defaultDelivery = (kind: ProposalKind): Delivery => (kind === 'followup' || kind === 'ticket' ? 'fresh' : 'fork')
 /** 细化会话的标题前缀：这类会话不再生成新的处理意见（否则会无限套娃），也不弹通知 */
 export { PROPOSAL_TITLE }
@@ -221,7 +224,7 @@ export async function migrateProposals(db: DB) {
     session_project text NOT NULL DEFAULT '',
     task_id bigint,
     event_at timestamptz NOT NULL,
-    kind text NOT NULL CHECK (kind IN ('continue','followup','fix','ticket')),
+    kind text NOT NULL CHECK (kind IN ('continue','followup','fix','ticket','decide')),
     stage text NOT NULL DEFAULT 'draft',
     title text NOT NULL,
     notes text NOT NULL DEFAULT '',
@@ -248,10 +251,10 @@ export async function migrateProposals(db: DB) {
   // 发单场景：人指定的电脑与目录跟着草稿走，确认时原样落到任务上
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS machine text')
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS cwd text')
-  // kind 多出 ticket（人直接发的粗单）：老库的列级 CHECK 要换掉，否则插不进去
+  // kind 多出 ticket（人直接发的粗单）、decide（等人拍板）：老库的列级 CHECK 要换掉，否则插不进去
   await db.query('ALTER TABLE session_proposals DROP CONSTRAINT IF EXISTS session_proposals_kind_check')
   await db.query(`ALTER TABLE session_proposals ADD CONSTRAINT session_proposals_kind_check
-    CHECK (kind IN ('continue','followup','fix','ticket'))`)
+    CHECK (kind IN ('continue','followup','fix','ticket','decide'))`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'fresh'`)
   // 两段式：老库里的单子都当成已经展开的任务单（默认 draft），不改动它们的行为
@@ -452,6 +455,33 @@ export function fallbackSubject(lastReply: string, sessionTitle: string): string
   return cut((quoted?.[1] ?? sessionTitle).trim() || '本次会话', 60)
 }
 
+/** agent 在等人拍板的信号。「不需要你确认」这类否定不算 */
+const DECIDE_RE = /(?<![不无])(?:需要你|请你|等你)来?(?:定夺|决定|拍板|确认|选择|选一个)|你来定|需要人来定/
+
+/**
+ * 回复里有没有在等人拍板：返回要人回答的那个问题和那一段原文，没有返回 null。
+ * 常见写法是「## 需要你定夺」小标题下面一句问题；也有一行写完的「需要你决定：要不要…」。
+ * 只看结尾 40 行：前文引用的旧问题不算。
+ */
+export function decisionAsk(text: string): { question: string; section: string } | null {
+  const lines = text.split('\n')
+  const headLevel = (l: string): number => /^\s*(#{1,6})\s/.exec(l)?.[1].length ?? 0
+  for (let i = Math.max(0, lines.length - 40); i < lines.length; i++) {
+    if (!DECIDE_RE.test(lines[i])) continue
+    // 去掉信号词后这一行还有实质内容（一行写完的问题）就用它，否则取下面第一行
+    const rest = stripMd(lines[i].replace(DECIDE_RE, '')).replace(/^[：:，,。\s]+/, '')
+    let question = rest.length >= 6 ? rest : ''
+    for (let j = i + 1; !question && j < lines.length; j++) question = stripMd(lines[j])
+    if (!question) continue
+    // 原文段落：小标题起头就到下一个同级或更高的小标题为止，普通行起头就到下一个小标题为止
+    const level = headLevel(lines[i]) || 7
+    let end = i + 1
+    while (end < lines.length && !(headLevel(lines[end]) && headLevel(lines[end]) <= level)) end++
+    return { question: cut(question, 80), section: lines.slice(i, end).join('\n').trim().slice(0, 1500) }
+  }
+  return null
+}
+
 const evidenceGroups =(ev: Evidence[]): string => {
   const byKind = new Map<string, string[]>()
   for (const e of ev) {
@@ -478,6 +508,27 @@ export function heuristicDraft(input: {
   const failedTest = evidence.find(e => e.kind === 'test' && FAIL_RE.test(e.value))
   const errorLog = evidence.find(e => e.kind === 'log' && FAIL_RE.test(e.value))
   const step = nextStepLine(lastReply)
+  // 说明里的出处：挂了任务就引任务编号和标题，不抄会话标题——会话标题一旦是上一张单子的说明，
+  // 这里抄进去、下一轮再抄，就成了「来源会话：来源会话：…」
+  const where = `${session.agent}${session.project ? ` · ${session.project}` : ''}`
+  const source = task ? `来源：任务 #${task.id}「${task.title}」（${where}）` : `来源会话：${session.title || '未命名会话'}（${where}）`
+
+  // ⓪ 会话停下来等人拍板：这不是派给 agent 的活，进收件箱让人去原会话回复。
+  // 排最前：不拍板，接着做 / 修 / 下一步都无从谈起
+  const ask = decisionAsk(lastReply)
+  if (ask) {
+    return {
+      kind: 'decide',
+      title: `等你决定：${ask.question}`.slice(0, MAX_TITLE),
+      notes: [source, ask.section].join('\n\n'),
+      checklist: [],
+      priority: 'high',
+      delivery: 'fork',
+      roleId: task?.roleId ?? null,
+      projectId: task?.projectId ?? null,
+      note: '会话停下来等你拍板：去原会话直接回复，它就带着上下文接着做；要另起一件事再转成任务单。',
+    }
+  }
 
   // ① 原任务没做完：接着做，清单直接沿用未完成项
   if (task && todo.length) {
@@ -485,7 +536,7 @@ export function heuristicDraft(input: {
       kind: 'continue',
       title: `继续：${todo[0]}`.slice(0, MAX_TITLE),
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         task.notes ? `原任务：${readableNotes(task.notes).slice(0, 800)}` : '',
         lastReply ? `本次进展：\n${lastReply.slice(-800)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
@@ -510,7 +561,7 @@ export function heuristicDraft(input: {
       kind: 'fix',
       title: `修复：${head}`.slice(0, MAX_TITLE),
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         `失败现场：\n${broken.value.slice(0, 800)}`,
         lastReply ? `会话结论：\n${lastReply.slice(-600)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
@@ -530,7 +581,7 @@ export function heuristicDraft(input: {
       kind: 'followup',
       title: step.slice(0, MAX_TITLE),
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         lastReply ? `会话结尾：\n${lastReply.slice(-1000)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
@@ -544,13 +595,15 @@ export function heuristicDraft(input: {
     }
   }
 
-  // ④ 兜底：回复有实质内容但没明说下一步
-  if (lastReply.trim().length >= 40) {
+  // ④ 兜底：回复有实质内容但没明说下一步。只给没挂任务的会话——挂了任务的，跑完就进待验收，
+  // 下一步是人验收 / 打回（打回自己会出新单）。这里再出「跟进」，验收类会话每轮都写一大段总结，
+  // 就会滚成「核对上一轮的核对」一条停不下来的链
+  if (!task && lastReply.trim().length >= 40) {
     return {
       kind: 'followup',
       title: `跟进：${fallbackSubject(lastReply, session.title)}`,
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         `会话结尾：\n${lastReply.slice(-1000)}`,
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
@@ -558,8 +611,8 @@ export function heuristicDraft(input: {
       priority: 'medium',
       // 新的一段工作：另起会话，只带任务单里的说明
       delivery: 'fresh',
-      roleId: task?.roleId ?? null,
-      projectId: task?.projectId ?? null,
+      roleId: null,
+      projectId: null,
       note: '没从回复里找到明确的下一步，标题只是占位；点「让项目经理细化」会更准。',
     }
   }

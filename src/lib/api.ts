@@ -124,7 +124,7 @@ export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: str
 
 /** 处理意见：会话跑完后攒出来的「接下来做什么」，确认后才变成任务 */
 /** ticket = 人直接发的粗单：没有会话，项目经理细化后由人确认才派发 */
-export type ProposalKind = "continue" | "followup" | "fix" | "ticket";
+export type ProposalKind = "continue" | "followup" | "fix" | "ticket" | "decide";
 /** 项目经理排好的执行人：角色是人，配置是地方（执行工具 + 电脑 + 目录） */
 /**
  * 开跑方式：fork = 接着原会话的上下文另起一个会话，fresh = 新建会话从这个任务开始，

@@ -111,9 +111,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const pendingProposals = liveProposals.filter((p) => p.status === "pending").length;
   // 两段式：待确认的还停在「建议」阶段时，入口就直说「几条建议」，别一上来叫任务单
   const pendingSuggestions = liveProposals.filter((p) => p.status === "pending" && p.stage === "suggest").length;
-  const pendingLabel = pendingSuggestions === pendingProposals && pendingProposals > 0
-    ? `${pendingProposals} 条建议待确认`
-    : `${pendingProposals} 份待确认`;
+  // 会话停下来等人拍板时入口直说，别混在「建议」里被当成可有可无
+  const pendingDecide = liveProposals.some((p) => p.status === "pending" && p.kind === "decide");
+  const pendingLabel = pendingDecide
+    ? "它在等你决定"
+    : pendingSuggestions === pendingProposals && pendingProposals > 0
+      ? `${pendingProposals} 条建议待确认`
+      : `${pendingProposals} 份待确认`;
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);

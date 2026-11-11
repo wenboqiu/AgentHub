@@ -216,6 +216,7 @@ export default function TasksPanel({
           onProposal(next);
         }}
         onTask={() => { onNotice("任务单已确认，任务建好了"); onRefresh(); }}
+        onOpenSession={onOpenSession}
       />
     );
     if (p.status !== "pending" || p.stage === "suggest") return <li key={`p${p.id}`} className="inbox-card">{card}</li>;

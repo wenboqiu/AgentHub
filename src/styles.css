@@ -874,6 +874,7 @@ header h1 { white-space: nowrap; }
 .proposal-kind { padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
 .proposal-kind.fix { background: var(--priority-high-bg); color: var(--priority-high); }
 .proposal-kind.continue { background: var(--ok-bg); color: var(--ok); }
+.proposal-kind.decide { background: var(--priority-high-bg); color: var(--priority-high); }
 .proposal-assignee { margin: 0 0 12px; padding: 12px; border-radius: 12px; background: var(--field); }
 .proposal-assignee .form-grid { gap: 12px; }
 .proposal-place { margin: 8px 0 0; font-size: 12px; overflow-wrap: anywhere; }

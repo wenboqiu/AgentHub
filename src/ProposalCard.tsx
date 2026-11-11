@@ -19,6 +19,7 @@ const KIND_LABEL: Record<Proposal["kind"], string> = {
   followup: "下一步",
   fix: "先修问题",
   ticket: "发单",
+  decide: "等你决定",
 };
 
 const PRIORITY_LABEL: Record<Task["priority"], string> = { high: "高", medium: "中", low: "低" };
@@ -74,6 +75,7 @@ export default function ProposalCard({
   onError,
   onChanged,
   onTask,
+  onOpenSession,
 }: {
   api: Api;
   proposal: Proposal;
@@ -86,6 +88,8 @@ export default function ProposalCard({
   onError(msg: string): void;
   onChanged(p: Proposal): void;
   onTask(t: Task): void;
+  /** 「等你决定」卡的主按钮：回原会话直接回复，agent 带着上下文接着做 */
+  onOpenSession?(id: string): void;
 }) {
   const [form, setForm] = useState<Form>(() => toForm(proposal));
   const [done, setDone] = useState<null | { kind: "created"; text: string } | { kind: "discarded" }>(null);
@@ -94,7 +98,9 @@ export default function ProposalCard({
   const [drafting, setDrafting] = useState(false);
   // 「谁来做」的详细配置默认收起，只露一行摘要；菜单同理
   const [whoOpen, setWhoOpen] = useState(false), [menuOpen, setMenuOpen] = useState(false);
-  const [detailOpen, setDetailOpen] = useState(false);
+  // 等人拍板的卡：问题本身就是要看的内容，详情默认展开
+  const isDecide = proposal.kind === "decide";
+  const [detailOpen, setDetailOpen] = useState(isDecide);
   const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
   // 发单没有原会话：不显示「从哪开始」，也不自称来自某个会话
   const isTicket = proposal.kind === "ticket";
@@ -123,7 +129,7 @@ export default function ProposalCard({
   if (done?.kind === "created") return <p className="proposal-verdict">{done.text}</p>;
   if (done?.kind === "discarded" || proposal.status === "discarded") return (
     <p className="proposal-verdict dim">
-      这条建议不用了。
+      {isDecide ? "已处理。" : "这条建议不用了。"}
       <button className="link proposal-undo" disabled={busy} onClick={() => void unignore()}>撤回</button>
     </p>
   );
@@ -181,17 +187,37 @@ export default function ProposalCard({
           <strong className="proposal-suggest-title">{proposal.taskId !== null && <span className="task-no">#{proposal.taskId} </span>}{proposal.title}</strong>
           <span className="dim proposal-suggest-who">{who}</span>
         </div>
-        <div className="btns">
-          {hasDetail && (
-            <button className="ghost" aria-expanded={detailOpen} onClick={() => setDetailOpen(v => !v)}>
-              {detailOpen ? "收起" : "看详情"}
+        {isDecide ? (
+          // 拍板不是派活：回原会话答一句，它带着上下文接着干。真要另起一件事才转任务单
+          <div className="btns">
+            {hasDetail && (
+              <button className="ghost" aria-expanded={detailOpen} onClick={() => setDetailOpen(v => !v)}>
+                {detailOpen ? "收起" : "看详情"}
+              </button>
+            )}
+            {onOpenSession && (
+              <button className="primary" onClick={() => onOpenSession(proposal.sessionId)}>去会话回复</button>
+            )}
+            <button disabled={busy || drafting} onClick={() => void makeDraft()}
+              title="答案是「另起一件事去做」时用：展开成任务单，项目经理会重写">
+              {drafting ? "正在生成…" : "转成任务单"}
             </button>
-          )}
-          <button className="primary" disabled={busy || drafting} onClick={() => void makeDraft()}>
-            {drafting ? "正在生成…" : "生成任务单"}
-          </button>
-          <button className="ghost" disabled={busy || drafting} onClick={() => void discard()}>不用了</button>
-        </div>
+            <button className="ghost" disabled={busy || drafting} onClick={() => void discard()}
+              title="已经在会话里答过了，或者不用管">已处理</button>
+          </div>
+        ) : (
+          <div className="btns">
+            {hasDetail && (
+              <button className="ghost" aria-expanded={detailOpen} onClick={() => setDetailOpen(v => !v)}>
+                {detailOpen ? "收起" : "看详情"}
+              </button>
+            )}
+            <button className="primary" disabled={busy || drafting} onClick={() => void makeDraft()}>
+              {drafting ? "正在生成…" : "生成任务单"}
+            </button>
+            <button className="ghost" disabled={busy || drafting} onClick={() => void discard()}>不用了</button>
+          </div>
+        )}
         {/* 一行标题常常不够下判断（尤其兜底稿的标题只是占位），详情就地展开，不必先生成任务单 */}
         {detailOpen && (
           <div className="proposal-suggest-detail">
@@ -207,7 +233,7 @@ export default function ProposalCard({
               </ul>
             )}
             {proposal.note && <p className="hint">{proposal.note}</p>}
-            <p className="hint">这是按会话拼的规则稿；点「生成任务单」后项目经理会用模型重写标题和说明，不满意再改或忽略。</p>
+            {!isDecide && <p className="hint">这是按会话拼的规则稿；点「生成任务单」后项目经理会用模型重写标题和说明，不满意再改或忽略。</p>}
           </div>
         )}
       </div>
