@@ -446,9 +446,10 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
       out = (await client.query<Row>('UPDATE sessions SET id = $3, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING *', [userId, from, to])).rows[0]
     } else {
       out = real
-      // 真实行多半是 hook / 轮询抢先上报的，标题来自 transcript 首条消息（内部会话就是契约提示词原文）。
-      // 临时行上的标题才是服务端特意起的名字，这种情况下让它赢；真实行本来没标题时也照旧沿用。
-      const keepPending = !!pending.title && (isInternalTitle(pending.title) || !real.title)
+      // 真实行多半是 hook / 轮询抢先上报的，标题来自 transcript 首条消息：派任务时那是任务说明原文，
+      // 内部会话是契约提示词原文。临时行上的标题才是服务端特意起的名字（任务标题 / 新开时正文开头），一律让它赢。
+      // 说明原文当标题的后果：任务单说明里引用会话标题，一轮套一层「来源会话：来源会话：…」。
+      const keepPending = !!pending.title
       if (keepPending && real.title !== pending.title) {
         out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
       }
