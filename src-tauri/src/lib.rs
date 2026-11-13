@@ -146,6 +146,13 @@ mod desktop {
         focus::focus_session(pid, &agent, session_key.as_deref())
     }
 
+    /// Codex 会话是否被另一个客户端占用（~/.codex/thread-writer-locks 上的排他 flock）：
+    /// "free" 没锁 / "occupied" 有活进程握着（发消息会被拒）/ "stale" 残留锁（进程已退出，可正常发）
+    #[tauri::command]
+    fn codex_thread_status(session_key: String) -> &'static str {
+        codex::thread_writer_status(&session_key)
+    }
+
     #[tauri::command]
     fn open_in_terminal(agent: String, session_key: String, cwd: String) -> Result<String, String> {
         terminal::open_in_terminal(&agent, &session_key, &cwd)
@@ -280,6 +287,7 @@ mod desktop {
                 install_claude_hooks,
                 uninstall_claude_hooks,
                 focus_session,
+                codex_thread_status,
                 open_in_terminal,
                 agent_models,
                 doubao_visible,

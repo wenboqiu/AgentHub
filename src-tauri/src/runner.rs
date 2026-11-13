@@ -2567,7 +2567,15 @@ fn run_codex(run: &Run, mode: Mode, exe: &Path, key: &str, cwd: &str, text: &str
                 CodexIn::Response { id, error, result } => {
                     if let Some(e) = error {
                         if id != ID_INTERRUPT {
-                            finish = Some(Finish::Failed(format!("Codex 返回错误：{e}")));
+                            // Codex 的 thread-store 不允许同一 thread 有两个活跃 writer：
+                            // 该会话还被另一个 Codex 客户端（桌面应用 / IDE / 终端）占着时，resume 会被直接拒绝
+                            let hint = e.contains("already has an active writer");
+                            let msg = if hint {
+                                format!("Codex 返回错误：{e}（该会话正被另一个 Codex 客户端占用——请先在 Codex 桌面应用/IDE/终端里关闭或停止这个会话，再从 AgentHub 发消息）")
+                            } else {
+                                format!("Codex 返回错误：{e}")
+                            };
+                            finish = Some(Finish::Failed(msg));
                         }
                     } else {
                         match id {

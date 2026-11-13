@@ -269,6 +269,58 @@ pub fn spawn(fwd: Forwarder) {
     });
 }
 
+// ---------------------------------------------------------------- thread writer 锁
+
+/// Codex 给每个活跃 thread 在 `~/.codex/thread-writer-locks/<threadId>.lock` 放一把 writer 锁，
+/// 同一 thread 不允许两个客户端同时写入（第二个 resume 会报 "already has an active writer"）。
+/// 发消息前探一下，能在 UI 上提前告诉用户「这个会话被别的 Codex 客户端占着」。
+/// 返回："free"（没锁）/ "occupied"（有活进程握着）/ "stale"（残留锁，持有进程已退出）。
+pub fn thread_writer_status(key: &str) -> &'static str {
+    // thread id 是 UUID，只放行字母数字和连字符，防路径拼接意外
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return "free";
+    }
+    let Some(path) = home_dir().map(|h| h.join(".codex").join("thread-writer-locks").join(format!("{key}.lock"))) else {
+        return "free";
+    };
+    // 探测方式：以「独占共享」打开锁文件。
+    // 有活进程握着句柄（Codex 持有期间一直开着）→ 打不开 → occupied；
+    // 只是进程退出没清理的残留文件 → 能打开 → stale（Codex 自己 resume 前也会清这种）。
+    probe_lock(&path)
+}
+
+#[cfg(windows)]
+fn probe_lock(path: &Path) -> &'static str {
+    use std::os::windows::fs::OpenOptionsExt;
+    match std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(path) {
+        Ok(_) => "stale",
+        Err(_) => "occupied",
+    }
+}
+
+#[cfg(unix)]
+fn probe_lock(path: &Path) -> &'static str {
+    use std::io::Write;
+    use std::os::unix::io::AsRawFd;
+    let mut f = match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(f) => f,
+        Err(_) => return "occupied",
+    };
+    // Unix 上 Codex 用 flock：能拿到排他锁说明没有别的进程握着
+    let held = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0;
+    if !held {
+        let _ = libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+        let _ = f.flush();
+    }
+    if held { "occupied" } else { "stale" }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn probe_lock(_path: &Path) -> &'static str {
+    // 其他平台没有探测句柄的手段，退化为「有锁文件就当被占用」
+    "occupied"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

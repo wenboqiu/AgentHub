@@ -400,6 +400,7 @@ body.sidebar-resizing { user-select: none; -webkit-user-select: none; }
 .composer-image .image-remove .icon { width: 12px; height: 12px; }
 .composer-image .image-remove:hover { background: rgba(15,15,20,.82); }
 .composer .hint { margin: 0 0 10px; }
+.composer .hint.lock-warn { margin: 0 0 10px; padding: 8px 12px; border-radius: 10px; background: var(--alert-bg); color: var(--alert); }
 .spawn-panel label.radio { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 16px; cursor: pointer; }
 .spawn-panel label.radio span { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .spawn-panel label.radio small { color: var(--dim); font-size: 13px; }

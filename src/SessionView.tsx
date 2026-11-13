@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isPending, isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
-import { desktop, isAndroid, isDesktop, type DoubaoVisible } from "./lib/platform";
+import { desktop, isAndroid, isDesktop, type CodexThreadState, type DoubaoVisible } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
@@ -329,6 +329,25 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     autoAcked.current.add(session.id);
     onAck();
   }, [session, onAck]);
+
+  // Codex 会话可能被另一个客户端占用（Codex 桌面应用 / IDE / 终端握着 thread writer 锁），
+  // 这时发消息会被直接拒绝。桌面端在本机每 5 秒探一次锁，提前在输入框上方提醒。
+  const isCodex = session?.agent === "codex";
+  const [threadState, setThreadState] = useState<CodexThreadState>("free");
+  const threadKey = isCodex && id.startsWith("codex:") && !isPendingSession(id) ? id.slice("codex:".length) : "";
+  useEffect(() => {
+    if (!isDesktop || !threadKey) return;
+    let gone = false;
+    let timer = 0;
+    const tick = () => {
+      desktop.codexThreadStatus(threadKey)
+        .then((s) => { if (!gone) setThreadState(s); })
+        .catch(() => { /* 探测失败维持上次结果，别刷错误 */ })
+        .finally(() => { if (!gone) timer = window.setTimeout(tick, 5000); });
+    };
+    tick();
+    return () => { gone = true; window.clearTimeout(timer); };
+  }, [threadKey]);
 
   if (!session) {
     return (
@@ -764,6 +783,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       {/* 只读 agent（豆包 / WorkBuddy）没有发送能力，底部的输入框整块不放出来 */}
       {!spawnOpen && !isListenOnly(session.agent) && <footer className="composer">
+        {/* AgentHub 自己在跑这条会话时锁是自己握的，不算「被占用」 */}
+        {!active && threadState === "occupied" && (
+          <p className="hint lock-warn">⚠️ 这个会话正被另一个 Codex 客户端占用（Codex 桌面应用 / IDE / 终端），现在发消息会被拒绝——请先在那边停止或关闭这个会话。</p>
+        )}
         {reason && <p className="hint">{reason}</p>}
         {images.length > 0 && (
           <div className="composer-images">

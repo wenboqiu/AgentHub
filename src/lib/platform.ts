@@ -32,6 +32,8 @@ export type DoubaoVisible = {
 };
 
 export type HooksStatus = { installed: boolean; scriptExists: boolean; settingsExists: boolean };
+/** Codex 会话的 writer 锁状态（~/.codex/thread-writer-locks 上的排他 flock） */
+export type CodexThreadState = "free" | "occupied" | "stale";
 export type CollectorInfo = {
   collectorError: string | null;
   forward: { queued: number; lastError: string | null };
@@ -115,6 +117,8 @@ export const desktop = {
   installHooks: () => invoke<HooksStatus>("install_claude_hooks"),
   uninstallHooks: () => invoke<HooksStatus>("uninstall_claude_hooks"),
   focus: (pid: number | null, agent: string, sessionKey?: string) => invoke<void>("focus_session", { pid, agent, sessionKey }),
+  /** Codex 会话是否被其他客户端占用（发消息前提前知道，省得白等一轮报错） */
+  codexThreadStatus: (sessionKey: string) => invoke<CodexThreadState>("codex_thread_status", { sessionKey }),
   openInTerminal: (agent: string, sessionKey: string, cwd: string) => invoke<string>("open_in_terminal", { agent, sessionKey, cwd }),
   /** 读执行端的模型清单：CodeBuddy 读本机缓存，ZCode 解析安装包内置配置 */
   agentModels: (agent: string, refresh = false) => invoke<ModelList>("agent_models", { agent, refresh }),

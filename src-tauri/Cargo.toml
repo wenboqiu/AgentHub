@@ -51,6 +51,10 @@ windows = { version = "0.61", features = [
   "Win32_UI_Accessibility",
 ] }
 
+# 探测 Codex 的 thread writer 锁（~/.codex/thread-writer-locks 上的 flock）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 codegen-units = 1
 lto = true
