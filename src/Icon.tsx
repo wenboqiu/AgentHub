@@ -1,4 +1,4 @@
-type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "stats" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "phone";
+type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "stats" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "devices" | "phone";
 
 /** Original outline symbols; inherit text colour and remain decorative. */
 export default function Icon({ name }: { name: IconName }) {
@@ -31,6 +31,7 @@ export default function Icon({ name }: { name: IconName }) {
     folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h6a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>,
     sliders: <><path d="M4 7h9M19 7h1M4 17h4M14 17h6"/><circle cx="15.5" cy="7" r="2"/><circle cx="10.5" cy="17" r="2"/></>,
     desktop: <><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/></>,
+    devices: <><rect x="2.5" y="4" width="12.5" height="9.5" rx="1.8"/><path d="M6 17h5.5M8.8 13.5V17"/><rect x="16.6" y="9" width="4.9" height="10.5" rx="1.6"/><path d="M18.7 17.4h.7"/></>,
     phone: <><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{paths[name]}</svg>;

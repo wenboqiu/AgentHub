@@ -190,6 +190,22 @@ details > summary { cursor: pointer; color: var(--dim); font-size: 14px; font-we
 .devices li { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; padding: 14px 0; border-top: 1px solid var(--line); }
 .devices .dev-name { flex: 1; min-width: 140px; display: flex; align-items: center; gap: 8px; }
 .devices .dev-time { color: var(--dim); font-size: 12px; }
+/* 设置 → 设备：按 在线 / 没开远程执行 / 离线 分组，一条台电脑一行 */
+.dev-group { margin: 20px 0 0; }
+.dev-group-head { display: flex; align-items: center; gap: 8px; margin: 0 0 2px; font-size: 12.5px; font-weight: 600; color: var(--dim); }
+.dev-group-count { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 999px; background: var(--field); color: var(--dim); font-variant-numeric: tabular-nums; }
+.dev-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+.dev-dot.online { background: var(--ok); }
+.dev-dot.listening { background: var(--accent); }
+.dev-dot.offline { background: var(--dim); opacity: .45; }
+.devices .dev-name b { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.dev-state { flex-shrink: 0; font-size: 10.5px; font-weight: 650; padding: 1px 7px; border-radius: 6px; background: var(--field); color: var(--dim); }
+.dev-state.online { background: var(--ok-bg); color: var(--ok); }
+.dev-state.listening { background: var(--accent-soft); color: var(--accent); }
+.dev-state.offline { background: var(--field); color: var(--dim); }
+.devices .dev-tools { flex-basis: 100%; margin-top: 2px; font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+.tag.local { background: var(--accent-soft); color: var(--accent); }
+.dev-online-count { color: var(--ok); }
 /* 设置：一级列表 → 子页面。列表只给现状摘要，改细节点进子页 */
 .settings-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
 .settings-row { width: 100%; display: flex; align-items: center; gap: 14px; padding: 15px 16px; text-align: left; border: 1px solid transparent; border-radius: var(--radius); background: var(--card); }

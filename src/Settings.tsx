@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Api, type Device, type NotifyKind, type NotifySettings, type Project, type Role } from "./lib/api";
+import { Api, type Device, type Machine, type NotifyKind, type NotifySettings, type Project, type Role } from "./lib/api";
+import { deviceSummaryText } from "./lib/devices";
+import Devices from "./Devices";
 import Manager from "./Manager";
 import Roles, { RoleEditor } from "./Roles";
 import Projects, { ProjectEditor } from "./Projects";
@@ -77,7 +79,7 @@ type Props = {
 };
 
 /** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
-type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "project" | "manager" | "desktop" | "android" | "avatars";
+type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "project" | "manager" | "devices" | "desktop" | "android" | "avatars";
 
 /** role / project 页的标题跟着那一条的名字走，不在这里写死 */
 const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
@@ -86,6 +88,7 @@ const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
   roles: "角色",
   projects: "项目",
   manager: "项目经理",
+  devices: "设备",
   desktop: "本机执行与采集",
   android: "Android 后台提醒",
   avatars: "agent 头像",
@@ -113,6 +116,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   const [nsMsg, setNsMsg] = useState("");
   // 一级列表上的计数（角色 / 项目各自改完后回来会变）
   const [counts, setCounts] = useState<{ roles: number; projects: number } | null>(null);
+  // 一级列表「设备」那句现状：拉不到就 null（显示加载中），不挡住其它条目
+  const [machines, setMachines] = useState<Machine[] | null>(null);
 
   // 登录表单
   const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
@@ -178,9 +183,11 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   useEffect(() => {
     if (!api || page !== "root") return;
     let dead = false;
-    Promise.all([api.roles(), api.projects()]).then(
-      ([roles, projects]) => {
-        if (!dead) setCounts({ roles: roles.length, projects: projects.length });
+    Promise.all([api.roles(), api.projects(), api.machines()]).then(
+      ([roles, projects, ms]) => {
+        if (dead) return;
+        setCounts({ roles: roles.length, projects: projects.length });
+        setMachines(ms);
       },
       () => {},
     );
@@ -434,6 +441,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             <ul className="settings-list">
               <SettingsRow icon="user" title="账号与安全" summary={`${cfg.email || "（未知邮箱）"} · ${host}`} badge="已登录" onClick={() => setPage("account")} />
               <SettingsRow icon="bell" title="通知规则" summary={notifySummary} onClick={() => setPage("notify")} />
+              <SettingsRow icon="devices" title="设备" summary={deviceSummaryText(machines)} onClick={() => setPage("devices")} />
             </ul>
 
             <h2>派活</h2>
@@ -668,6 +676,9 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
         )}
 
         {page === "manager" && api && <Manager api={api} />}
+        {page === "devices" && api && (
+          <Devices api={api} localMachine={cfg.machine} onOpenAccount={() => setPage("account")} />
+        )}
         {page === "avatars" && <AvatarSettings api={api} />}
 
         {page === "desktop" && isDesktop && (
