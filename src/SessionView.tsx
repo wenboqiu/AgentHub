@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isPending, isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
-import { desktop, isAndroid, isDesktop, type DoubaoVisible } from "./lib/platform";
+import { desktop, isAndroid, isDesktop, type CodexThreadState, type DoubaoVisible } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
@@ -8,6 +8,7 @@ import MessageActions from "./MessageActions";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
 import AgentAvatar from "./AgentAvatar";
+import { foldRepeats } from "./lib/foldRepeats";
 import SessionSidebar from "./SessionSidebar";
 import { useMediaQuery } from "./lib/useMediaQuery";
 import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
@@ -110,9 +111,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const pendingProposals = liveProposals.filter((p) => p.status === "pending").length;
   // 两段式：待确认的还停在「建议」阶段时，入口就直说「几条建议」，别一上来叫任务单
   const pendingSuggestions = liveProposals.filter((p) => p.status === "pending" && p.stage === "suggest").length;
-  const pendingLabel = pendingSuggestions === pendingProposals && pendingProposals > 0
-    ? `${pendingProposals} 条建议待确认`
-    : `${pendingProposals} 份待确认`;
+  // 会话停下来等人拍板时入口直说，别混在「建议」里被当成可有可无
+  const pendingDecide = liveProposals.some((p) => p.status === "pending" && p.kind === "decide");
+  const pendingLabel = pendingDecide
+    ? "它在等你决定"
+    : pendingSuggestions === pendingProposals && pendingProposals > 0
+      ? `${pendingProposals} 条建议待确认`
+      : `${pendingProposals} 份待确认`;
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
@@ -315,6 +320,35 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     if (stick.current) window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
   }, [flowKey, approvals.length]);
 
+  // 打开对话流即视为处理：进来看这一轮，这条会话自动从待处理区撒下（不再单放「处理」按钮）。
+  // 快照每几秒就换新对象，用 ref 记下已 ack 的会话，避免重复发请求；
+  // 之后会话再次变回 pending（新一轮结束）时照样会再 ack 一次。
+  const autoAcked = useRef(new Set<string>());
+  useEffect(() => {
+    if (!session || !isPending(session) || autoAcked.current.has(session.id)) return;
+    autoAcked.current.add(session.id);
+    onAck();
+  }, [session, onAck]);
+
+  // Codex 会话可能被另一个客户端占用（Codex 桌面应用 / IDE / 终端握着 thread writer 锁），
+  // 这时发消息会被直接拒绝。桌面端在本机每 5 秒探一次锁，提前在输入框上方提醒。
+  const isCodex = session?.agent === "codex";
+  const [threadState, setThreadState] = useState<CodexThreadState>("free");
+  const threadKey = isCodex && id.startsWith("codex:") && !isPendingSession(id) ? id.slice("codex:".length) : "";
+  useEffect(() => {
+    if (!isDesktop || !threadKey) return;
+    let gone = false;
+    let timer = 0;
+    const tick = () => {
+      desktop.codexThreadStatus(threadKey)
+        .then((s) => { if (!gone) setThreadState(s); })
+        .catch(() => { /* 探测失败维持上次结果，别刷错误 */ })
+        .finally(() => { if (!gone) timer = window.setTimeout(tick, 5000); });
+    };
+    tick();
+    return () => { gone = true; window.clearTimeout(timer); };
+  }, [threadKey]);
+
   if (!session) {
     return (
       <div className="app">
@@ -441,15 +475,6 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       window.setTimeout(() => setNote(""), 3500);
     });
   const stop = () => run && guard("stop", () => api.stop(run.id));
-  // 打开对话流即视为处理：进来看这一轮，这条会话自动从待处理区撒下（不再单放「处理」按钮）。
-  // 快照每几秒就换新对象，用 ref 记下已 ack 的会话，避免重复发请求；
-  // 之后会话再次变回 pending（新一轮结束）时照样会再 ack 一次。
-  const autoAcked = useRef(new Set<string>());
-  useEffect(() => {
-    if (!session || !isPending(session) || autoAcked.current.has(session.id)) return;
-    autoAcked.current.add(session.id);
-    onAck();
-  }, [session, onAck]);
   // 手动同步电脑上的记录；失败要提示（自动同步失败才静默保留旧记录）
   const loadHistory = () => {
     if (syncing || !online) return;
@@ -511,7 +536,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
         <span className="machine">
-          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
+          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}{session.state === "running" && (session.bgTasks ?? 0) > 0 ? ` · ${session.bgTasks} 个后台任务` : ""}</span>
           {!pendingSession && !isDoubao && (
             <button
               className={`icon-button${syncing ? " spin" : ""}`}
@@ -596,13 +621,14 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           <p className="empty">读不到豆包窗口：{doubaoErr}</p>
         )}
         <ul className="msgs">
-          {messages.map((m) => (
+          {foldRepeats(messages).map(({ m, count }) => (
             <li key={m.id} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
               {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
               <div className={`msg ${m.role}`}>
                 {/* 人和 agent 的话都按 markdown 渲染（都会贴表格、代码、路径）；
                     tool / system 行还是原文，终端输出里的符号不能被当成格式 */}
                 {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} lenient={session.agent === "codex"} onFile={openFile} /> : m.text}
+                {count > 1 && <span className="msg-repeat" title={`同一条连续出现了 ${count} 次（旧版本重复记录），已折叠`}>×{count}</span>}
                 {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
@@ -684,10 +710,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                       项目经理看过了：{a.decisionReason}。需要你来定。
                     </p>
                   )}
+                  {a.canAllow === false && <p className="hint">远程只能拒绝；要远程允许请在电脑端设置里打开</p>}
                   <div className="btns">
-                    <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
-                      {deciding === a.id ? "处理中…" : "允许"}
-                    </button>
+                    {a.canAllow !== false && (
+                      <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
+                        {deciding === a.id ? "处理中…" : "允许"}
+                      </button>
+                    )}
                     <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
                       {deciding === a.id ? "处理中…" : "拒绝"}
                     </button>
@@ -754,6 +783,10 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       )}
       {/* 只读 agent（豆包 / WorkBuddy）没有发送能力，底部的输入框整块不放出来 */}
       {!spawnOpen && !isListenOnly(session.agent) && <footer className="composer">
+        {/* AgentHub 自己在跑这条会话时锁是自己握的，不算「被占用」 */}
+        {!active && threadState === "occupied" && (
+          <p className="hint lock-warn">⚠️ 这个会话正被另一个 Codex 客户端占用（Codex 桌面应用 / IDE / 终端），现在发消息会被拒绝——请先在那边停止或关闭这个会话。</p>
+        )}
         {reason && <p className="hint">{reason}</p>}
         {images.length > 0 && (
           <div className="composer-images">

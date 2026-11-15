@@ -7,6 +7,7 @@ import {
   type ModelOption,
 } from "./lib/agent-models";
 import { isDesktop } from "./lib/platform";
+import { effortOptions, joinModel, splitModelEffort } from "./lib/efforts";
 
 const CUSTOM = "__custom__";
 
@@ -27,7 +28,7 @@ function optionText(o: ModelOption): string {
  */
 export default function ModelPicker({
   agent,
-  value,
+  value: raw,
   disabled,
   onChange,
 }: {
@@ -36,6 +37,28 @@ export default function ModelPicker({
   disabled?: boolean;
   onChange(model: string): void;
 }) {
+  // model 字符串里带着思考强度：`<模型id>@<强度>`，这里拆开分别编辑，保存时拼回
+  const { model: value, effort } = splitModelEffort(raw);
+  const efforts = effortOptions(agent, value);
+  const setModel = (m: string) => {
+    const keep = effort && effortOptions(agent, m).some(o => o.value === effort) ? effort : "";
+    onChange(joinModel(m, keep));
+  };
+  const effortSelect = (efforts.length > 0 || !!effort) && (
+    <select
+      className="effort-select"
+      value={effort}
+      disabled={disabled}
+      title="思考强度"
+      aria-label="思考强度"
+      onChange={e => onChange(joinModel(value, e.target.value))}>
+      <option value="">思考强度：默认</option>
+      {efforts.map(o => (
+        <option key={o.value} value={o.value}>思考强度：{o.label}</option>
+      ))}
+      {effort && !efforts.some(o => o.value === effort) && <option value={effort}>思考强度：{effort}（当前值）</option>}
+    </select>
+  );
   const hints = modelHints(agent);
   const listable = isDesktop && CAN_LIST_MODELS.has(agent);
   const [list, setList] = useState<ModelList | null>(null);
@@ -80,11 +103,12 @@ export default function ModelPicker({
           disabled={disabled}
           autoFocus
           placeholder="模型 id，例如 opus / gpt-6.1-sol"
-          onChange={e => onChange(e.target.value)}
+          onChange={e => setModel(e.target.value)}
         />
-        <button type="button" className="ghost" disabled={disabled} onClick={() => { setCustom(false); onChange(""); }}>
+        <button type="button" className="ghost" disabled={disabled} onClick={() => { setCustom(false); setModel(""); }}>
           选回列表
         </button>
+        {effortSelect}
       </span>
     );
   }
@@ -97,7 +121,7 @@ export default function ModelPicker({
         title={list?.detail}
         onChange={e => {
           if (e.target.value === CUSTOM) { setCustom(true); return; }
-          onChange(e.target.value);
+          setModel(e.target.value);
         }}>
         <option value="">
           {autoModelRange(agent).length ? "默认（留空 = 派活时由项目经理挑）" : "默认（留空 = 执行端自己决定）"}
@@ -120,6 +144,7 @@ export default function ModelPicker({
           {loading ? "读取中…" : error ? "重试" : "刷新"}
         </button>
       )}
+      {effortSelect}
       {error && <span className="model-error">清单读取失败</span>}
     </span>
   );

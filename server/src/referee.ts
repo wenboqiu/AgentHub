@@ -294,12 +294,18 @@ function argsOf(seg: string): string[] {
   return toks.slice(i).map(t => t.replace(/^["']|["']$/g, ''))
 }
 
-/** 段里的输出重定向目标（`> a`、`>> a`、`2> a`） */
+/** 丢弃输出的特殊设备：写进去等于没写，不算「输出到项目外」 */
+const NULL_SINKS = new Set(['/dev/null', 'nul', '$null'])
+
+/** 段里的输出重定向目标（`> a`、`>> a`、`2> a`）；`2>&1` 和丢弃输出（`/dev/null`、`NUL`）不算 */
 function redirectTargets(seg: string): string[] {
   const out: string[] = []
   const re = /\d?>>?\s*([^\s;&|]+)/g
   let m: RegExpExecArray | null
-  while ((m = re.exec(seg))) if (m[1] && !m[1].startsWith('&')) out.push(m[1])
+  while ((m = re.exec(seg))) {
+    const t = m[1]?.replace(/^["']|["']$/g, '')
+    if (t && !t.startsWith('&') && !NULL_SINKS.has(t.toLowerCase())) out.push(m[1])
+  }
   return out
 }
 
@@ -338,6 +344,24 @@ export function toolKind(tool: string): ToolKind {
   if (HARMLESS_TOOLS.has(t)) return 'harmless'
   // MCP 工具能做任何事，不代批
   return 'unknown'
+}
+
+/**
+ * 命令类审批的命令原文：Claude / Codex 的 detail 就是命令；ZCode 送来的是整份工具入参 JSON
+ * （`{"command":"…","description":"…"}`），不取出来就会把 `{"command":"cd` 当成第一个词，一律判「看不懂」。
+ * 只认对象里的字符串 command / cmd；数组（Codex 偶尔把 argv 拆开传）不拼接，原样交给后面判，宁可多问。
+ */
+export function commandText(detail: string): string {
+  const text = detail.trim()
+  if (!text.startsWith('{')) return detail
+  try {
+    const v = JSON.parse(text) as Record<string, unknown>
+    for (const k of ['command', 'cmd']) if (typeof v[k] === 'string' && (v[k] as string).trim()) return v[k] as string
+    if (v.input && typeof v.input === 'object') return commandText(JSON.stringify(v.input))
+  } catch {
+    // 不是 JSON：原样判
+  }
+  return detail
 }
 
 /** 从 detail 里捞出路径：Claude 的 Write 是「路径\n内容」，Codex 是每行一个文件，ZCode 是 JSON */
@@ -641,7 +665,7 @@ export function judgeApproval(input: {
   if (kind === 'ask') return unsure('ask', 'agent 在向你提问，需要人来定')
   if (kind === 'harmless') return allow('harmless', '内部状态操作')
 
-  if (kind === 'command') return judgeCommand(detail, cwd, policy, grants)
+  if (kind === 'command') return judgeCommand(commandText(detail), cwd, policy, grants)
 
   if (kind === 'write') {
     const paths = detailPaths(tool, detail)

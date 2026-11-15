@@ -58,7 +58,7 @@ export default function ProposalView({ sessionId, session, proposals, api, roles
             {sorted.map((p) => (
               <ProposalCard key={p.id} api={api} proposal={p} roles={roles} projects={projects}
                 autoDispatch={autoDispatch} busy={busy} onBusy={setBusy}
-                onError={setErr} onChanged={onChanged} onTask={onTask} />
+                onError={setErr} onChanged={onChanged} onTask={onTask} onOpenSession={onSession} />
             ))}
           </section>
         )}

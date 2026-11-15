@@ -38,6 +38,8 @@ export type EventIn = {
   summary?: string
   pid?: number | null
   quiet?: boolean
+  /** 主对话这一轮结束但还有几个后台子代理没回报；只对 running 有意义 */
+  bgTasks?: number
   /** 只听不聊的 agent（WorkBuddy）从 transcript 报过来的活动桶，落 session_activity 供日历画跨度 */
   buckets?: { at: string; count: number }[]
   /**
@@ -60,6 +62,8 @@ export type Session = {
   stateSince: string
   acked: boolean
   pid: number | null
+  /** running 时还有几个后台子代理没回报，其余状态恒为 0 */
+  bgTasks: number
   eventAt: string
   updatedAt: string
 }
@@ -128,6 +132,7 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     primary key (user_id, id)
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(user_id, updated_at DESC)')
+  await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bg_tasks integer NOT NULL DEFAULT 0')
   await pool.query(`CREATE TABLE IF NOT EXISTS runs (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -203,6 +208,8 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     decided_at timestamptz
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(user_id, session_id, status)')
+  // Claude 终端会话的 hook 审批：电脑端设置里没开「远程允许」时只能拒绝
+  await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS can_allow boolean NOT NULL DEFAULT true')
 }
 
 // 多个进程同时启动（或测试并行）时，CREATE TABLE IF NOT EXISTS 会互相撞，用 advisory lock 串行
@@ -259,6 +266,7 @@ type Row = {
   state_since: Date
   acked: boolean
   pid: number | null
+  bg_tasks: number
   event_at: Date
   updated_at: Date
 }
@@ -276,6 +284,7 @@ function toSession(r: Row): Session {
     stateSince: r.state_since.toISOString(),
     acked: r.acked,
     pid: r.pid,
+    bgTasks: r.bg_tasks ?? 0,
     eventAt: r.event_at.toISOString(),
     updatedAt: r.updated_at.toISOString(),
   }
@@ -332,14 +341,15 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
     : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
+  const bgTasks = ev.state === 'running' && Number.isFinite(ev.bgTasks) ? Math.max(0, Math.min(99, Math.trunc(ev.bgTasks ?? 0))) : 0
   const row = (
     await pool.query<Row>(
-      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
-       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at, bg_tasks)
+       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), $14)
        ON CONFLICT (user_id, id) DO UPDATE SET machine=$3, cwd=$4, project=$5, title=$6, state=$7, summary=$8,
-         state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now()
+         state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now(), bg_tasks=$14
        RETURNING *`,
-      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId],
+      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId, bgTasks],
     )
   ).rows[0]
   // 活动桶随事件顺路上报（WorkBuddy 只读 transcript，没有消息同步）：已有真实消息的桶以更大者为准，不被覆盖
@@ -436,9 +446,10 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
       out = (await client.query<Row>('UPDATE sessions SET id = $3, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING *', [userId, from, to])).rows[0]
     } else {
       out = real
-      // 真实行多半是 hook / 轮询抢先上报的，标题来自 transcript 首条消息（内部会话就是契约提示词原文）。
-      // 临时行上的标题才是服务端特意起的名字，这种情况下让它赢；真实行本来没标题时也照旧沿用。
-      const keepPending = !!pending.title && (isInternalTitle(pending.title) || !real.title)
+      // 真实行多半是 hook / 轮询抢先上报的，标题来自 transcript 首条消息：派任务时那是任务说明原文，
+      // 内部会话是契约提示词原文。临时行上的标题才是服务端特意起的名字（任务标题 / 新开时正文开头），一律让它赢。
+      // 说明原文当标题的后果：任务单说明里引用会话标题，一轮套一层「来源会话：来源会话：…」。
+      const keepPending = !!pending.title
       if (keepPending && real.title !== pending.title) {
         out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
       }
@@ -519,6 +530,8 @@ export type Approval = {
   decisionReason: string
   /** 裁决层级：pending 时是「为什么轮不到规则定」，decided 时是「凭什么放的」 */
   decisionTier: string
+  /** false = 只能远程拒绝（Claude 终端 hook 审批，电脑端没开「远程允许」） */
+  canAllow: boolean
   createdAt: string
   decidedAt: string | null
 }
@@ -536,6 +549,7 @@ type ApprovalRow = {
   decision_rule?: string | null
   decision_reason?: string | null
   decision_tier?: string | null
+  can_allow?: boolean | null
   created_at: Date
   decided_at: Date | null
 }
@@ -576,6 +590,7 @@ const toApproval = (r: ApprovalRow): Approval => ({
   decisionRule: r.decision_rule ?? '',
   decisionReason: r.decision_reason ?? '',
   decisionTier: r.decision_tier ?? '',
+  canAllow: r.can_allow !== false,
   createdAt: r.created_at.toISOString(),
   decidedAt: r.decided_at ? r.decided_at.toISOString() : null,
 })
@@ -594,6 +609,13 @@ export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id
     [id, sessionId, machine, userId, taskId, model.model ?? null, (model.note ?? '').slice(0, 500)],
   )
   return toRun(r.rows[0])
+}
+
+/** 追问沿用这条会话上一轮实际用的模型（含思考强度）：执行端每轮都是新进程，不带 model 就会落回写死的默认模型 */
+export async function lastRunModel(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string): Promise<RunModel> {
+  const r = await pool.query<{ model: string }>("SELECT model FROM runs WHERE user_id = $1 AND session_id = $2 AND model IS NOT NULL AND model <> '' ORDER BY created_at DESC LIMIT 1", [userId, sessionId])
+  const model = r.rows[0]?.model
+  return model ? { model, note: '沿用会话上一轮的模型' } : {}
 }
 
 // 任务手动计时：不依赖任何会话的执行记录；标题做快照，任务删掉也还能看懂
@@ -957,11 +979,11 @@ export async function listMessages(pool: pg.Pool, userId: number, sessionId: str
   return r.rows.map(toMessage)
 }
 
-export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string): Promise<Approval> {
+export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string, canAllow = true): Promise<Approval> {
   // userInput 的 detail 是 questions 的 JSON，放宽上限才能让 UI 渲染完整选项
   const r = await pool.query<ApprovalRow>(
-    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status) VALUES ($1,$6,$2,$3,$4,$5,'pending') RETURNING *",
-    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId],
+    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status, can_allow) VALUES ($1,$6,$2,$3,$4,$5,'pending',$7) RETURNING *",
+    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId, canAllow],
   )
   return toApproval(r.rows[0])
 }
@@ -1005,6 +1027,15 @@ export async function reopenApproval(pool: pg.Pool, userId: number, id: string):
 export async function expireApprovalsOfRuns(pool: pg.Pool, userId: number, runIds: string[]): Promise<Approval[]> {
   if (!runIds.length) return []
   const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = 'expired', decided_at = now() WHERE user_id = $2 AND run_id = ANY($1) AND status = 'pending' RETURNING *", [runIds, userId])
+  return r.rows.map(toApproval)
+}
+
+/** 电脑端断开：它名下 Claude 终端会话（run_id 以 hook: 开头）的 pending 审批全部过期 */
+export async function expireHookApprovalsOfMachine(pool: pg.Pool, userId: number, machine: string): Promise<Approval[]> {
+  const r = await pool.query<ApprovalRow>(
+    "UPDATE approvals a SET status = 'expired', decided_at = now() FROM sessions s WHERE a.user_id = $1 AND a.run_id LIKE 'hook:%' AND a.status = 'pending' AND s.user_id = a.user_id AND s.id = a.session_id AND s.machine = $2 RETURNING a.*",
+    [userId, machine],
+  )
   return r.rows.map(toApproval)
 }
 

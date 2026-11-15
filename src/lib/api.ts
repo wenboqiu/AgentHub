@@ -120,11 +120,12 @@ export type AttachmentInput = { kind: "image" | "file"; name: string; mime: stri
 export type BriefEntry = { id: number; text: string; taskId: number | null; at: string };
 /** 验收检查项：来自任务清单（或人工添加），可判通过/打回，打回原因沉淀为标准 */
 export type ReviewItem = { id: number; key: string; title: string; status: "pending" | "pass" | "fail"; note: string; manual: boolean; updatedAt: string };
-export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] };
+export type Decision = { text: string; reason: string; reversible: "easy" | "hard" | "unknown"; at: string };
+export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[]; decisions?: Decision[] };
 
 /** 处理意见：会话跑完后攒出来的「接下来做什么」，确认后才变成任务 */
 /** ticket = 人直接发的粗单：没有会话，项目经理细化后由人确认才派发 */
-export type ProposalKind = "continue" | "followup" | "fix" | "ticket";
+export type ProposalKind = "continue" | "followup" | "fix" | "ticket" | "decide";
 /** 项目经理排好的执行人：角色是人，配置是地方（执行工具 + 电脑 + 目录） */
 /**
  * 开跑方式：fork = 接着原会话的上下文另起一个会话，fresh = 新建会话从这个任务开始，
@@ -246,6 +247,8 @@ export type Session = {
   stateSince: string;
   acked: boolean;
   pid: number | null;
+  /** running 时还有几个后台子代理没回报（旧服务端没有该字段） */
+  bgTasks?: number;
   eventAt: string;
   updatedAt: string;
 };
@@ -300,6 +303,8 @@ export type Approval = {
   decisionReason: string;
   /** 裁决层级：danger 硬红线 / gray 看上下文 / unknown 规则看不懂 */
   decisionTier: string;
+  /** false = 只能远程拒绝（Claude 终端权限确认，电脑端没开「远程允许」） */
+  canAllow?: boolean;
   createdAt: string;
   decidedAt: string | null;
   project?: string;

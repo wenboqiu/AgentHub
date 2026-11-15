@@ -687,3 +687,17 @@ AgentHub 的角色页要给出模型下拉，这里的结论是「静态解析�
 ### 15.3 AgentHub 的做法
 
 `src-tauri/src/agent_models.rs::zcode` 直接读安装包的 `builtinProviderModelRules`，按 `modelId` 去重给出 4 个模型（毫秒级、不需要登录、不消耗额度）；角色里仍然可以手填 `providerId/modelId` 覆盖默认 provider。若将来 CLI 版本把账号可用集暴露出来（例如 `provider/*` 多一个读取方法），再回来把这里换成动态读取即可，接口形状见 `ModelList`。
+
+### 15.4 思考强度（角色 / 派活的 model 字符串）
+
+强度编码在 model 字符串里：`<模型id>@<强度>`，模型 id 可为空（`@high` = 执行端默认模型 + 指定强度）；在**最后一个** `@` 处切，不新增数据库列和消息字段。执行端（`runner.rs`）按 agent 翻译，取值走白名单，不在表里的一律忽略并用默认，不报错：
+
+| agent | 取值 | 翻译成 |
+|---|---|---|
+| Claude | `low` `medium` `high` `xhigh` `max` | `--model <m> --effort <e>` |
+| Codex | `low` `medium` `high` `xhigh` `max`（`ultra` 不提供） | `-c model="<m>" -c model_reasoning_effort="<e>"` |
+| ZCode | `disabled` `enabled` `low` `high` `max` | `session/send` 的 `modelSelection.options.reasoningLevel` |
+| WorkBuddy / CodeBuddy / 豆包 | 不支持 | 只取 model 部分，`@强度` 被剥掉 |
+
+ZCode 不指定强度时取模型默认：`GLM-5-Turbo`（大小写不敏感）为 `enabled`，其余为 `high`（以前写死 `high`，对 Turbo 不合法）。前端静态表（`src/lib/efforts.ts`）：`GLM-5.2` 给 `disabled/high/max`，`GLM-5-Turbo` 给 `disabled/enabled`，其它（含 5.3 系列）只给 `high`。**GLM-5.3 能否用 `max` / `low` 未实测。**
+

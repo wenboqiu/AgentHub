@@ -4,6 +4,7 @@
 //! 用同步 tungstenite：socket 设短读超时，同一个循环里交替读和发。
 
 use crate::config::{SharedConfig, TokenBlock, AUTH_EXPIRED};
+use crate::hook_approval::SharedBridge;
 use crate::runner::Runner;
 use serde::Serialize;
 use serde_json::Value;
@@ -149,7 +150,7 @@ impl From<String> for Fail {
 }
 
 /// 一次连接的完整生命周期；返回值是结束原因（Ok = 配置变化主动断开）
-fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result<(), Fail> {
+fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus, bridge: &SharedBridge) -> Result<(), Fail> {
     // 能力只在连上的那一刻探一次：PATH 扫盘，别放进等消息的热循环里
     let agents = installed_agents();
     let url = build_url(snap, &agents)?;
@@ -161,6 +162,8 @@ fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result
     let (out_tx, out_rx) = mpsc::channel::<Value>();
     // 没开远程执行时用来回「派错了」的失败状态，走同一条发送队列
     let out_tx_off = out_tx.clone();
+    // Claude 终端权限确认走这条连接发给服务端（exec=off 也算：它和「远程执行」是两回事）
+    bridge.set_out(Some(out_tx.clone()));
     let runner = Runner::new(out_tx, cfg.clone());
     // 设置页的「远程执行已连接」只说能接活的那条；exec=off 连着不算
     if snap.exec {
@@ -185,6 +188,20 @@ fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result
         }
         match ws.read() {
             Ok(Message::Text(t)) => {
+                // Claude 终端权限确认的回包不经 runner，也不受「远程执行」开关影响
+                if let Ok(v) = serde_json::from_str::<Value>(t.as_str()) {
+                    match v.get("type").and_then(Value::as_str) {
+                        Some("hook.approval.created") => {
+                            bridge.on_created(&v);
+                            continue;
+                        }
+                        Some("hook.approval.decide") => {
+                            bridge.on_decide(&v);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 // 没开远程执行：新服务端不会派东西过来；老服务端不认 exec=off，可能照样派——
                 // 一律不执行，派来的运行直接回失败，别让任务挂在「运行中」
                 if !snap.exec {
@@ -220,14 +237,15 @@ fn session(cfg: &SharedConfig, snap: &Snapshot, status: &RemoteStatus) -> Result
             }
         }
     };
-    // 断线：结束所有运行（服务端会把它们标成 failed）
+    // 断线：在等审批的 hook 立即放弃（无输出，终端弹原生确认框）；结束所有运行（服务端会把它们标成 failed）
+    bridge.set_out(None);
     runner.shutdown();
     let _ = ws.close(None);
     let _ = ws.flush();
     result
 }
 
-pub fn spawn(cfg: SharedConfig) -> RemoteStatus {
+pub fn spawn(cfg: SharedConfig, bridge: SharedBridge) -> RemoteStatus {
     let status: RemoteStatus = Arc::new(Mutex::new(Status::default()));
     let st = status.clone();
     std::thread::spawn(move || {
@@ -247,7 +265,7 @@ pub fn spawn(cfg: SharedConfig) -> RemoteStatus {
                 continue;
             }
             let was_connected;
-            let res = session(&cfg, &snap, &st);
+            let res = session(&cfg, &snap, &st, &bridge);
             {
                 let mut s = st.lock().unwrap();
                 was_connected = s.connected;

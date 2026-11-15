@@ -16,8 +16,14 @@ export function QuickCreate({ placeholder, create, children }: {placeholder: str
     <label className="sr-only" htmlFor={`quick-${placeholder}`}>{placeholder}</label><input id={`quick-${placeholder}`} placeholder={placeholder} maxLength={200} value={title} onChange={e=>setTitle(e.target.value)} disabled={busy}/>{children}<button className="primary" disabled={busy || !title.trim()}><Icon name="plus"/>{busy ? "创建中…" : "新建"}</button>{error && <p className="form-error" role="alert">{error}</p>}
   </form>;
 }
+/** 未完成且已过期 → due-over；24 小时内到期 → due-soon（任务行换底色提醒） */
+export function dueTone(t: Pick<Task, "dueAt" | "status">, now = Date.now()): "" | "due-soon" | "due-over" {
+  if (!t.dueAt || t.status === "done") return "";
+  const left = Date.parse(t.dueAt) - now;
+  return Number.isNaN(left) ? "" : left < 0 ? "due-over" : left <= 24 * 3600_000 ? "due-soon" : "";
+}
 export function TaskRows({tasks,goals,onOpen}: {tasks: Task[]; goals: Goal[]; onOpen(id:number): void}) {
-  return <ul className="list">{tasks.map(t=><li key={t.id}><button className="entity-row" onClick={()=>onOpen(t.id)}><span className="entity-main"><span className="entity-title"><span className="task-no">#{t.id}</span><strong>{t.title}</strong><PriorityBadge priority={t.priority}/></span><span className="dim">{goals.find(g=>g.id===t.goalId)?.title ?? "无目标"}{t.sessionIds.length > 0 ? ` · ${t.sessionIds.length} 个会话` : ""}{t.agent ? ` · ${AGENT_LABEL[t.agent] ?? t.agent}` : ""}</span><ScheduleSummary value={t}/>{t.checklist?.length > 0 && <span className="dim">Checklist {t.checklist.filter(i=>i.done).length}/{t.checklist.length}</span>}</span>{t.timerStartedAt && <span className="timer-badge">计时中</span>}<span className={`task-status ${t.status}`}>{TASK_LABEL[t.status]}</span></button></li>)}</ul>;
+  return <ul className="list">{tasks.map(t=><li key={t.id}><button className={`entity-row ${dueTone(t)}`} onClick={()=>onOpen(t.id)}><span className="entity-main"><span className="entity-title"><span className="task-no">#{t.id}</span><strong>{t.title}</strong><PriorityBadge priority={t.priority}/></span><span className="dim">{goals.find(g=>g.id===t.goalId)?.title ?? "无目标"}{t.sessionIds.length > 0 ? ` · ${t.sessionIds.length} 个会话` : ""}{t.agent ? ` · ${AGENT_LABEL[t.agent] ?? t.agent}` : ""}</span><ScheduleSummary value={t}/>{t.checklist?.length > 0 && <span className="dim">Checklist {t.checklist.filter(i=>i.done).length}/{t.checklist.length}</span>}</span>{t.timerStartedAt && <span className="timer-badge">计时中</span>}<span className={`task-status ${t.status}`}>{TASK_LABEL[t.status]}</span></button></li>)}</ul>;
 }
 
 // 任务页 = 收件箱（等你处理）+ 在跑 + 待办 + 已完成。原来的「看板」并进来：
@@ -139,13 +145,13 @@ export default function TasksPanel({
         <span className="kind-chip k-approve">待授权</span>
         <div className="inbox-main">
           <strong className="inbox-title">{task && <span className="task-no">#{task.id} </span>}{title}</strong>
-          <span className="dim inbox-sub"><code>{a.tool}</code> {isQuestion ? "它在问你问题" : clip(a.detail, 120)}{a.decisionReason ? ` · ${a.decisionReason}` : ""}</span>
+          <span className="dim inbox-sub"><code>{a.tool}</code> {isQuestion ? "它在问你问题" : clip(a.detail, 120)}{a.decisionReason ? ` · ${a.decisionReason}` : ""}{a.canAllow === false ? " · 远程只能拒绝；要远程允许请在电脑端设置里打开" : ""}</span>
         </div>
         <div className="inbox-actions">
           {isQuestion
             ? <button className="primary" onClick={() => onOpenSession(a.sessionId)}>去回答</button>
             : <>
-              <button className="primary" disabled={busy} onClick={() => void decide(a, "allow")}>允许</button>
+              {a.canAllow !== false && <button className="primary" disabled={busy} onClick={() => void decide(a, "allow")}>允许</button>}
               <button disabled={busy} onClick={() => void decide(a, "deny")}>拒绝</button>
               <button className="ghost" onClick={() => onOpenSession(a.sessionId)}>打开会话</button>
             </>}
@@ -210,6 +216,7 @@ export default function TasksPanel({
           onProposal(next);
         }}
         onTask={() => { onNotice("任务单已确认，任务建好了"); onRefresh(); }}
+        onOpenSession={onOpenSession}
       />
     );
     if (p.status !== "pending" || p.stage === "suggest") return <li key={`p${p.id}`} className="inbox-card">{card}</li>;

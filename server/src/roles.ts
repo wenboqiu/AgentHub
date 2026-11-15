@@ -22,7 +22,7 @@ export type Role = {
 }
 
 const AGENTS: Agent[] = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy']
-const MAX_MODEL = 120
+const MAX_MODEL = 130 // 模型 id 上限 120，再留 `@xxxxxx` 的强度后缀
 const MAX_CONTEXT = 4000
 const MAX_TITLE = 120
 const MAX_TOOLS = 30

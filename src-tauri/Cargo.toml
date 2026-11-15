@@ -1,6 +1,6 @@
 [package]
 name = "agenthub"
-version = "0.15.0"
+version = "0.16.0"
 description = "Claude Code / Codex 会话状态集中监控"
 authors = ["wenbo"]
 edition = "2021"
@@ -50,6 +50,10 @@ windows = { version = "0.61", features = [
   "Win32_System_Variant",
   "Win32_UI_Accessibility",
 ] }
+
+# 探测 Codex 的 thread writer 锁（~/.codex/thread-writer-locks 上的 flock）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1

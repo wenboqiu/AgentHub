@@ -335,6 +335,10 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
           ? <a href={`https://${e.value}`} target="_blank" rel="noopener noreferrer"><code>{e.value}</code></a>
           : <button type="button" className="md-file" title="预览文件" onClick={() => openFile(e.value)}><code>{e.value}</code></button>}</li>)}</ul>)}
       </div>}
+      {(review?.decisions?.length ?? 0) > 0 && <div className="decisions">
+        <span className="dim">它自己拍板的 {review!.decisions!.length} 个决定（难逆的在前）</span>
+        <ul>{review!.decisions!.map((d, i) => <li key={i} className={`decision ${d.reversible}`}><strong>{d.text}</strong>{d.reason && <span className="dim"> · {d.reason}</span>}{d.reversible === "hard" && <span className="badge">难逆</span>}</li>)}</ul>
+      </div>}
       <ul className="review-list">
         {reviewItems.map(it => (
           <li key={it.id} className={`review-item ${it.status}`}>
@@ -382,11 +386,12 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
         return <div key={a.id} className="approval-block">
           <p><code>{a.tool}</code> {isQuestion ? "它在问你问题" : a.detail.slice(0, 300)}{!isQuestion && a.detail.length > 300 ? "…" : ""}</p>
           <p className="dim">{[APPROVAL_TIER_LABEL[a.decisionTier], a.decisionReason].filter(Boolean).join(" · ")}</p>
+          {a.canAllow === false && <p className="hint">远程只能拒绝；要远程允许请在电脑端设置里打开</p>}
           <div className="action-bar status-actions">
             {isQuestion
               ? <button className="primary" onClick={() => onSession(a.sessionId)}>去回答</button>
               : <>
-                <button className="primary" disabled={busy} onClick={() => decideApproval(a, "allow")}>允许这一次</button>
+                {a.canAllow !== false && <button className="primary" disabled={busy} onClick={() => decideApproval(a, "allow")}>允许这一次</button>}
                 <button disabled={busy} onClick={() => decideApproval(a, "deny")}>拒绝</button>
                 <button className="ghost" onClick={() => onSession(a.sessionId)}>打开会话</button>
               </>}

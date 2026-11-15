@@ -29,6 +29,10 @@ pub struct Config {
     /// ZCode 权限请求的自动放行档位：off = 每条都弹审批卡；low = 只放行 low；
     /// medium = low 与 medium 都放行。high / critical 永远弹卡，riskLevel 缺失也不放。
     pub zcode_auto_approve: String,
+    /// 在客户端处理 Claude 终端会话的权限确认：开了才会阻塞等待并生成审批卡。默认关
+    pub hook_remote_approve: bool,
+    /// 允许在客户端远程「允许」；关着只能远程「拒绝」。默认关
+    pub hook_remote_allow: bool,
 }
 
 impl Default for Config {
@@ -44,6 +48,8 @@ impl Default for Config {
             remote_default_migrated: true,
             graph_mode: true,
             zcode_auto_approve: "low".into(),
+            hook_remote_approve: false,
+            hook_remote_allow: false,
         }
     }
 }
@@ -177,6 +183,8 @@ mod tests {
             remote_default_migrated: true,
             graph_mode: true,
             zcode_auto_approve: "medium".into(),
+            hook_remote_approve: true,
+            hook_remote_allow: true,
         };
         save(&p, &c).unwrap();
         assert_eq!(load(&p), c);
@@ -189,6 +197,7 @@ mod tests {
         // 气泡图是默认展示方式：老配置里没有 graphMode 时按 true 读
         assert!(d.graph_mode);
         assert_eq!(d.zcode_auto_approve, "low", "老配置里没有这个键时按 low 读");
+        assert!(!d.hook_remote_approve && !d.hook_remote_allow, "Claude 终端远程审批默认关");
         assert!(d.denied_roots.is_empty() && d.email.is_empty());
         // 旧配置的 allowedRoots（白名单）不会被当成黑名单读进来，避免升级后把工作目录封死
         std::fs::write(&p, r#"{"serverUrl":"http://w","allowedRoots":["D:/Work2"]}"#).unwrap();

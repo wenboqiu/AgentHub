@@ -1,3 +1,4 @@
+import ErrorBoundary from "./ErrorBoundary";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Api, AUTH_EXPIRED_TEXT, connect, isPending, type Approval, type ConnState, type Session, type Goal, type Task, type Reminder, type TaskDigests, type TaskArtifact, type BoardEntry, type Proposal, type DispatchManager, type Project, type Role } from "./lib/api";
@@ -504,6 +505,7 @@ export default function App() {
 
   if (openId && api) {
     return (
+      <ErrorBoundary label="会话" resetKey={openId} onBack={closeSession}>
       <SessionView
         sessionId={openId}
         session={sessions.get(openId)}
@@ -524,6 +526,7 @@ export default function App() {
         onProposals={openProposals}
         onAck={() => void ack(openId)}
       />
+      </ErrorBoundary>
     );
   }
   if (detail && api) {

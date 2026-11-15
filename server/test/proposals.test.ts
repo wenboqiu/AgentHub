@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { assigneeOf, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, proposalPatch, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
+import { assigneeOf, decisionAsk, fallbackSubject, forkInfo, heuristicDraft, nextStepLine, parseRefine, planDelivery, proposalPatch, sessionKeyOf, ticketMessage, toChecklist } from '../src/proposals.ts'
 import { DEFAULT_MANAGER, pickCandidates, quota } from '../src/dispatch-manager.ts'
 import type { Task } from '../src/tasks.ts'
 
@@ -56,6 +56,47 @@ test('明确说了下一步：用它当标题', () => {
   assert.ok(d)
   assert.equal(d.kind, 'followup')
   assert.equal(d.title, '下一步：把刷新逻辑也补上')
+})
+
+test('兜底标题：取回复的小标题，不拿上一张单子的说明当会话名', () => {
+  const noisy = { ...session, title: '来源会话：验收一下视频代码改动（claude · HomeMedia） 会话结尾： ## 需要你定夺 **`server/src/routes/upload.t' }
+  const withHead = heuristicDraft({ session: noisy, task: null, lastReply: '看过了。\n\n## 上传接口验收结论\n分片逻辑没问题，大文件超时仍在复现，断点续传的进度条偶尔回退，日志里没有报错。', evidence: [] })
+  assert.equal(withHead?.title, '跟进：上传接口验收结论')
+  // 回复里没有像样的一行：退回会话名，且只取「来源会话：」后面那段
+  assert.equal(fallbackSubject('', noisy.title), '验收一下视频代码改动')
+  // 太长截断时带省略号
+  assert.ok(fallbackSubject('x'.repeat(100), '').endsWith('…'))
+})
+
+test('挂了任务的会话：没有明确下一步就不出「跟进」，说明里引任务编号而不是会话标题', () => {
+  const reply = 'upload.ts 的改动核对过了，和上一会话的描述一致，服务端 tsc --noEmit 复跑通过。我没跑接口测试，也没提交。'
+  assert.equal(heuristicDraft({ session, task: mockTask({ id: 36 }), lastReply: reply, evidence: [] }), null)
+  // 有失败信号照样出「先修」，出处是任务
+  const fix = heuristicDraft({ session: { ...session, title: '来源会话：一大段说明' }, task: mockTask({ id: 36 }), lastReply: reply,
+    evidence: [{ kind: 'test', label: '测试结果', value: '1 failed', at: null }] })
+  assert.ok(fix?.notes.startsWith('来源：任务 #36「修登录超时」'))
+  assert.ok(!fix?.notes.includes('来源会话'))
+})
+
+test('等人拍板：小标题下一句问题 / 一行写完都认，否定句不认', () => {
+  const reply = [
+    '改动都看过了。', '',
+    '## 需要你定夺', '**`server/src/routes/upload.ts` 的上传没有校验私人库。**',
+    '- 现在只要求目标库 kind=video，没检查 is_private。', '- 要不要补上校验？', '',
+    '## 其他', '字段顺序注释不准，顺手可以改。',
+  ].join('\n')
+  const ask = decisionAsk(reply)
+  assert.equal(ask?.question, 'server/src/routes/upload.ts 的上传没有校验私人库。')
+  assert.ok(ask?.section.includes('要不要补上校验'))
+  assert.ok(!ask?.section.includes('字段顺序'))
+  assert.equal(decisionAsk('都改好了。\n需要你决定：私人库要不要允许直接上传？')?.question, '私人库要不要允许直接上传？')
+  assert.equal(decisionAsk('都改好了，这次不需要你确认任何东西。'), null)
+
+  const d = heuristicDraft({ session, task: mockTask({ checklist: [{ id: 'a', text: '补迁移', done: false }] }), lastReply: reply, evidence: [] })
+  // 拍板排在「接着做」前面：不拍板，后面的事都无从谈起
+  assert.equal(d?.kind, 'decide')
+  assert.equal(d?.title, '等你决定：server/src/routes/upload.ts 的上传没有校验私人库。')
+  assert.equal(d?.delivery, 'fork')
 })
 
 test('回复太短或没有产出：不出意见', () => {

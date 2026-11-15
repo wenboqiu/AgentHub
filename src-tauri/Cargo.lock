@@ -61,12 +61,13 @@ dependencies = [
 
 [[package]]
 name = "agenthub"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "ab_glyph",
  "aes-gcm",
  "base64 0.22.1",
  "chrono",
+ "libc",
  "reqwest 0.12.28",
  "rusqlite",
  "serde",

@@ -16,6 +16,10 @@ export type Config = {
   graphMode: boolean;
   /** 仅桌面：ZCode 权限请求的自动放行档位（off | low | medium） */
   zcodeAutoApprove: string;
+  /** 仅桌面：在客户端处理 Claude 终端会话的权限确认 */
+  hookRemoteApprove: boolean;
+  /** 仅桌面：允许在客户端远程「允许」（关着只能拒绝） */
+  hookRemoteAllow: boolean;
 };
 export type RemoteInfo = { connected: boolean; lastError: string | null };
 
@@ -28,6 +32,8 @@ export type DoubaoVisible = {
 };
 
 export type HooksStatus = { installed: boolean; scriptExists: boolean; settingsExists: boolean };
+/** Codex 会话的 writer 锁状态（~/.codex/thread-writer-locks 上的排他 flock） */
+export type CodexThreadState = "free" | "occupied" | "stale";
 export type CollectorInfo = {
   collectorError: string | null;
   forward: { queued: number; lastError: string | null };
@@ -59,7 +65,7 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low" };
+const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low", hookRemoteApprove: false, hookRemoteAllow: false };
 
 /**
  * 气泡图改成默认之后的一次性迁移：老配置里 graphMode 基本是「没选过」的 false，
@@ -111,6 +117,8 @@ export const desktop = {
   installHooks: () => invoke<HooksStatus>("install_claude_hooks"),
   uninstallHooks: () => invoke<HooksStatus>("uninstall_claude_hooks"),
   focus: (pid: number | null, agent: string, sessionKey?: string) => invoke<void>("focus_session", { pid, agent, sessionKey }),
+  /** Codex 会话是否被其他客户端占用（发消息前提前知道，省得白等一轮报错） */
+  codexThreadStatus: (sessionKey: string) => invoke<CodexThreadState>("codex_thread_status", { sessionKey }),
   openInTerminal: (agent: string, sessionKey: string, cwd: string) => invoke<string>("open_in_terminal", { agent, sessionKey, cwd }),
   /** 读执行端的模型清单：CodeBuddy 读本机缓存，ZCode 解析安装包内置配置 */
   agentModels: (agent: string, refresh = false) => invoke<ModelList>("agent_models", { agent, refresh }),
