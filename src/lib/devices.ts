@@ -1,4 +1,5 @@
 import type { Machine } from "./api";
+import { AGENT_LABEL, isListenOnly } from "./agents.ts";
 
 /**
  * 设备总览：把 /machines 的清单按「能不能接活」分组。
@@ -51,6 +52,13 @@ export function groupDevices(machines: Machine[]): DeviceGroup[] {
 }
 
 export type DeviceSummary = Record<MachineState, number>;
+
+/** 设备页一行里的工具标签：只监听的（WorkBuddy / 豆包）单独标出来，别让人以为能派活 */
+export type DeviceTool = { agent: string; label: string; listenOnly: boolean };
+
+export function deviceTools(agents: string[]): DeviceTool[] {
+  return agents.map((a) => ({ agent: a, label: AGENT_LABEL[a] ?? a, listenOnly: isListenOnly(a) }));
+}
 
 export function deviceSummary(machines: Machine[]): DeviceSummary {
   const sum: DeviceSummary = { online: 0, listening: 0, offline: 0 };

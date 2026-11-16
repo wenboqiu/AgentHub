@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Api, type Machine } from "./lib/api";
-import { DEVICE_STATE_LABEL, deviceSummary, groupDevices, machineState } from "./lib/devices";
-import { AGENT_LABEL } from "./lib/agents";
+import { DEVICE_STATE_LABEL, deviceSummary, deviceTools, groupDevices, machineState } from "./lib/devices";
 import { ago, fullAt } from "./lib/time";
 
 /**
@@ -86,7 +85,9 @@ export default function Devices({ api, localMachine, onOpenAccount }: { api: Api
                         {m.at ? `最近活动 ${ago(m.at, now)}` : "没有活动记录"}
                       </span>
                       <span className="dev-tools">
-                        {m.agents.length > 0 ? m.agents.map((a) => AGENT_LABEL[a] ?? a).join(" · ") : "未上报装了哪些工具"}
+                        {m.agents.length > 0
+                          ? deviceTools(m.agents).map((t) => `${t.label}${t.listenOnly ? "（只监听）" : ""}`).join(" · ")
+                          : "未上报装了哪些工具"}
                       </span>
                     </li>
                   );

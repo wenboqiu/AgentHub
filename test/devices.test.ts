@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DEVICE_STATE_LABEL, deviceSummary, deviceSummaryText, groupDevices, machineState } from '../src/lib/devices.ts';
+import { DEVICE_STATE_LABEL, deviceSummary, deviceSummaryText, deviceTools, groupDevices, machineState } from '../src/lib/devices.ts';
 import type { Machine } from '../src/lib/api.ts';
 
 const m = (name: string, opts: Partial<Machine> = {}): Machine =>
@@ -50,4 +50,15 @@ test('汇总与一级列表文案：只列出现过的状态', () => {
 test('还没拉到 / 一台都没有时给不同的话，别显示成 0 台在线', () => {
   assert.equal(deviceSummaryText(null), '加载中…');
   assert.equal(deviceSummaryText([]), '还没有电脑上报过');
+});
+
+test('工具标签：只监听的（WorkBuddy / 豆包）单独标注，别让人以为能派活', () => {
+  assert.deepEqual(deviceTools(['claude', 'workbuddy']), [
+    { agent: 'claude', label: 'Claude', listenOnly: false },
+    { agent: 'workbuddy', label: 'WorkBuddy', listenOnly: true },
+  ]);
+  assert.deepEqual(deviceTools(['doubao']), [{ agent: 'doubao', label: '豆包', listenOnly: true }]);
+  // 没进展示名表的原样显示，按可派活处理
+  assert.deepEqual(deviceTools(['new-cli']), [{ agent: 'new-cli', label: 'new-cli', listenOnly: false }]);
+  assert.deepEqual(deviceTools([]), []);
 });

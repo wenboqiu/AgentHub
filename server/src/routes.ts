@@ -250,17 +250,23 @@ const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
 
-/** 能远程派活的工具；执行器上报的 agents 只认这几个。
+/** 能远程派活的工具；派活校验只认这几个。
  *  豆包只做监听；WorkBuddy 也只做监听——桌面端内置的 lite bundle 没有独立登录态（实测派活必报
  *  `Authentication required`），而能自己 `/login` 的那份就是 npm 完整版，也就是 codebuddy。 */
 const DISPATCH_AGENTS = ['claude', 'codex', 'zcode', 'codebuddy'] as const
 type DispatchAgent = (typeof DISPATCH_AGENTS)[number]
+/** 执行器探测后会一并上报的工具 = 可派活的四种 + 只监听的 workbuddy（豆包不探测、不上报）。
+ *  caps 里保留它，设备页才显示得出「装了 WorkBuddy（只监听）」，而不是把整台机器判成「未上报工具」；
+ *  派活校验仍只认 DISPATCH_AGENTS。 */
+const REPORTED_AGENTS: readonly string[] = [...DISPATCH_AGENTS, 'workbuddy']
+const isReportedAgent = (a: unknown): a is string =>
+  typeof a === 'string' && REPORTED_AGENTS.includes(a)
 /** 派活校验同时也是类型收窄：后面拿 agent 当强类型用 */
 const isDispatchAgent = (a: unknown): a is DispatchAgent =>
   typeof a === 'string' && (DISPATCH_AGENTS as readonly string[]).includes(a)
 /** 解析执行器上报的 agents 参数（逗号分隔）：只留认识的、去重，空 = 不知道 */
 function parseAgents(raw: string | null): string[] {
-  const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => isDispatchAgent(s))
+  const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => isReportedAgent(s))
   return [...new Set(list)]
 }
 

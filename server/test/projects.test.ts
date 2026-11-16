@@ -274,6 +274,20 @@ describe('项目：一个代码库的身份与背景知识', () => {
     const ok = await h.call('POST', `/tasks/${t2.id}/start`, {})
     assert.equal(ok.status, 200, JSON.stringify(ok.body))
   })
+  it('只监听的工具（workbuddy）也进设备清单；派活仍只认四种可派活工具', async () => {
+    const pc = `caps-wb-${stamp}`
+    await h.executor(pc, 'workbuddy')
+    const ms = (await h.call('GET', '/machines')).body.machines as { name: string; agents: string[] }[]
+    assert.deepEqual(ms.find(m => m.name === pc)?.agents, ['workbuddy'], '只监听工具也上报进清单，设备页标「WorkBuddy（只监听）」')
+
+    const p = await h.project({ name: uniq('监听项目'), dirs: [{ machine: pc, cwd: 'D:\\Work2\\Wb' }] })
+    // 历史任务可以写 workbuddy（start 时映射成 codebuddy）；这台没装完整版，明确报没装
+    const t = await h.task({ projectId: p.id, agent: 'workbuddy', machine: pc, cwd: 'D:\\Work2\\Wb' })
+    const refused = await h.call('POST', `/tasks/${t.id}/start`, {})
+    assert.equal(refused.status, 409, JSON.stringify(refused.body))
+    assert.match(String(refused.body.error), /没装 codebuddy/)
+    assert.match(String(refused.body.error), /装了 workbuddy/)
+  })
   it('电脑改名：旧名下的会话与项目目录一起挪到新名，旧名不再出现在清单里', async () => {
     const oldName = `old-pc-${stamp}`
     const newName = `new-pc-${stamp}`
