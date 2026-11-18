@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Api, type Device, type NotifyKind, type NotifySettings } from "./lib/api";
+import { Api, type Device, type Machine, type NotifyKind, type NotifySettings, type Project, type Role } from "./lib/api";
+import { deviceSummaryText } from "./lib/devices";
+import Devices from "./Devices";
 import Manager from "./Manager";
-import Roles from "./Roles";
-import Projects from "./Projects";
+import Roles, { RoleEditor } from "./Roles";
+import Projects, { ProjectEditor } from "./Projects";
 import Icon from "./Icon";
+import AvatarSettings from "./AvatarSettings";
+import AgentAvatar from "./AgentAvatar";
+import { AGENT_LABEL } from "./lib/agents";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
 
 export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
@@ -14,6 +19,7 @@ const AGENT_LABELS: { key: keyof NotifySettings["agents"]; label: string }[] = [
   { key: "doubao", label: "豆包" },
   { key: "workbuddy", label: "WorkBuddy" },
   { key: "zcode", label: "ZCode" },
+  { key: "codebuddy", label: "CodeBuddy" },
 ];
 const KIND_LABELS: { key: NotifyKind; label: string }[] = [
   { key: "done", label: "会话完成" },
@@ -41,7 +47,7 @@ const fmtTime = (iso: string) => {
 };
 
 /** 设置页的一级条目：点进去才改细节，列表上先给一句现状 */
-function SettingsRow({ icon, title, summary, badge, onClick }: { icon: Parameters<typeof Icon>[0]["name"]; title: string; summary: string; badge?: string; onClick(): void }) {
+function SettingsRow({ icon, title, summary, badge, onClick }: { icon: Parameters<typeof Icon>[0]["name"]; title: string; summary: React.ReactNode; badge?: string; onClick(): void }) {
   return (
     <li>
       <button className="settings-row" onClick={onClick}>
@@ -73,21 +79,28 @@ type Props = {
 };
 
 /** 设置子页面：一级列表里点进来改细节，返回键回到列表 */
-type Page = "root" | "account" | "notify" | "roles" | "projects" | "manager" | "desktop" | "android";
+type Page = "root" | "account" | "notify" | "roles" | "role" | "projects" | "project" | "manager" | "devices" | "desktop" | "android" | "avatars";
 
-const PAGE_TITLE: Record<Exclude<Page, "root">, string> = {
+/** role / project 页的标题跟着那一条的名字走，不在这里写死 */
+const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
   account: "账号与安全",
   notify: "通知规则",
   roles: "角色",
   projects: "项目",
   manager: "项目经理",
+  devices: "设备",
   desktop: "本机执行与采集",
   android: "Android 后台提醒",
+  avatars: "agent 头像",
 };
 
 export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) {
   const loggedIn = !!cfg.token.trim();
   const [page, setPage] = useState<Page>("root");
+  // 角色详情页的对象：{ role: null } = 新建；角色本身放在这里，标题和「保存」都要用
+  const [roleEdit, setRoleEdit] = useState<{ role: Role | null } | null>(null);
+  // 项目详情页同理：{ project: null } = 新建
+  const [projectEdit, setProjectEdit] = useState<{ project: Project | null } | null>(null);
   const [form, setForm] = useState<Config>(cfg);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
@@ -103,6 +116,8 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   const [nsMsg, setNsMsg] = useState("");
   // 一级列表上的计数（角色 / 项目各自改完后回来会变）
   const [counts, setCounts] = useState<{ roles: number; projects: number } | null>(null);
+  // 一级列表「设备」那句现状：拉不到就 null（显示加载中），不挡住其它条目
+  const [machines, setMachines] = useState<Machine[] | null>(null);
 
   // 登录表单
   const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
@@ -123,7 +138,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     try {
       await saveConfig(c);
       onSaved(c, { keepOpen: true });
-      setMsg(on ? "图模式已开启" : "已恢复卡片列表");
+      setMsg(on ? "对话页已改为气泡图" : "对话页已改为列表");
       window.setTimeout(() => setMsg(""), 2000);
     } catch (e) {
       setMsg(`保存失败：${String(e)}`);
@@ -168,9 +183,11 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   useEffect(() => {
     if (!api || page !== "root") return;
     let dead = false;
-    Promise.all([api.roles(), api.projects()]).then(
-      ([roles, projects]) => {
-        if (!dead) setCounts({ roles: roles.length, projects: projects.length });
+    Promise.all([api.roles(), api.projects(), api.machines()]).then(
+      ([roles, projects, ms]) => {
+        if (dead) return;
+        setCounts({ roles: roles.length, projects: projects.length });
+        setMachines(ms);
       },
       () => {},
     );
@@ -266,6 +283,9 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     form.machine.trim() !== cfg.machine.trim() ||
     form.notifyDesktop !== cfg.notifyDesktop ||
     form.remoteEnabled !== cfg.remoteEnabled ||
+    form.zcodeAutoApprove !== cfg.zcodeAutoApprove ||
+    form.hookRemoteApprove !== cfg.hookRemoteApprove ||
+    form.hookRemoteAllow !== cfg.hookRemoteAllow ||
     JSON.stringify(denied) !== JSON.stringify(cfg.deniedRoots ?? []);
 
   const save = async () => {
@@ -275,6 +295,9 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       machine: form.machine.trim(),
       notifyDesktop: form.notifyDesktop,
       remoteEnabled: form.remoteEnabled,
+      zcodeAutoApprove: form.zcodeAutoApprove,
+      hookRemoteApprove: form.hookRemoteApprove,
+      hookRemoteAllow: form.hookRemoteApprove && form.hookRemoteAllow,
       deniedRoots: denied,
     };
     try {
@@ -380,9 +403,28 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   ].join(" · ");
   const countText = (n: number | undefined, unit: string) => (counts ? `${n} ${unit}` : "");
 
-  // 返回固定在左边（和任务 / 会话详情页一致）：一级列表回主界面，子页面回列表
+  // 返回固定在左边（和任务 / 会话详情页一致）：角色详情回角色列表，其它子页面回一级列表，一级列表回主界面
+  const title = page === "root" ? "设置"
+    : page === "role" ? (roleEdit?.role?.name || "新建角色")
+    : page === "project" ? (projectEdit?.project?.name || "新建项目")
+    : PAGE_TITLE[page];
+  const leave = () => {
+    setMsg("");
+    if (page === "root") return onClose();
+    if (page === "role") {
+      setRoleEdit(null);
+      setPage("roles");
+      return;
+    }
+    if (page === "project") {
+      setProjectEdit(null);
+      setPage("projects");
+      return;
+    }
+    setPage("root");
+  };
   const back = (
-    <button className="back-button" onClick={() => (page === "root" ? onClose() : (setPage("root"), setMsg("")))}>
+    <button className="back-button" onClick={leave}>
       <Icon name="back" />
       返回
     </button>
@@ -392,7 +434,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     <div className="app settings">
       <header>
         {back}
-        <h1>{page === "root" ? "设置" : PAGE_TITLE[page]}</h1>
+        <h1>{title}</h1>
       </header>
       <main>
         {notice && <p className="msg bad">{notice}</p>}
@@ -403,6 +445,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             <ul className="settings-list">
               <SettingsRow icon="user" title="账号与安全" summary={`${cfg.email || "（未知邮箱）"} · ${host}`} badge="已登录" onClick={() => setPage("account")} />
               <SettingsRow icon="bell" title="通知规则" summary={notifySummary} onClick={() => setPage("notify")} />
+              <SettingsRow icon="devices" title="设备" summary={deviceSummaryText(machines)} onClick={() => setPage("devices")} />
             </ul>
 
             <h2>派活</h2>
@@ -430,12 +473,22 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             )}
 
             <h2>外观</h2>
+            <ul className="settings-list">
+              <SettingsRow icon="user" title="agent 头像" summary={<span className="avatar-strip">{Object.keys(AGENT_LABEL).map((a) => <AgentAvatar key={a} agent={a} size={20} decorative />)}</span>} onClick={() => setPage("avatars")} />
+            </ul>
             <section className="box">
-              <label className="check">
-                <input type="checkbox" checked={cfg.graphMode} onChange={(e) => toggleGraphMode(e.target.checked)} />
-                待处理会话用图模式展示（每个项目一个气泡，点击展开会话）
+              <label>
+                对话页展示方式
+                <select value={form.graphMode ? "graph" : "list"} onChange={(e) => void toggleGraphMode(e.target.value === "graph")}>
+                  <option value="graph">气泡图（默认）</option>
+                  <option value="list">列表</option>
+                </select>
               </label>
-              <p className="hint">开启后「待处理」区域按项目聚合为气泡图；关闭时使用卡片列表。改动立即生效。</p>
+              <p className="hint">
+                {form.graphMode
+                  ? "气泡图：待处理 / 进行中的对话按项目聚成气泡，点一下展开会话。"
+                  : "列表：待处理 / 进行中的对话按状态分行平铺，一条一行。"}
+              </p>
               {msg && <p className="msg">{msg}</p>}
             </section>
           </>
@@ -578,18 +631,66 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
           </section>
         )}
 
-        {page === "roles" && api && <Roles api={api} />}
+        {page === "roles" && api && (
+          <Roles
+            api={api}
+            onEdit={(role) => {
+              setRoleEdit({ role });
+              setMsg("");
+              setPage("role");
+            }}
+          />
+        )}
 
-        {page === "projects" && api && <Projects api={api} />}
+        {page === "role" && api && (
+          <RoleEditor
+            api={api}
+            role={roleEdit?.role ?? null}
+            onBack={leave}
+            onSaved={(r) => setRoleEdit({ role: r })}
+            onDeleted={() => {
+              setRoleEdit(null);
+              setPage("roles");
+            }}
+          />
+        )}
+
+        {page === "projects" && api && (
+          <Projects
+            api={api}
+            onEdit={(project) => {
+              setProjectEdit({ project });
+              setMsg("");
+              setPage("project");
+            }}
+          />
+        )}
+
+        {page === "project" && api && (
+          <ProjectEditor
+            api={api}
+            project={projectEdit?.project ?? null}
+            onBack={leave}
+            onSaved={(p) => setProjectEdit({ project: p })}
+            onDeleted={() => {
+              setProjectEdit(null);
+              setPage("projects");
+            }}
+          />
+        )}
 
         {page === "manager" && api && <Manager api={api} />}
+        {page === "devices" && api && (
+          <Devices api={api} localMachine={cfg.machine} onOpenAccount={() => setPage("account")} />
+        )}
+        {page === "avatars" && <AvatarSettings api={api} />}
 
         {page === "desktop" && isDesktop && (
           <>
             <section className="box">
               <h2>本机</h2>
               <label>
-                本机名称（machine；下次登录时作为设备名）
+                本机名称（派活时按它认电脑；改名后服务端旧记录会一起迁到新名下）
                 <input value={form.machine} onChange={(e) => set("machine", e.target.value)} />
               </label>
               <label className="check">
@@ -604,6 +705,16 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                 <input type="checkbox" checked={form.remoteEnabled} onChange={(e) => set("remoteEnabled", e.target.checked)} />
                 允许手机远程执行（每次授权仍要在手机上确认）
               </label>
+              <p className="hint">关掉后这台电脑仍显示「开着，没开远程执行」，派给它的单会排队，直到这里重新打开。</p>
+              <label className="check">
+                <input type="checkbox" checked={form.hookRemoteApprove} onChange={(e) => set("hookRemoteApprove", e.target.checked)} />
+                在客户端处理 Claude 终端的权限确认
+              </label>
+              <label className="check">
+                <input type="checkbox" checked={form.hookRemoteApprove && form.hookRemoteAllow} disabled={!form.hookRemoteApprove} onChange={(e) => set("hookRemoteAllow", e.target.checked)} />
+                允许在客户端远程放行（风险：手机上点允许就会在电脑上执行）
+              </label>
+              <p className="hint">开启后，终端里的 Claude 弹出权限确认时，客户端会出现一张审批卡，最多等 25 秒；没人处理就回到终端原生确认框。只开第一项时，客户端只能点「拒绝」。</p>
 
               <h3>禁止执行的目录（黑名单）</h3>
               <p className="hint">
@@ -620,16 +731,18 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                 {denied.length > 0 ? `已禁止 ${denied.length} 个目录：这些目录下的任务和会话会被执行端直接拒绝。` : "当前目录不限制：没有任何目录被禁止。"}
               </p>
 
-              <h3>派单队列（Hub）</h3>
-              <label className="check">
-                <input type="checkbox" checked={form.hubEnabled} onChange={(e) => set("hubEnabled", e.target.checked)} />
-                开启本地派单队列（127.0.0.1:47822，供 WorkBuddy / 豆包轮询拉单）
-              </label>
+              <h3>ZCode 自动放行</h3>
               <label>
-                鉴权 token（留空 = 本机回环不鉴权）
-                <input value={form.hubToken} onChange={(e) => set("hubToken", e.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                ZCode 权限请求的自动放行档位
+                <select value={form.zcodeAutoApprove} onChange={(e) => set("zcodeAutoApprove", e.target.value)}>
+                  <option value="off">关闭：每条都要确认</option>
+                  <option value="low">放行低风险（默认）</option>
+                  <option value="medium">放行中低风险</option>
+                </select>
               </label>
-              <p className="hint">开启后可在主界面「派单」标签发单；worker 接入方式见 docs/hub-worker.md。</p>
+              <p className="hint">
+                档位内的请求直接放行并在会话里留痕，不弹审批卡；高风险与致命风险永远弹卡等你确认，ZCode 没标风险等级的也不放。
+              </p>
 
               <div className="btns">
                 <button className="primary" onClick={save} disabled={!dirty}>
@@ -669,6 +782,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               <h2>采集说明</h2>
               <p className="hint">豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。</p>
               <p className="hint">WorkBuddy 会话监听随 AgentHub 自动启动。只读 <code>%USERPROFILE%\.workbuddy\projects</code> 下的会话记录，每 2 秒检查一次，可显示对话标题、目录、运行中与完成状态；完成状态在「回复结束 + 无未完成工具调用 + 静默确认」后判定。打开会话详情时会把本地对话记录同步过来（只读），授权与远程续聊仍不支持。</p>
+              <p className="hint">CodeBuddy 命令行版（npm 全局包 <code>@tencent-ai/codebuddy-code</code>）与 WorkBuddy 是同一份 CLI，记录落在 <code>%USERPROFILE%\.codebuddy\projects</code>，用同一套规则监听；派活时用本机 node 跑它自己的登录态，装了它才会出现在角色的候选电脑里。</p>
             </section>
           </>
         )}

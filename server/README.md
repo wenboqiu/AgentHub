@@ -70,6 +70,9 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | POST | `/tasks/:id/sessions` | `{sessionId}` → `{task}`，重复挂接幂等 |
 | DELETE | `/tasks/:id/sessions/:sessionId` | `{task}`；会话清理后仍可取消挂接 |
 | POST | `/tasks/:id/start` | `{agent?, machine?, cwd?, text?}` → `{runId, sessionId, task}`；agent 只能是 claude / codex |
+| POST | `/tasks/:id/accept` | 验收：`review → done` 的**唯一**入口 → `{task, delivery}`。任务须在 review、检查项全部 pass、关联会话下没有 pending 审批，否则 409 |
+| GET | `/tasks/:id/mandate` | `{mode, mandate, stats:{total,wouldAllow,wouldAsk}, delivery}`：冻结的授权范围快照 + 决策统计（observe 下「本来会自动放行 N 条、会问 M 次」）+ 交付物 |
+| GET / PUT | `/mandate/settings` | 账号的授权模式 `{mode:'off'\|'observe'\|'auto'}`，默认 off；没有记录等于 off |
 
 开始任务时，body 优先于任务默认设置；没有 machine 且只有一台在线电脑时自动选用它。text 默认备注或标题（1–8000 字符）。离线预检查返回 409 且任务不变。创建运行、临时会话、首条消息、挂接关系和 doing 状态在事务内完成；提交后发送 `mode:'fresh'`。发送失败返回 409，保留 doing 状态和 aborted 临时会话。执行器仍负责目录检查和授权。
 
@@ -110,6 +113,15 @@ viewer 的 snapshot 增加 `goals`、`tasks` 数组。新增同账号广播：`{
 
 执行器断线（或被顶掉）时，它名下 queued/running 的 run 标 `failed`（`电脑端断开`），pending 授权标 `expired`。
 
+Claude 终端会话的权限确认（`PermissionRequest` hook，没有 run）用专用消息，不复用 `run.approval`：
+
+| 方向 | 消息 |
+|---|---|
+| 执行器 → 服务端 | `hook.approval {localId, sessionKey, tool, detail, canAllow}`（`sessionKey` 是 Claude 的 session_id，会话 `claude:<sessionKey>` 必须已存在且属于该执行器，否则回 `approvalId:""`；一律交人，不走项目经理 / mandate）、`hook.approval.expired {approvalId}`（等待超时 / 终端已处理：置 expired 并广播） |
+| 服务端 → 执行器 | `hook.approval.created {localId, approvalId}`（`approvalId` 为空串 = 不受理）、`hook.approval.decide {approvalId, decision}`（`allow` / `deny`） |
+
+审批行的 `run_id` 为 `hook:<sessionId>`，`can_allow=false` 时 `POST /approvals/:id` 的 allow 返回 403，只能拒绝；执行器不在线返回 409。执行器断线时该机器上所有 pending 的 hook 审批置 expired。
+
 授权在执行器等待 30 分钟超时后，立即上报 `run.approvalExpired`。服务端核对机器及运行归属，仅将 pending 授权改为 expired 并广播，运行可继续；重复通知无副作用。此修复需要同时更新桌面执行器和服务端。
 
 `run.session` 处理：在一个事务里把临时会话改名为 `<agent>:<sessionKey>`（`runs` / `messages` / `approvals` 的 session_id 一起改）；真实 id 已存在则保留真实行（标题为空时补上临时行的标题）并删除临时行；随后广播 `removed`（临时 id）、`session`（真实行，notify=false）、`session.renamed {from, to}` 和该 run 的最新状态。拿到真实 id 之前 run 失败 / 停止 / 执行器断线，临时会话标 `aborted`（summary 为错误信息，notify=true）。
@@ -127,6 +139,22 @@ viewer 的 `/ws` 新增广播：`{type:'run', run}`、`{type:'message', message}
 - `POST /sessions/:id/spawn` 在 `mode:'fork'` 时可带 `messageId`。服务端从该回复读取 `branchPoint`，不接受浏览器直接提供的节点；拒绝无节点、非助手回复和运行中会话。旧版不带 `messageId` 的整会话分叉协议保留兼容，界面统一使用逐条回复分支。
 - 执行器 WS 握手增加 `capabilities=reply-branch-v1`。指定回复分支要求该能力，缺少时 409；`run.start` 增加 `branchPoint`。执行器再次从原会话验证节点后，Claude 用 `--resume-session-at <uuid> --fork-session`，Codex 用 `thread/fork.lastTurnId`。
 - 历史记录缺少 UUID、完整轮次信息，或旧 CLI 不支持指定节点时明确提示，不能静默分叉全部上下文。
+
+### 一次授权（Mandate）
+
+确认任务单（`POST /proposals/:id/confirm`）或开工（`POST /tasks/:id/start`、项目经理自动派发）= **签署 Mandate**：把任务的执行边界写成不可变快照（`task_mandates`，append-only，同一任务 `version` 递增、新任务从 1 开始，附 `ruleset_version` = `referee.ts` 的 `RULESET_VERSION`），并置 `tasks.mandate_frozen_at`。
+
+- 冻结后 `PATCH /tasks/:id` 改 `constraints` 返回 409「范围已冻结，请新开任务」（原样回传不算修改）；要换范围只能新开任务。
+- 有 mandate 或关联过会话的任务，`PATCH status=done` 返回 409，必须经 `POST /tasks/:id/accept`；既没 mandate 也没关联会话的纯人工任务仍可直接完成。
+- `MandateScope` = 任务边界（`paths` / `net` / `push` / `scripts` / `note`）+ `commands`（read / test / build / write，空 = 沿用规则表）、`allowedTools`、`maxRuntimeMin`（默认 30，**本期只存储并下发，执行器不强制超时**）。`net` / `push` / `scripts` 默认 false，后续消息不会自动打开。
+- `mandate_mode`（每账号，默认 `off`）：
+  - `off`：与没有这个功能时一致，不判定、不落库。
+  - `observe`：按冻结范围判每条审批，只写 `mandate_decisions`（`would_allow` / `in_scope` / `rule` / `tier`，保留 30 天），**审批流程完全不变**；`run.start` 不带 mandate。
+  - `auto`：执行器声明了 `mandate-v1` 且任务有冻结 Mandate 时，范围内的审批不建 `approvals` 行、不插 `approval` 消息、不广播、不通知，直接回 `approval.decide allow`；范围外 / danger / unknown 照旧建审批行并标 `in_scope=false`，一律交人（不走项目经理代批，不产出 deny）。每小时自动放行数受项目经理的代批上限约束，超了全部交人。老执行器（无 `mandate-v1`）自动降级为 observe 行为。
+- `run.start` 在 auto 档且执行器有 `mandate-v1` 时带 `mandate: { id, version, mode: 'auto', scope, rulesetVersion }`（`startSession`、`resumeTaskSession` 发送时现取；排队投递最终也走这两个函数，所以离线入队的任务上线后同样带）。老执行器忽略该字段。
+- 执行器握手增加 `capabilities=mandate-v1`。桌面端据 `mandate` 把 Claude 改成 `--permission-mode acceptEdits`（声明了目录时保持 `default`，写只在目录内放行）+ `--allowedTools` 白名单，Codex 保留 `workspace-write` 沙箱（`net` 对应 `networkAccess`）、`approvalPolicy` 仍是 `on-request`。**任何路径都不默认 `bypassPermissions` / `danger-full-access`。目录声明只是提示，不是安全隔离**：执行器以用户自己的 OS 账户运行，真正的约束是 CLI 白名单与 sandbox。
+- 任务进入 review 时写 `task_deliveries`（重跑再进 review 覆盖未验收的快照，已验收的不动）；检查项被打回时，对签署过 Mandate 的任务会额外生成一条待确认的任务单提案（带打回原因与原范围摘要），原任务保持 review，确认提案 = 新任务 + 新 Mandate。
+- 派活看板：`mandate_mode ≠ off` 时只保留需要人的项（等审批、卡住、离线排队、待验收）。
 
 ## 开发与测试
 

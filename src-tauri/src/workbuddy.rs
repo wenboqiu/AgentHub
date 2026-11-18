@@ -1,21 +1,23 @@
-//! Read-only adapter for WorkBuddy Desktop session transcripts.
+//! Read-only adapter for WorkBuddy / CodeBuddy session transcripts.
 //!
-//! 路径：`%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`，每行一个 JSON 事件
+//! 路径：`%USERPROFILE%\.workbuddy\projects\<工作区>\<sessionId>.jsonl`（CodeBuddy CLI 同一格式，
+//! 落在 `~\.codebuddy\projects`），每行一个 JSON 事件
 //! （`session-meta` / `message` / `function_call` / `function_call_result` / `ai-title` / `custom-title`）。
 //!
-//! WorkBuddy 不提供 hook，也没有可调用的 CLI/IPC，因此只能读 transcript：
+//! 派活走 `runner.rs::run_workbuddy`（应用内置 CLI，stream-json 协议与 claude 同构）；
+//! 本模块只负责 transcript 监听：
 //! - 正文、标题、目录都能拿到（比豆包日志完整）；
 //! - **没有会话结束事件**。完成判定同时要求「尾部是已完成回复或已归的工具结果」
 //!   「没有未归的工具调用」「文件静默超过确认窗口」；静默只作确认窗口，不单独作为依据。
 //!   未归调用按 callId 集合配对；注入的 user 行（system-reminder / task-notification 等）
 //!   不清零未归调用，避免后台工具还在飞时被提前判完成；
-//! - 因此本模块只做状态与消息监听，不参与远程执行。
+//! - 因此本模块只做状态与消息监听；远程执行由 runner.rs 的 run_workbuddy 承担。
 
 use crate::{
     activity::buckets_of,
     claude::{home_dir, now_iso, truncate_chars},
     codex::complete_prefix_len,
-    forwarder::{Event, Forwarder},
+    forwarder::{Event, EventMessage, Forwarder},
 };
 use chrono::TimeZone;
 use serde_json::Value;
@@ -40,6 +42,18 @@ const QUIET_MS: i64 = 20_000;
 /// （下一行几乎都是 reasoning，思考期间文件完全静默）；60s 时「提前判完成」
 /// 占所有完成判定的 ~31%，提到 3 分钟后降到 ~5%。
 const TOOL_QUIET_MS: i64 = 180_000;
+/// 结构给不出结论时的兜底窗口：尾部是用户消息 / 仍在 generating / 还有未归的调用，
+/// 都可能是「进程已经不在了」，可静默又必须能收尾（否则会话永远停在 running）。
+/// 跑很久的单次工具调用会在这条线上被先判死一次，但结果落盘后会自己回到 running，
+/// 且兜底收尾是静默的（不补通知），代价只是一次状态回摆。与前端 sendBlock / 服务端 routes
+/// 的 STALE_RUNNING_MS 保持同一口径：30 分钟没有新东西就不再当它还在跑。
+const STALE_MS: i64 = 30 * 60_000;
+/// 随手带上来的正文：单条文本上限（与服务端 cleanText 一致）
+const MSG_TEXT_MAX: usize = 4000;
+/// 一轮里最多带多少条正文（长回合别把事件撑爆，服务端也会裁剪）
+const TURN_MSGS_MAX: usize = 30;
+/// 启动登记时补的历史正文条数：老会话早先没同步过，库里是空的
+const REGISTER_MSGS: usize = 24;
 
 /// transcript 尾部结构：决定「安静下来」是否可以判定结束
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -59,6 +73,8 @@ enum Tail {
 #[derive(Default)]
 pub struct FileState {
     pub offset: u64,
+    /// 这份 transcript 属于哪个 agent（workbuddy / codebuddy）：两者格式一致，只是目录不同
+    agent: &'static str,
     session_id: Option<String>,
     cwd: String,
     title: Option<String>,
@@ -79,6 +95,9 @@ pub struct FileState {
     user_turn: bool,
     /// 尚未随事件上报的活动时间戳（ms），发事件时聚合成 5 分钟桶带走
     pending: Vec<i64>,
+    /// 还没随事件上报的正文：正文只在本机 transcript 里，拉历史又要走执行器通道，
+    /// 所以顺路跟状态事件一起上送（服务端按 role+时间+正文去重）
+    msgs: Vec<EventMessage>,
 }
 
 fn iso(ms: i64) -> String {
@@ -104,13 +123,13 @@ fn text_of(v: &Value, kind: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
-/// 用户消息剥掉注入块后剩下的可见文本；纯注入块（摘要 / 通知 / reminder）返回 None，不当标题
+/// 用户消息剥掉注入块后剩下的可见文本（保留换行，用户可能贴的是多行内容）；
+/// 纯注入块（摘要 / 通知 / reminder）返回 None，不当标题。
+/// 只在做标题时压成一行——正文压平了就和服务端存的原文对不上，去重会漏。
 fn user_text(v: &Value) -> Option<String> {
     let raw = text_of(v, "input_text")?;
-    let mut visible = match raw.rfind("</system-reminder>") {
-        Some(i) => &raw[i + "</system-reminder>".len()..],
-        None => raw.as_str(),
-    };
+    // 只剥开头那几段 system-reminder；整段找最后一个会把摘要从中间切开
+    let mut visible = crate::message_history::strip_leading_reminders(&raw);
     // `> ` 引用前缀和 <user_query> 包裹是派发格式残留
     visible = visible.trim_start_matches(['>', ' ', '\n', '\t']);
     if let Some(rest) = visible.strip_prefix("<user_query>") {
@@ -118,9 +137,9 @@ fn user_text(v: &Value) -> Option<String> {
             visible = &rest[..end];
         }
     }
-    let flat = one_line(visible);
-    // 剩下的还是注入块（<cb_summary>、<task-notification> 等）就不当标题
-    (!flat.is_empty() && !flat.starts_with('<')).then_some(flat)
+    let text = visible.trim();
+    // 剩下的还是注入块（<cb_summary>、<task-notification> 等）就不当用户消息
+    (!text.is_empty() && !text.starts_with('<')).then(|| text.to_owned())
 }
 
 impl FileState {
@@ -225,13 +244,15 @@ impl FileState {
                 // 不代表新一轮开始，更不能清掉仍在飞的未归工具调用，否则会提前误判完成
                 let real_input = user_text(v);
                 if self.title.is_none() {
+                    // 标题压成一行；正文照原样（多行就是多行）
                     if let Some(t) = &real_input {
-                        self.title = Some(truncate_chars(t, 40));
+                        self.title = Some(truncate_chars(&one_line(t), 40));
                     }
                 }
-                if real_input.is_some() {
+                if let Some(t) = &real_input {
                     self.open_ids.clear();
                     self.open_unknown = 0;
+                    self.record("user", t, v);
                 }
                 self.user_turn = true;
                 self.state = "running".into();
@@ -248,13 +269,35 @@ impl FileState {
                             if !flat.is_empty() {
                                 self.summary = Some(truncate_chars(&flat, 200));
                             }
+                            self.record("assistant", &t, v);
                         }
                     }
-                    "incomplete" => self.tail = Tail::Incomplete,
+                    "incomplete" => {
+                        self.tail = Tail::Incomplete;
+                        // 被用户中断：这批还在飞的调用不会有结果回来了。
+                        // 留着会让「中断→aborted」也走不到（confirm_quiet 第一关就要求未归调用为 0），
+                        // 状态就永远停在 running。
+                        self.open_ids.clear();
+                        self.open_unknown = 0;
+                    }
                     _ => {}
                 }
             }
             _ => {}
+        }
+    }
+
+    /// 收一条可见正文（注入块已被 user_text / text_of 过滤掉）；带上原生日志时间戳
+    fn record(&mut self, role: &str, text: &str, v: &Value) {
+        let t = text.trim();
+        if t.is_empty() {
+            return;
+        }
+        let at = v.get("timestamp").and_then(Value::as_i64).map(iso);
+        self.msgs.push(EventMessage { role: role.into(), text: truncate_chars(t, MSG_TEXT_MAX), at });
+        if self.msgs.len() > TURN_MSGS_MAX {
+            let cut = self.msgs.len() - TURN_MSGS_MAX;
+            self.msgs.drain(..cut);
         }
     }
 
@@ -285,14 +328,17 @@ impl FileState {
 
     /// 文件安静下来后确认本轮是否结束；不满足条件返回 None
     pub fn confirm_quiet(&mut self, now_ms: i64) -> Option<Event> {
-        if self.skipped || self.session_id.is_none() || self.state != "running" || self.open_calls() > 0 {
+        if self.skipped || self.session_id.is_none() || self.state != "running" {
             return None;
         }
-        let (state, window) = match self.tail {
-            Tail::Reply => ("done", QUIET_MS),
-            Tail::ToolResult => ("done", TOOL_QUIET_MS),
-            Tail::Incomplete => ("aborted", QUIET_MS),
-            _ => return None,
+        // 结构能定性就按结构判（这种结束有把握，照常提醒）；
+        // 结构不能定性（尾部是用户消息 / 仍在 generating / 还有未归的调用）只能等「久到不可能还在动」，
+        // 那种收尾是兜底推断，静默处理：别让一个半夜就死掉的会话在早上弹一条「已中断」。
+        let (state, window, stale) = match (self.open_calls() == 0, self.tail) {
+            (true, Tail::Reply) => ("done", QUIET_MS, false),
+            (true, Tail::ToolResult) => ("done", TOOL_QUIET_MS, false),
+            (true, Tail::Incomplete) => ("aborted", QUIET_MS, false),
+            _ => ("aborted", STALE_MS, true),
         };
         if now_ms - self.last_ms < window {
             return None;
@@ -301,8 +347,13 @@ impl FileState {
             return None;
         }
         self.state = state.to_string();
+        if stale {
+            // 这些调用已经判死：下一轮开始时不能再被它们挡住
+            self.open_ids.clear();
+            self.open_unknown = 0;
+        }
         let summary = if state == "done" { self.summary.clone() } else { None };
-        Some(self.event(state, summary, false))
+        Some(self.event(state, summary, stale))
     }
 
     /// 未归的工具调用总数（按 callId 配对 + 无 callId 的计数兜底）
@@ -322,8 +373,9 @@ impl FileState {
         self.emitted = Some((state.to_string(), self.last_at.clone()));
         let buckets = buckets_of(&self.pending);
         self.pending.clear();
+        let messages = std::mem::take(&mut self.msgs);
         Event {
-            agent: "workbuddy".into(),
+            agent: if self.agent.is_empty() { "workbuddy".into() } else { self.agent.into() },
             session_id: self.session_id.clone().unwrap_or_default(),
             machine: String::new(),
             cwd: self.cwd.clone(),
@@ -333,7 +385,9 @@ impl FileState {
             summary,
             pid: None,
             quiet,
+            bg_tasks: 0,
             buckets,
+            messages,
         }
     }
 }
@@ -363,8 +417,13 @@ fn transcript_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn new_state(path: &Path) -> FileState {
+    new_state_for(path, "workbuddy")
+}
+
+fn new_state_for(path: &Path, agent: &'static str) -> FileState {
     // 没有 session-meta 时用文件名兜底（{sessionId}.jsonl）
     FileState {
+        agent,
         session_id: path.file_stem().and_then(|n| n.to_str()).map(str::to_owned),
         ..Default::default()
     }
@@ -435,9 +494,29 @@ fn scan_buckets(path: &Path, since_ms: i64) -> Vec<i64> {
     out
 }
 
+/// 启动登记时补一份历史正文：这些老会话早先没同步过（那台电脑没开远程执行，拉不到），
+/// 服务端库里是空的；正文只在本机 transcript 里，只能趁这一刻顺路带上去。
+/// 服务端按 (role, 时间, 正文) 去重，重复带上不会变成重复消息。
+fn tail_messages(path: &Path, limit: usize, agent: &str) -> Vec<EventMessage> {
+    let Ok(text) = crate::runner::read_tail(path, 512 * 1024) else { return Vec::new() };
+    crate::message_history::parse(agent, &text, limit)
+        .into_iter()
+        .map(|m| EventMessage { role: m.role, text: truncate_chars(&m.text, MSG_TEXT_MAX), at: m.at })
+        .collect()
+}
+
+/// WorkBuddy 桌面端与独立的 CodeBuddy CLI 是同一份 CLI，transcript 布局也一样
+/// （`~\.<工具>\projects\<工作区>\<sessionId>.jsonl`），只是目录名不同：
+/// 同一个监听器跑两遍，事件里带上各自的 agent 名。
 pub fn spawn(fwd: Forwarder) {
+    for (agent, dir) in [("workbuddy", ".workbuddy"), ("codebuddy", ".codebuddy")] {
+        spawn_dir(fwd.clone(), agent, dir);
+    }
+}
+
+fn spawn_dir(fwd: Forwarder, agent: &'static str, dir: &'static str) {
     std::thread::spawn(move || {
-        let Some(root) = home_dir().map(|h| h.join(".workbuddy").join("projects")) else { return };
+        let Some(root) = home_dir().map(|h| h.join(dir).join("projects")) else { return };
         let mut states = HashMap::<PathBuf, FileState>::new();
         let mut initial = true;
         loop {
@@ -446,7 +525,7 @@ pub fn spawn(fwd: Forwarder) {
             states.retain(|p, _| files.contains(p));
             for path in files {
                 let fresh = !states.contains_key(&path);
-                let st = states.entry(path.clone()).or_insert_with(|| new_state(&path));
+                let st = states.entry(path.clone()).or_insert_with(|| new_state_for(&path, agent));
                 if fresh {
                     seed_head(&path, st);
                     if !initial {
@@ -492,8 +571,13 @@ pub fn spawn(fwd: Forwarder) {
                 for (path, st) in states.iter_mut() {
                     // feed 阶段的事件被丢弃但 pending 已被清空：登记前重新补齐历史活动桶
                     st.pending.extend(scan_buckets(path, now_ms - BACKFILL_MS));
+                    // 老会话的正文从没进过库：登记这一枪顺路带上最近几条，之后就能在详情页看到
+                    st.msgs = tail_messages(path, REGISTER_MSGS, agent);
                     if let Some(ev) = st.register(now_ms) {
                         fwd.push(ev);
+                    } else {
+                        // 历史会话（跳过登记 / 没有会话 id）不推送，正文也别留着串到后面的事件里
+                        st.msgs.clear();
                     }
                 }
                 initial = false;
@@ -564,6 +648,85 @@ mod tests {
     }
 
     #[test]
+    fn events_carry_visible_messages() {
+        let mut s = live();
+        // 用户提问的那一枪就带上用户消息（详情页不用等这一轮跑完才有内容）
+        let started = s.feed(&[&msg("user", "completed", "把农场场景补完", T0)], T0);
+        assert_eq!(started[0].messages.len(), 1);
+        assert_eq!(started[0].messages[0].role, "user");
+        assert_eq!(started[0].messages[0].text, "把农场场景补完");
+        assert!(started[0].messages[0].at.as_deref().is_some_and(|t| t.starts_with("2026-")));
+        // 回复完成时只更新摘要，正文攒着等下一条事件
+        assert!(s.feed(&[&msg("assistant", "completed", "好的，先补麦田。", T0 + 5_000)], T0 + 5_000).is_empty());
+        let done = s.confirm_quiet(T0 + 5_000 + QUIET_MS).unwrap();
+        assert_eq!(done.messages.len(), 1);
+        assert_eq!(done.messages[0].role, "assistant");
+        assert_eq!(done.messages[0].text, "好的，先补麦田。");
+        // 上报过的不再重复带
+        assert!(s.msgs.is_empty());
+    }
+
+    #[test]
+    fn events_carry_the_transcript_owner_agent() {
+        // 同一套状态机也给 CodeBuddy 用：事件里的 agent 不能还写死成 workbuddy
+        let mut s = new_state_for(Path::new("C:/x/.codebuddy/projects/ws/abc.jsonl"), "codebuddy");
+        assert_eq!(s.session_id.as_deref(), Some("abc"));
+        let evs = s.feed(&[&msg("user", "completed", "查目录", T0)], T0);
+        assert_eq!(evs[0].agent, "codebuddy");
+        // 没有显式指定时退回 workbuddy（老调用点 / 直接 Default 构造）
+        let mut w = live();
+        assert_eq!(w.feed(&[&msg("user", "completed", "查目录", T0)], T0)[0].agent, "workbuddy");
+    }
+
+    #[test]
+    fn multiline_user_input_keeps_its_lines_but_title_is_one_line() {
+        // 正文压平了就和服务端存的原文对不上：去重按正文比，压平会多出一条一样的消息
+        let mut s = live();
+        let evs = s.feed(&[&msg("user", "completed", "第一行\n第二行", T0)], T0);
+        assert_eq!(evs[0].messages[0].text, "第一行\n第二行");
+        assert_eq!(evs[0].title.as_deref(), Some("第一行 第二行"));
+    }
+
+    #[test]
+    fn injected_blocks_are_not_reported_as_messages() {
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑后台任务", T0)], T0);
+        let evs = s.feed(&[&injected(T0 + 1_000, "task-notification")], T0 + 1_000);
+        // 注入行不代表新一轮，也不该变成消息
+        assert!(evs.iter().all(|e| e.messages.is_empty()));
+        assert!(s.msgs.is_empty());
+    }
+
+    #[test]
+    fn summary_quoting_a_reminder_tag_does_not_leak_into_the_chat() {
+        // 压缩摘要正文里会引用代码和旧对话，中间就带着 </system-reminder>。
+        // 早先按「最后一个」切，摘要被从半腰切开当成了用户输入（本机实测吐过一条 4000 字代码碎片）
+        let mut s = live();
+        let summary = msg("user", "completed", "<cb_summary>\n… rfind(\"</system-reminder>\") …\n</cb_summary>", T0);
+        let evs = s.feed(&[&summary], T0);
+        assert!(evs[0].messages.is_empty(), "{:?}", evs[0].messages);
+        assert!(s.msgs.is_empty());
+        // 真正的用户输入（reminder 包一层）照样要认出来
+        let typed = msg("user", "completed", "<system-reminder data-role=\"user-context\">上下文</system-reminder>\n> <user_query>确认一下</user_query>", T0 + 1_000);
+        let evs = s.feed(&[&typed], T0 + 1_000);
+        assert_eq!(evs[0].messages[0].text, "确认一下");
+    }
+
+    #[test]
+    fn message_text_and_count_are_capped() {
+        let mut s = live();
+        let long = "字".repeat(MSG_TEXT_MAX * 2);
+        let evs = s.feed(&[&msg("user", "completed", &long, T0)], T0);
+        assert_eq!(evs[0].messages[0].text.chars().count(), MSG_TEXT_MAX);
+        for i in 0..(TURN_MSGS_MAX + 5) {
+            s.record("assistant", &format!("第 {i} 条"), &serde_json::json!({"timestamp": T0 + i as i64}));
+        }
+        assert_eq!(s.msgs.len(), TURN_MSGS_MAX);
+        // 留的是最近的
+        assert!(s.msgs.last().unwrap().text.ends_with(&format!("第 {} 条", TURN_MSGS_MAX + 4)));
+    }
+
+    #[test]
     fn completion_needs_structure_and_quiet_window() {
         let mut s = live();
         let started = s.feed(&[&msg("user", "completed", "帮我看看", T0)], T0);
@@ -630,9 +793,9 @@ mod tests {
             &[&call_id(T0 + 1_000, "call_x"), &result_id(T0 + 2_000, "call_before_window"), &call_id(T0 + 2_100, "call_y")],
             T0 + 2_100,
         );
-        assert!(s.confirm_quiet(T0 + 2_100 + 10 * TOOL_QUIET_MS).is_none(), "call_y 仍在飞，不能判结束");
+        assert!(s.confirm_quiet(T0 + 2_100 + 4 * TOOL_QUIET_MS).is_none(), "call_y 仍在飞，不能判结束");
         s.feed(&[&result_id(T0 + 3_000, "call_x")], T0 + 3_000);
-        assert!(s.confirm_quiet(T0 + 3_000 + 10 * TOOL_QUIET_MS).is_none(), "call_y 仍未归还");
+        assert!(s.confirm_quiet(T0 + 3_000 + 4 * TOOL_QUIET_MS).is_none(), "call_y 仍未归还");
         s.feed(&[&result_id(T0 + 4_000, "call_y")], T0 + 4_000);
         assert_eq!(s.confirm_quiet(T0 + 4_000 + TOOL_QUIET_MS).unwrap().state, "done");
     }
@@ -644,7 +807,7 @@ mod tests {
         let no_id_call = serde_json::json!({"type":"function_call","timestamp":T0+1_000,"name":"Read"}).to_string();
         let no_id_result = serde_json::json!({"type":"function_call_result","timestamp":T0+2_000}).to_string();
         s.feed(&[&no_id_call], T0 + 1_000);
-        assert!(s.confirm_quiet(T0 + 1_000 + 10 * TOOL_QUIET_MS).is_none());
+        assert!(s.confirm_quiet(T0 + 1_000 + 4 * TOOL_QUIET_MS).is_none());
         s.feed(&[&no_id_result], T0 + 2_000);
         assert_eq!(s.confirm_quiet(T0 + 2_000 + TOOL_QUIET_MS).unwrap().state, "done");
     }
@@ -658,11 +821,58 @@ mod tests {
     }
 
     #[test]
-    fn generating_tail_never_finishes() {
+    fn interrupted_round_releases_open_calls() {
+        // 用户在工具还在飞的时候按了中断：这批调用不会有结果回来了，
+        // 不能拿它们把这一轮永久钉在 running（线上就是卡了 15 小时那种）
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑起来", T0)], T0);
+        s.feed(&[&call_id(T0 + 1_000, "call_a"), &call_id(T0 + 1_001, "call_b")], T0 + 1_001);
+        s.feed(&[&msg("assistant", "incomplete", "Interrupted by user", T0 + 2_000)], T0 + 2_000);
+        assert_eq!(s.open_calls(), 0, "中断即放弃在飞的调用");
+        // 中断是明确的结构，按 REPLY 的静默窗口收尾，照常提醒
+        let ev = s.confirm_quiet(T0 + 2_000 + QUIET_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert!(!ev.quiet);
+    }
+
+    #[test]
+    fn generating_tail_closes_only_when_stale() {
+        // 停在 generating（进程没了）没有结构可依据：只有久到不可能还在动才收尾
         let mut s = live();
         s.feed(&[&msg("user", "completed", "写长文", T0)], T0);
         s.feed(&[&msg("assistant", "generating", "", T0 + 1_000)], T0 + 1_000);
-        assert!(s.confirm_quiet(T0 + 10 * QUIET_MS).is_none());
+        assert!(s.confirm_quiet(T0 + 1_000 + STALE_MS - 1).is_none());
+        let ev = s.confirm_quiet(T0 + 1_000 + STALE_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert!(ev.quiet, "兜底收尾不补通知");
+    }
+
+    #[test]
+    fn stale_running_without_structure_is_closed() {
+        // 用户消息之后进程就没了：尾部只剩用户消息，同样只能靠兜底收尾
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "开工", T0)], T0);
+        assert!(s.confirm_quiet(T0 + STALE_MS - 1).is_none());
+        let ev = s.confirm_quiet(T0 + STALE_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert!(ev.quiet);
+        // 收过一次就不再重复
+        assert!(s.confirm_quiet(T0 + 10 * STALE_MS).is_none());
+    }
+
+    #[test]
+    fn long_tool_call_survives_short_noise_but_not_stale() {
+        // 单次工具跑 20 分钟还在飞：不能提前判死
+        let mut s = live();
+        s.feed(&[&msg("user", "completed", "跑个长构建", T0)], T0);
+        s.feed(&[&call_id(T0 + 1_000, "call_long")], T0 + 1_000);
+        assert!(s.confirm_quiet(T0 + 1_000 + 20 * 60_000).is_none());
+        let ev = s.confirm_quiet(T0 + 1_000 + STALE_MS).unwrap();
+        assert_eq!(ev.state, "aborted");
+        assert_eq!(s.open_calls(), 0, "判死的调用要清掉，别挡住下一轮");
+        // 结果后来还是落盘了：下一轮照常从 running 起算
+        let again = s.feed(&[&msg("user", "completed", "继续", T0 + 2 * STALE_MS)], T0 + 2 * STALE_MS);
+        assert_eq!(again[0].state, "running");
     }
 
     #[test]

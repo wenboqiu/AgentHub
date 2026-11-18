@@ -1,4 +1,4 @@
-type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "hub" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "phone";
+type IconName = "sessions" | "tasks" | "board" | "goals" | "calendar" | "stats" | "settings" | "back" | "plus" | "chevron" | "copy" | "up" | "down" | "speak" | "stop" | "branch" | "edit" | "check" | "close" | "timer" | "refresh" | "image" | "user" | "bell" | "people" | "folder" | "sliders" | "desktop" | "devices" | "phone";
 
 /** Original outline symbols; inherit text colour and remain decorative. */
 export default function Icon({ name }: { name: IconName }) {
@@ -14,7 +14,7 @@ export default function Icon({ name }: { name: IconName }) {
     board: <><rect x="3" y="4" width="5.5" height="16" rx="1.5" /><rect x="9.5" y="4" width="5" height="11" rx="1.5" /><rect x="15.5" y="4" width="5.5" height="8" rx="1.5" /></>,
     goals: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="5" /><circle cx="12" cy="12" r="1" /></>,
     calendar: <><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4M8 14h3"/></>,
-    hub: <><circle cx="12" cy="12" r="3"/><circle cx="4.5" cy="5" r="1.8"/><circle cx="19.5" cy="5" r="1.8"/><circle cx="4.5" cy="19" r="1.8"/><circle cx="19.5" cy="19" r="1.8"/><path d="M6.2 6.4 9.8 10M17.8 6.4 14.2 10M6.2 17.6 9.8 14M17.8 17.6 14.2 14"/></>,
+    stats: <path d="M6 20V11M12 20V4M18 20v-6"/>,
     settings: <><path d="M9 4 10 2h4l1 2 2 1 2 .2 2 3.6-1 1.8v2.8l1 1.8-2 3.6-2 .2-2 1-1 2h-4l-1-2-2-1-2-.2-2-3.6 1-1.8v-2.8L3 8.8l2-3.6L7 5Z" /><circle cx="12" cy="12" r="3" /></>,
     back: <path d="m14 5-7 7 7 7" />,
     plus: <path d="M12 5v14M5 12h14" />,
@@ -31,6 +31,7 @@ export default function Icon({ name }: { name: IconName }) {
     folder: <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h6a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/>,
     sliders: <><path d="M4 7h9M19 7h1M4 17h4M14 17h6"/><circle cx="15.5" cy="7" r="2"/><circle cx="10.5" cy="17" r="2"/></>,
     desktop: <><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/></>,
+    devices: <><rect x="2.5" y="4" width="12.5" height="9.5" rx="1.8"/><path d="M6 17h5.5M8.8 13.5V17"/><rect x="16.6" y="9" width="4.9" height="10.5" rx="1.6"/><path d="M18.7 17.4h.7"/></>,
     phone: <><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></>,
   };
   return <svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">{paths[name]}</svg>;

@@ -1,5 +1,6 @@
 import type pg from 'pg'
 import { TaskError, object, text } from './tasks.ts'
+import { avatarInput, storedAvatar, type AgentAvatar } from './prefs.ts'
 
 // 项目：一个代码库（或一条业务线）的身份与背景知识，加上它在各台电脑上的目录。
 // 目录列表（dirs）直接挂在项目上：一条 = 电脑（可空，空 = 哪台都能用）+ 目录路径。
@@ -14,6 +15,8 @@ export type Project = {
   id: number; name: string; brief: string
   /** 每台电脑一条目录；派活时按机器挑 */
   dirs: ProjectDir[]
+  /** 自定义头像；null = 显示项目名首字母 */
+  avatar: AgentAvatar | null
   tasks: number; createdAt: string; updatedAt: string
 }
 
@@ -34,6 +37,8 @@ export async function migrateProjects(db: DB) {
     UNIQUE(user_id, id))`)
   // 目录列表内嵌在项目行里：一条 = 电脑 + 路径，整存整取（编辑时整列替换）
   await db.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS dirs jsonb NOT NULL DEFAULT '[]'::jsonb`)
+  // 自定义头像；空 = 界面显示项目名首字母
+  await db.query('ALTER TABLE projects ADD COLUMN IF NOT EXISTS avatar jsonb')
   // 老数据迁移：目录原来外挂成 profiles（project_profiles 中转），现在收进项目行。
   // 只在旧表还在的时候搬一次；新库从来没有这两张表，直接跳过。
   const legacy = (await db.query(
@@ -77,6 +82,7 @@ export async function migrateProjects(db: DB) {
 const row = (r: any): Project => ({
   id: Number(r.id), name: r.name, brief: r.brief ?? '',
   dirs: dirsOf(r.dirs),
+  avatar: storedAvatar(r.avatar),
   tasks: Number(r.tasks ?? 0),
   createdAt: r.created_at.toISOString(), updatedAt: r.updated_at.toISOString(),
 })
@@ -116,6 +122,7 @@ export async function saveProject(db: DB, user: number, raw: unknown, projectId?
   const b = object(raw), out: Record<string, unknown> = {}
   if (projectId === undefined || 'name' in b) out.name = text(b.name, '项目名', MAX_NAME)
   if ('brief' in b) out.brief = text(b.brief ?? '', '项目说明', MAX_BRIEF, true)
+  if ('avatar' in b) { const a = avatarInput(b.avatar); out.avatar = a === null ? null : JSON.stringify(a) }
   let dirs: ProjectDir[] | null = null
   if ('dirs' in b) {
     if (!Array.isArray(b.dirs) || b.dirs.length > MAX_DIRS) throw new TaskError(`目录最多 ${MAX_DIRS} 条`)
@@ -175,6 +182,101 @@ export async function pickProjectDir(
   return list.find(d => !d.machine)
     ?? list.find(d => d.machine !== null && online.includes(d.machine))
     ?? list[0]
+}
+
+// ---------- 可选电脑（项目配置里的下拉项） ----------
+
+/**
+ * 一台候选电脑：online = 此刻有执行器连着；at = 最近一次在这台上干活的时间；
+ * agents = 这台电脑上报过能跑的工具（claude / codex / zcode / workbuddy / codebuddy）。空 = 不知道（老客户端从没上报过），
+ * 界面按「不确定」处理，别把没上报的机器一律判成不支持。
+ * listening = AgentHub 开着、但没开「远程执行」（连着、不接活）；online 为 true 时它一定是 false。
+ */
+export type Machine = { name: string; online: boolean; listening: boolean; at: string | null; agents: string[] }
+
+/**
+ * 一个账号下见过的电脑，给项目配置的下拉框用：
+ * ① 正在连着的执行器（一定要有，那是现在真能用上的）；
+ * ② 会话 / 运行记录里出现过的机器名（离线也留着——给另一台电脑配目录是常事）；
+ * ③ 项目配置里手填过的机器名（可能是还没装过 AgentHub 的新机器）。
+ * 排序按「在线优先，其次最近用过」，人一眼能挑到常用的那台。
+ */
+export async function listMachines(
+  db: DB, user: number, online: string[], caps: Map<string, string[]> = new Map(), listening: string[] = [],
+): Promise<Machine[]> {
+  const [sessions, runs, projectDirs] = await Promise.all([
+    db.query(`SELECT machine, max(updated_at) AS at FROM sessions
+               WHERE user_id=$1 AND machine <> '' GROUP BY machine`, [user]),
+    db.query(`SELECT machine, max(updated_at) AS at FROM runs
+               WHERE user_id=$1 AND machine <> '' GROUP BY machine`, [user]),
+    db.query(`SELECT dirs FROM projects WHERE user_id=$1 AND dirs <> '[]'::jsonb`, [user]),
+  ])
+  const seen = new Map<string, Machine>()
+  const touch = (name: string, at: Date | null) => {
+    if (!name) return
+    const iso = at ? at.toISOString() : null
+    const cur = seen.get(name)
+    // 同一台可能在会话和运行里都有记录：留更近的那个时间
+    if (!cur || (iso && (!cur.at || iso > cur.at))) seen.set(name, { name, online: cur?.online ?? false, listening: false, at: iso, agents: cur?.agents ?? [] })
+  }
+  for (const r of sessions.rows as { machine: string; at: Date | null }[]) touch(r.machine, r.at)
+  for (const r of runs.rows as { machine: string; at: Date | null }[]) touch(r.machine, r.at)
+  for (const r of projectDirs.rows as { dirs: unknown }[]) {
+    if (!Array.isArray(r.dirs)) continue
+    for (const d of r.dirs) {
+      if (!d || typeof d !== 'object') continue
+      const m = (d as Record<string, unknown>).machine
+      if (typeof m === 'string' && m) touch(m, null)
+    }
+  }
+  for (const name of [...online, ...listening]) touch(name, null)
+  for (const m of seen.values()) {
+    m.online = online.includes(m.name)
+    m.listening = !m.online && listening.includes(m.name)
+    // 能力由执行器连上来时上报；离线保留最近一次上报的结果（只能来自内存，重启后清空）
+    m.agents = caps.get(m.name) ?? []
+  }
+  return [...seen.values()].sort((a, b) =>
+    Number(b.online) - Number(a.online)
+    || Number(b.listening) - Number(a.listening)
+    || (b.at ?? '').localeCompare(a.at ?? '')
+    || a.name.localeCompare(b.name))
+}
+
+/**
+ * 本机改名：把旧机器名下的会话 / 运行记录 / 项目目录一起挪到新名下。
+ * 服务端是拿机器名当电脑身份的，名字一改旧记录就成了「另一台不存在的电脑」，
+ * 项目配置的下拉里会多出一条谁也对应不上的选项，所以客户端改名时顺手把库里的记录也改掉。
+ * 新名下已经有记录时按合并处理：项目目录留原来那条，会话 / 运行照常挪过去。
+ */
+export async function renameMachine(
+  db: DB, user: number, rawFrom: unknown, rawTo: unknown,
+): Promise<{ from: string; to: string; sessions: number; runs: number; projects: number }> {
+  const from = text(rawFrom, '原电脑名', 100)
+  const to = text(rawTo, '新电脑名', 100)
+  if (from === to) throw new TaskError('两个名字一样，不用改')
+  const sessions = (await db.query(
+    'UPDATE sessions SET machine=$3 WHERE user_id=$1 AND machine=$2 RETURNING id', [user, from, to],
+  )).rowCount ?? 0
+  const runs = (await db.query(
+    'UPDATE runs SET machine=$3 WHERE user_id=$1 AND machine=$2 RETURNING id', [user, from, to],
+  )).rowCount ?? 0
+  let projects = 0
+  const rows = (await db.query(
+    `SELECT id, dirs FROM projects WHERE user_id=$1 AND dirs <> '[]'::jsonb`, [user],
+  )).rows as { id: number; dirs: unknown }[]
+  for (const row of rows) {
+    const dirs = dirsOf(row.dirs)
+    if (!dirs.some(d => d.machine === from)) continue
+    // 按原顺序就地改名；新名下本来就有一条时留原来那条，把改名过来的丢掉（不重排用户的列表）
+    const hasTo = dirs.some(d => d.machine === to)
+    const next = dirs
+      .map(d => (d.machine === from ? { ...d, machine: to } : d))
+      .filter((d, i) => !(hasTo && dirs[i].machine === from))
+    await db.query('UPDATE projects SET dirs=$2::jsonb WHERE user_id=$1 AND id=$3', [user, JSON.stringify(next), Number(row.id)])
+    projects++
+  }
+  return { from, to, sessions, runs, projects }
 }
 
 // ---------- 项目近况（滚动简报） ----------

@@ -1,18 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   Api,
   AssistantAgent,
   AssistantDraft,
   AssistantDraftFields,
   AssistantState,
-  Task,
+  Machine,
+  Project,
+  Role,
 } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
-import ModelPicker from "./ModelPicker";
+import RoleFields, { BLANK_ROLE, formToInput, roleReady, type RoleForm } from "./RoleFields";
+import Markdown from "./Markdown";
 
 // 角色助手：一句话描述「要一个什么样的人」，由电脑端的 agent 出草稿，
 // 用户在草稿卡上改完再点创建。agent 只出 JSON，落库始终走 POST /roles，
 // 所以重名、上限、字段长度这些校验和手填表单完全一致。
+//
+// 草稿卡用的是和「新建角色」同一套 RoleFields：字段、下拉项、必填规则都一样，
+// 不会出现「助手建的少了某一项」。执行工具 / 模型 / 电脑这些事仍然按角色的规矩来：
+// 工具必填、模型可留空，电脑不绑角色——所以这里也不让人挑电脑，由服务端建议 + 在线情况自动定。
 
 const ASSISTANTS: AssistantAgent[] = ["claude", "codex", "zcode"];
 const EXAMPLES = [
@@ -21,24 +28,16 @@ const EXAMPLES = [
   "服务端接口和迁移交给它，用 Claude，模型 sonnet",
 ];
 
-type Form = { name: string; title: string; agent: string; model: string; context: string; tools: string };
-
-const toForm = (d: AssistantDraftFields | null): Form => ({
+const toForm = (d: AssistantDraftFields | null): RoleForm => ({
+  ...BLANK_ROLE,
   name: d?.name ?? "",
   title: d?.title ?? "",
-  agent: d?.agent ?? "",
+  agent: d?.agent ?? BLANK_ROLE.agent,
   model: d?.model ?? "",
   context: d?.context ?? "",
   tools: (d?.tools ?? []).join("、"),
-});
-
-const toFields = (f: Form): Partial<AssistantDraftFields> => ({
-  name: f.name.trim(),
-  title: f.title.trim(),
-  agent: (f.agent || null) as Task["agent"],
-  model: f.model.trim() || null,
-  context: f.context.trim(),
-  tools: f.tools.split(/[,，、\s]+/).map(s => s.trim()).filter(Boolean),
+  manager: d?.manager ?? false,
+  managerProjects: d?.managerProjects ?? [],
 });
 
 const clock = (iso: string) => {
@@ -50,6 +49,7 @@ const clock = (iso: string) => {
 function DraftCard({
   api,
   draft,
+  projects,
   busy,
   onBusy,
   onCreated,
@@ -57,14 +57,16 @@ function DraftCard({
 }: {
   api: Api;
   draft: AssistantDraft;
+  projects: Project[];
   busy: boolean;
   onBusy(v: boolean): void;
-  onCreated(): void;
+  /** 创建成功后回传新角色：外层拿着它跳进角色详情页 */
+  onCreated(r: Role): void;
   onError(msg: string): void;
 }) {
-  const [form, setForm] = useState<Form>(() => toForm(draft.draft));
+  const [form, setForm] = useState<RoleForm>(() => toForm(draft.draft));
   const [handled, setHandled] = useState<null | "created" | "discarded">(null);
-  const set = (patch: Partial<Form>) => setForm(f => ({ ...f, ...patch }));
+  const set = (patch: Partial<RoleForm>) => setForm(f => ({ ...f, ...patch }));
   // 别处（另一台设备 / 刷新）处理过的草稿也按结果渲染，本地点过的优先
   const done = handled ?? draft.status;
 
@@ -76,7 +78,7 @@ function DraftCard({
   };
 
   if (done === "created") {
-    return <p className="assistant-verdict">已创建角色「{form.name}」，可以在下面继续改。</p>;
+    return <p className="assistant-verdict">已创建角色「{form.name}」，正在打开它的详情页。</p>;
   }
   if (done === "discarded") return <p className="assistant-verdict dim">这张草稿不用了。</p>;
 
@@ -106,28 +108,19 @@ function DraftCard({
         <span className="dim">草稿 · 确认后才创建</span>
       </div>
       {draft.draft.note && <p className="hint draft-note">{draft.draft.note}</p>}
-      <div className="form-grid">
-        <label>角色名<input value={form.name} maxLength={60} disabled={busy} onChange={e => set({ name: e.target.value })} /></label>
-        <label>职责<input value={form.title} maxLength={120} disabled={busy} onChange={e => set({ title: e.target.value })} /></label>
-        <label>执行工具
-          <select value={form.agent} disabled={busy} onChange={e => set({ agent: e.target.value, model: "" })}>
-            <option value="">未指定</option>
-            {ASSISTANTS.map(key => <option key={key} value={key}>{AGENT_LABEL[key]}</option>)}
-          </select>
-        </label>
-        <label>模型<ModelPicker key={form.agent} agent={form.agent} value={form.model} disabled={busy} onChange={model => set({ model })} /></label>
-        <label>可用工具<input value={form.tools} maxLength={600} disabled={busy} onChange={e => set({ tools: e.target.value })} /></label>
-      </div>
-      <label>上下文（角色准则）
-        <textarea value={form.context} rows={5} maxLength={4000} disabled={busy} onChange={e => set({ context: e.target.value })} />
-      </label>
+      <RoleFields form={form} projects={projects} busy={busy} onChange={set} />
       <div className="btns">
-        <button className="primary" disabled={busy || !form.name.trim()}
-          onClick={() => void act(async () => { await api.confirmDraft(draft.id, toFields(form)); setHandled("created"); onCreated(); })}>
+        <button className="primary" disabled={busy || !roleReady(form)}
+          onClick={() => void act(async () => {
+            const r = await api.confirmDraft(draft.id, formToInput(form));
+            setHandled("created");
+            onCreated(r.role);
+          })}>
           创建角色
         </button>
         <button className="ghost" disabled={busy}
           onClick={() => void act(async () => { await api.discardDraft(draft.id); setHandled("discarded"); })}>不用了</button>
+        {!roleReady(form) && <span className="dim">角色名和执行工具必填</span>}
       </div>
     </div>
   );
@@ -139,26 +132,22 @@ export default function Assistant({
   onClose,
 }: {
   api: Api;
-  onCreated(): void;
+  /** 草稿卡确认后回传新角色：列表页刷新并跳进它的详情页 */
+  onCreated(r: Role): void;
   onClose(): void;
 }) {
   const [state, setState] = useState<AssistantState | null>(null);
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [text, setText] = useState("");
   const [agent, setAgent] = useState<AssistantAgent>("claude");
-  const [machine, setMachine] = useState("");
-  const [cwd, setCwd] = useState("");
-  const [manualCwd, setManualCwd] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const inited = useRef(false);
   const endRef = useRef<HTMLDivElement | null>(null);
 
-  // 目录候选：配置里登记的 + 这台电脑上用过的，去重后给下拉直接选，省得手打路径
-  const dirsOf = (m: string) =>
-    [...new Set((state?.dirs ?? [])
-      .filter(d => !d.machine || (m !== "" && d.machine === m))
-      .map(d => d.cwd))];
-
+  // 工作目录不做成选项：建角色跟目录无关，CLI 进程统一在电脑端的
+  // <文档>/AgentHub 里启动（那个目录由电脑端自动创建，不碰用户的项目文件）
   const load = useCallback(async () => {
     try {
       const s = await api.assistant();
@@ -167,9 +156,6 @@ export default function Assistant({
       if (!inited.current) {
         inited.current = true;
         setAgent(s.suggestion.agent);
-        setMachine(s.suggestion.machine);
-        // 空 = 电脑端的默认工作目录（<文档>/AgentHub），比塞一个项目目录更符合「建角色」这件事
-        setCwd(s.suggestion.cwd || "");
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -177,6 +163,28 @@ export default function Assistant({
   }, [api]);
 
   useEffect(() => { void load(); }, [load]);
+  // 草稿卡上的「项目经理」要列项目
+  useEffect(() => { api.projects().then(setProjects, () => setProjects([])); }, [api]);
+
+  // 每台电脑装了哪些工具：执行器连上来时报给服务端。挑了起草工具就只在装了它的电脑里挑，
+  // 免得挑一台根本跑不起来的。电脑不再让人选——角色不绑电脑，这里只是找台能跑的工具宿主。
+  const loadMachines = useCallback(() => {
+    api.machines().then(setMachines, () => setMachines([]));
+  }, [api]);
+  useEffect(() => { loadMachines(); }, [loadMachines]);
+  /** 这台电脑能不能跑这个工具；没上报过（老电脑端）当「不知道」，照留 */
+  const canRun = (m: { agents: string[] }, a: string) => m.agents.length === 0 || m.agents.includes(a);
+  const candidates = useMemo(() => {
+    const list = machines.length
+      ? machines.filter(m => m.online && canRun(m, agent)).map(m => ({ name: m.name, at: m.at }))
+      : (state?.online ?? []).map(name => ({ name, at: null }));
+    // 最近活跃的排前面：多台都能跑时优先用你刚用过的那台
+    return [...list].sort((a, b) => (b.at ?? "").localeCompare(a.at ?? ""));
+  }, [machines, agent, state?.online]);
+  // 服务端给的建议（上次那台）优先；它不在候选里就退到最近活跃的那台
+  const target = candidates.some(c => c.name === state?.suggestion.machine)
+    ? state!.suggestion.machine
+    : candidates[0]?.name ?? "";
 
   // 等 agent 回话时轮询：这条通道是电脑端跑 CLI，没有流式，只能按 run 状态收尾
   const pending = !!state?.pending;
@@ -198,8 +206,8 @@ export default function Assistant({
     setBusy(true); setErr("");
     try {
       if (!thread) {
-        if (!machine.trim()) throw new Error("先选一台在线的电脑");
-        await api.startAssistant({ agent, machine: machine.trim(), cwd: cwd.trim(), text: body });
+        if (!target) throw new Error(`没有在线电脑能跑 ${AGENT_LABEL[agent]}：先在装了它的那台电脑上打开 AgentHub`);
+        await api.startAssistant({ agent, machine: target, cwd: "", text: body });
       } else {
         await api.replyAssistant(body);
       }
@@ -221,14 +229,6 @@ export default function Assistant({
 
   const drafts = state?.drafts ?? [];
   const draftOf = (messageId: number) => drafts.find(d => d.messageId === messageId);
-  const dirs = dirsOf(machine);
-  // 默认项（空值）= 电脑端的 <文档>/AgentHub，不需要用户操心；只有主动点「其他」才出输入框
-  const showManualCwd = manualCwd;
-  const pickMachine = (m: string) => {
-    setMachine(m);
-    // 换电脑后，原来那个项目目录多半不存在；回到默认目录比留着一条错路径安全
-    if (cwd && !dirsOf(m).includes(cwd)) setCwd("");
-  };
 
   return (
     <section className="box assistant">
@@ -240,9 +240,8 @@ export default function Assistant({
         </div>
       </div>
       <p className="hint">
-        用一句话说清要什么人，电脑端的 agent 会整理成一份草稿（名字、职责、执行工具、模型、准则）；草稿你可以直接改，点「创建角色」才真正写进角色列表。
-        这条通道借的是派活：电脑得开着 AgentHub，一次大概十几秒，不会读写你的文件
-        {thread ? `；这次的工作目录是 ${thread.cwd || "AgentHub 默认目录（文档/AgentHub）"}` : ""}
+        用一句话说清要什么人，电脑端的 agent 会整理成一份草稿（名字、职责、执行工具、模型、准则、项目经理）；草稿的字段和「＋ 新建角色」完全一样，点「创建角色」才真正写进角色列表，并直接打开这个角色的详情页。
+        这条通道借的是派活：电脑得开着 AgentHub，一次大概十几秒，进程在那个电脑的「文档/AgentHub」里启动，不读写你的项目文件
         {state?.roles ? `；现有 ${state.roles} 个角色，助手会避开重名` : ""}。
       </p>
 
@@ -251,41 +250,23 @@ export default function Assistant({
 
       {!thread && (
         <div className="assistant-setup">
-          <div className="form-grid">
-            <label>执行工具
+          <div className="assistant-run">
+            <label>用哪个工具起草
               <select value={agent} disabled={busy} onChange={e => setAgent(e.target.value as AssistantAgent)}>
                 {ASSISTANTS.map(key => <option key={key} value={key}>{AGENT_LABEL[key]}</option>)}
               </select>
             </label>
-            <label>电脑
-              <select value={machine} disabled={busy} onChange={e => pickMachine(e.target.value)}>
-                <option value="">{state?.online.length ? "选一台" : "没有在线的电脑"}</option>
-                {(state?.online ?? []).map(m => <option key={m} value={m}>{m}</option>)}
-              </select>
-            </label>
-            <label>工作目录
-              {showManualCwd ? (
-                <span className="model-custom">
-                  <input value={cwd} maxLength={4000} disabled={busy} placeholder="电脑上已存在的目录，例如 D:\\Work2\\Demo" onChange={e => setCwd(e.target.value)} />
-                  <button type="button" className="ghost" disabled={busy} onClick={() => { setManualCwd(false); setCwd(""); }}>用默认目录</button>
-                </span>
-              ) : (
-                <select value={cwd} disabled={busy} onChange={e => {
-                  if (e.target.value === "__custom__") { setManualCwd(true); return; }
-                  setCwd(e.target.value);
-                }}>
-                  <option value="">AgentHub 默认目录（文档/AgentHub，自动创建）</option>
-                  {dirs.map(d => <option key={d} value={d}>{d}</option>)}
-                  {cwd && !dirs.includes(cwd) && <option value={cwd}>{cwd}</option>}
-                  <option value="__custom__">其他（手动填路径）…</option>
-                </select>
-              )}
-            </label>
+            <span className="dim">
+              {target
+                ? `会在 ${target} 上跑（自动挑最近活跃的电脑，不用选）`
+                : machines.length
+                  ? `没有在线电脑装了 ${AGENT_LABEL[agent] ?? agent}`
+                  : "还没有电脑连上来"}
+            </span>
           </div>
-          <p className="hint">
-            工作目录不是角色的属性：这条通道借你电脑上已登录的 CLI 当模型用，CLI 进程必须在某个真实目录里启动。
-            默认的「文档/AgentHub」由电脑端自动创建，不读写你的项目文件，卸载重装也还在；想换个地方也可以从列表里挑或手填。
-          </p>
+          {machines.length > 0 && candidates.length === 0 && (
+            <p className="hint">在装了这个工具的那台电脑上打开 AgentHub，再回来看这里。</p>
+          )}
           <div className="assistant-examples">
             {EXAMPLES.map(e => <button key={e} className="chip" disabled={busy} onClick={() => void send(e)}>{e}</button>)}
           </div>
@@ -298,10 +279,11 @@ export default function Assistant({
             const draft = draftOf(m.id);
             return (
               <div key={m.id} className={`assistant-msg ${m.role === "user" ? "me" : ""}`}>
-                <div className="assistant-bubble">{m.text}</div>
+                {/* 两边都按 markdown 排版：表格、代码、列表都常见 */}
+                <div className="assistant-bubble"><Markdown text={m.text} /></div>
                 <span className="dim assistant-time">{m.role === "user" ? "你" : AGENT_LABEL[thread?.agent ?? ""] ?? "助手"} · {clock(m.createdAt)}</span>
                 {draft && (
-                  <DraftCard api={api} draft={draft} busy={busy}
+                  <DraftCard api={api} draft={draft} projects={projects} busy={busy}
                     onBusy={setBusy} onCreated={onCreated} onError={setErr} />
                 )}
               </div>

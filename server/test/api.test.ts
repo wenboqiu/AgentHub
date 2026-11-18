@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 import type { FastifyInstance } from 'fastify'
 import pg from 'pg'
 import { buildApp } from '../src/index.ts'
+import { expirePending } from '../src/db.ts'
 import { DATABASE_URL, makeUser } from './helpers.ts'
 
 let TOKEN = ''
+let USER_ID = 0
 const run = Date.now()
 let n = 0
 const sid = () => `t${run}-${n++}`
@@ -43,7 +45,9 @@ describe('AgentHub 服务端', () => {
   before(async () => {
     app = await buildApp(DATABASE_URL, 'silent', {})
     base = await app.listen({ port: 0, host: '127.0.0.1' })
-    TOKEN = (await makeUser(pool)).token
+    const u = await makeUser(pool)
+    TOKEN = u.token
+    USER_ID = u.id
   })
   after(async () => {
     await app.close()
@@ -90,8 +94,31 @@ describe('AgentHub 服务端', () => {
     ws.close()
   })
 
-  it('乱序的旧事件被丢弃', async () => {
-    const s = sid()
+  it('完成态挂太久自动转入已处理；waiting 与新完成的不受影响', async () => {
+    const old1 = sid(), old2 = sid(), fresh = sid(), waiting = sid()
+    await send([
+      ev(old1, 'running', { at: iso(-9000) }), ev(old1, 'done', { at: iso(-8000) }),
+      ev(old2, 'running', { at: iso(-9000) }), ev(old2, 'aborted', { at: iso(-8000) }),
+      ev(fresh, 'running', { at: iso(-3000) }), ev(fresh, 'done', { at: iso(-2000) }),
+      ev(waiting, 'waiting', { at: iso(-8000) }),
+    ])
+    // 把 old1/old2/waiting 的状态起点拨回 3 小时前（waiting 用来验证它不过期）
+    await pool.query(
+      `UPDATE sessions SET state_since = now() - interval '3 hours'
+       WHERE user_id = $1 AND id = ANY($2)`,
+      [USER_ID, [`claude:${old1}`, `claude:${old2}`, `claude:${waiting}`]],
+    )
+    const expired = await expirePending(pool, 2 * 60 * 60_000)
+    const ids = expired.map(e => e.session.id)
+    assert.ok(ids.includes(`claude:${old1}`) && ids.includes(`claude:${old2}`))
+    assert.ok(!ids.includes(`claude:${fresh}`) && !ids.includes(`claude:${waiting}`))
+    assert.equal((await get(`claude:${old1}`)).acked, true)
+    assert.equal((await get(`claude:${old2}`)).acked, true)
+    assert.equal((await get(`claude:${fresh}`)).acked, false)
+    assert.equal((await get(`claude:${waiting}`)).acked, false)
+  })
+
+  it('乱序的旧事件被丢弃', async () => {    const s = sid()
     await send([ev(s, 'done', { at: iso(-1000) })])
     const r = await send([ev(s, 'running', { at: iso(-5000) })])
     assert.equal(r.body.accepted, 0)
@@ -165,12 +192,18 @@ describe('AgentHub 服务端', () => {
     assert.equal(await get(`claude:${a}`), undefined)
   })
 
-  it('默认列表隐藏 ended，all=1 才显示', async () => {
+  it('默认列表隐藏 ended，all=1 才显示，单查接口还能拿到', async () => {
     const s = sid()
     await send([ev(s, 'ended')])
     const normal = await call('GET', '/sessions')
     assert.ok(!(normal.body.sessions as any[]).some(x => x.id === `claude:${s}`))
     assert.ok(await get(`claude:${s}`))
+    // 快照里没有的会话（已结束 / 超过 24 小时）可以按 id 补查：任务详情靠这个才点得开
+    const one = await call('GET', `/sessions/${encodeURIComponent(`claude:${s}`)}`)
+    assert.equal(one.status, 200)
+    assert.equal(one.body.session.state, 'ended')
+    assert.equal((await call('GET', '/sessions/claude:nope')).status, 404)
+    assert.equal((await call('GET', `/sessions/${encodeURIComponent(`claude:${s}`)}`, undefined, null)).status, 401)
   })
 
   it('豆包事件支持状态、标题更新与提醒，拒绝远程执行和历史读取', async () => {
@@ -193,6 +226,25 @@ describe('AgentHub 服务端', () => {
     }
   })
 
+  it('内部会话的标题由服务端钉住，不被本机 transcript 的契约原文顶掉', async () => {
+    const key = sid(), id = `codebuddy:${key}`
+    await send([ev(key, 'running', { agent: 'codebuddy', at: iso(-3000), title: '意见细化：把会话列表里的提示词原文收起来' })])
+    assert.equal((await get(id)).title, '意见细化：把会话列表里的提示词原文收起来')
+    // 电脑端报上来的标题是「首条用户消息截 40 字」，而这类会话的首条正是 AgentHub 写的契约：不许覆盖
+    await send([ev(key, 'done', {
+      agent: 'codebuddy', at: iso(-2000),
+      title: '你在 AgentHub 里当项目经理，读完一段刚结束的会话，写一张能直接开工的任',
+    })])
+    const done = await get(id)
+    assert.equal(done.state, 'done')
+    assert.equal(done.title, '意见细化：把会话列表里的提示词原文收起来')
+    // 普通的活照旧跟着 transcript 走，这条规矩不能外溢
+    const plain = sid()
+    await send([ev(plain, 'running', { agent: 'codebuddy', at: iso(-3000), title: '第一句' })])
+    await send([ev(plain, 'done', { agent: 'codebuddy', at: iso(-2000), title: '第二句' })])
+    assert.equal((await get(`codebuddy:${plain}`)).title, '第二句')
+  })
+
   it('WorkBuddy 事件支持状态与标题，拒绝远程执行，但历史可以读', async () => {
     const key = sid(), id = `workbuddy:${key}`
     const first = await send([ev(key, 'running', { agent: 'workbuddy', cwd: 'D:\\Work2\\AgentHub', title: '分析 agenthub 能否支持 workbuddy 的消息' })])
@@ -209,7 +261,8 @@ describe('AgentHub 服务端', () => {
     for (const [action, body] of [['messages', { text: 'hello' }], ['spawn', { mode: 'fresh', text: 'hello' }]] as const) {
       const response = await call('POST', `/sessions/${id}/${action}`, body)
       assert.equal(response.status, 409, JSON.stringify(response.body))
-      assert.match(response.body.error, /WorkBuddy/)
+      // 远程已把 WorkBuddy 从「仅监听」特判改为统一的执行器在线检查：无执行器时报「电脑端不在线」
+      assert.match(response.body.error, /电脑端不在线/)
     }
     // 正文在电脑端的 transcript 里，读历史和 Claude / Codex 同一条链路：只受「电脑端不在线」约束，
     // 不能再按「只读 agent」一句话拦掉，否则详情页永远停在「还没有同步到消息」。

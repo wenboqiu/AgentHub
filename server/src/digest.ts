@@ -2,9 +2,8 @@ import type pg from 'pg'
 import { listMessages } from './db.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
 
-// 投机预摘要（思路来自 DeepSeek Super-agent 的投机执行：结果不确定是否被采用时先在
-// 后台准备，有价值再提交）。任务进入「待验收」时预生成验收摘要，失败运行时预收集
-// 错误上下文；用户点开任务详情时立即可见，不用再开终端翻记录。
+// 预摘要：任务进入「待验收」时预生成验收摘要，失败运行时预收集错误上下文；
+// 用户点开任务详情时立即可见，不用再开终端翻记录。证据靠正则抽取，宁可少抓。
 // 全程只读会话/运行数据 + 写自己的缓存表，不改变任何权限模型。
 
 type DB = Pick<pg.Pool, 'query'>
@@ -58,8 +57,8 @@ export async function buildReviewDigest(pool: pg.Pool, userId: number, taskId: n
     )
   ).rows[0]
   const runs = (
-    await pool.query('SELECT status, error, updated_at FROM runs WHERE user_id=$1 AND task_id=$2 ORDER BY created_at DESC, id DESC LIMIT 3', [userId, taskId])
-  ).rows.map((r: { status: string; error: string; updated_at: Date }) => ({ status: r.status, error: r.error, updatedAt: r.updated_at.toISOString() }))
+    await pool.query('SELECT status, error, model, updated_at FROM runs WHERE user_id=$1 AND task_id=$2 ORDER BY created_at DESC, id DESC LIMIT 3', [userId, taskId])
+  ).rows.map((r: { status: string; error: string; model: string | null; updated_at: Date }) => ({ status: r.status, error: r.error, model: r.model ?? null, updatedAt: r.updated_at.toISOString() }))
   let lastReply = '', lastReplyAt: string | null = null, messages = 0
   let evidence: Evidence[] = []
   if (s) {

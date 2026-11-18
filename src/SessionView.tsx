@@ -1,19 +1,26 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Project, type Proposal, type Role, type Run, type RunActivity, type Session, type Task } from "./lib/api";
-import { desktop, isAndroid, isDesktop } from "./lib/platform";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { isPending, isRunActive, APPROVAL_TIER_LABEL, type Api, type Approval, type Message, type Proposal, type Run, type RunActivity, type Session, type Task } from "./lib/api";
+import { desktop, isAndroid, isDesktop, type CodexThreadState, type DoubaoVisible } from "./lib/platform";
 import { syncSession, type Bus } from "./lib/sessionSync";
 import { QuickCreate } from "./TasksPanel";
 import Icon from "./Icon";
 import MessageActions from "./MessageActions";
-import ProposalCard from "./ProposalCard";
 import { speechSnapshot, subscribeSpeech, stopSpeech } from "./lib/speech";
 import { AGENT_LABEL, agentName, isListenOnly } from "./lib/agents";
+import AgentAvatar from "./AgentAvatar";
+import { foldRepeats } from "./lib/foldRepeats";
 import SessionSidebar from "./SessionSidebar";
-import { isPendingSession, sendBlockReason } from "./lib/sendBlock";
+import { useMediaQuery } from "./lib/useMediaQuery";
+import { isPendingSession, isStuckRunning, sendBlockReason } from "./lib/sendBlock";
+import { isInternalSession } from "./lib/internal";
 import { ACCEPTED_TYPES, MAX_IMAGES, fileToDataUrl, fitsLimit, pickDataUrls, pickImageFiles } from "./lib/images";
 import { canPickNative, pickNativeImages } from "./lib/nativeImages";
 import { clockAt, fullAt } from "./lib/time";
-import { formatElapsed, liveLabel, runElapsed, runSummary } from "./lib/runMeta";
+import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary } from "./lib/runMeta";
+import Markdown from "./Markdown";
+import FilePreview from "./FilePreview";
+import DoubaoImage from "./DoubaoImage";
+import { parseQuestions } from "./lib/questions";
 
 const STATE_LABEL: Record<string, string> = {
   idle: "空闲",
@@ -49,13 +56,12 @@ type Props = {
   tasks: Task[];
   onTask(id:number):void;
   onTaskSaved(task:Task):void;
-  /** 这条会话的处理意见（含已处理过的，用来显示「已生成任务」） */
+  /** 这条会话的处理意见（含已处理过的，用来判断要不要显示入口、有几份待确认） */
   proposals: Proposal[];
-  roles: Role[];
-  projects: Project[];
-  /** 项目经理开了自动派发：卡片上多一个「生成并派发」 */
-  autoDispatch: boolean;
-  onProposal(p: Proposal): void;
+  /** 打开任务单详情页（正文放在那边展开，聊天流里只留一个入口） */
+  onProposals(sessionId: string): void;
+  /** 把这条会话标记为已处理：打开对话流时自动调用，会话从待处理区撒下 */
+  onAck(): void;
 };
 
 /** 不能发消息的原因与各种阻塞判定，见 lib/sendBlock（纯逻辑，单独测试） */
@@ -63,36 +69,55 @@ export { isPendingSession, sendBlockReason, isStuckRunning, STALE_RUNNING_MS } f
 
 const NOT_FOUND_GRACE_MS = 5000;
 
-/** Codex 提问（request_user_input）的 questions，存在 approval.detail 里（JSON 字符串） */
-type UserQuestion = { id: string; question: string; options: { label: string; description?: string }[] };
-const parseQuestions = (detail: string): UserQuestion[] | null => {
-  try {
-    const v = JSON.parse(detail);
-    if (!Array.isArray(v) || !v.length) return null;
-    const out = v
-      .filter((q): q is Record<string, unknown> => !!q && typeof q === "object" && typeof (q as { id?: unknown }).id === "string")
-      .map((q) => ({
-        id: String(q.id),
-        question: typeof q.question === "string" ? q.question : String(q.header ?? ""),
-        options: Array.isArray(q.options)
-          ? q.options.filter((o): o is { label: string; description?: string } => !!o && typeof o === "object" && typeof (o as { label?: unknown }).label === "string")
-          : [],
-      }));
-    return out.length ? out : null;
-  } catch {
-    return null;
+/** 豆包消息正文里单独成行的「[图片]」是图片位（第 k 个对应 images[k]）；其余相邻行合并成文字段，连续的图并排 */
+type DoubaoPart = { kind: "text"; text: string } | { kind: "images"; slots: number[] };
+function doubaoParts(text: string): DoubaoPart[] {
+  const parts: DoubaoPart[] = [];
+  let slot = 0;
+  let buf: string[] = [];
+  const flush = () => {
+    if (buf.length) parts.push({ kind: "text", text: buf.join("\n") });
+    buf = [];
+  };
+  for (const line of text.split("\n")) {
+    if (line === "[图片]") {
+      flush();
+      const last = parts[parts.length - 1];
+      if (last && last.kind === "images") last.slots.push(slot++);
+      else parts.push({ kind: "images", slots: [slot++] });
+    } else {
+      buf.push(line);
+    }
   }
-};
+  flush();
+  return parts;
+}
 
-export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, roles, projects, autoDispatch, onProposal }: Props) {
+export default function SessionView({ sessionId, session, localMachine, onSwitch, sessions, nowTick, attention, api, bus, approvals, agents, onBack, tasks, onTask, onTaskSaved, proposals, onProposals, onAck }: Props) {
   const [messages, setMessages] = useState<Message[]>([]);
+  /** 豆包客户端不把正文落盘，只能读它窗口里已经渲染出来的消息（只读、能滚到哪算哪） */
+  const [doubaoWin, setDoubaoWin] = useState<DoubaoVisible | null>(null);
+  const [doubaoErr, setDoubaoErr] = useState("");
   const [run, setRun] = useState<Run | null>(null);
   /** 运行中：执行器刚上报的「正在做什么」（agent 自己的话），不是本地编的状态 */
   const [activity, setActivity] = useState<RunActivity | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState("");
-  // 任务单一次只处理一张，避免连点生成两个任务
-  const [proposalBusy, setProposalBusy] = useState(false);
+  // 任务单入口上的数量：待确认优先说，处理过的只给个总数。
+  // 忽略过的（discarded）不算：人已经说了「这张单不用了」，聊天流底部不该还留着一个入口提醒他；
+  // 一条会话的单子全被忽略时，入口整块不出现。详情页里仍留着「这条建议不用了」的记录。
+  const liveProposals = proposals.filter((p) => p.status !== "discarded");
+  const proposalCount = liveProposals.length;
+  const pendingProposals = liveProposals.filter((p) => p.status === "pending").length;
+  // 两段式：待确认的还停在「建议」阶段时，入口就直说「几条建议」，别一上来叫任务单
+  const pendingSuggestions = liveProposals.filter((p) => p.status === "pending" && p.stage === "suggest").length;
+  // 会话停下来等人拍板时入口直说，别混在「建议」里被当成可有可无
+  const pendingDecide = liveProposals.some((p) => p.status === "pending" && p.kind === "decide");
+  const pendingLabel = pendingDecide
+    ? "它在等你决定"
+    : pendingSuggestions === pendingProposals && pendingProposals > 0
+      ? `${pendingProposals} 条建议待确认`
+      : `${pendingProposals} 份待确认`;
   /** 细粒度操作锁：哪类操作在等待就只锁哪类按钮，避免"点一个按钮全页变灰" */
   const [pending, setPending] = useState<"" | "send" | "stop" | "spawn" | "terminal" | "link">("");
   const [deciding, setDeciding] = useState<string | null>(null);
@@ -111,15 +136,41 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const [sheetCollapsed, setSheetCollapsed] = useState(false);
   /** 图片预览浮层：当前放大查看的图片（data URL） */
   const [preview, setPreview] = useState<string | null>(null);
+  const [filePreview, setFilePreview] = useState<{ path: string; load: () => ReturnType<Api["sessionFile"]> } | null>(null);
+  const openFile = useCallback((path: string) => setFilePreview({ path, load: () => api.sessionFile(sessionId, path) }), [api, sessionId]);
   /** 待发送的附图（data URL），最多 MAX_IMAGES 张 */
   const [images, setImages] = useState<string[]>([]);
-  /** 左侧会话列表是否收起（只影响桌面端，记住上次的展开状态） */
+  /** 左侧会话列表是否收起（记住上次的展开状态，宽屏常驻时生效） */
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem("agenthub.sidebar") === "0"; } catch { return false; }
   });
   useEffect(() => {
     try { localStorage.setItem("agenthub.sidebar", sidebarCollapsed ? "0" : "1"); } catch {}
   }, [sidebarCollapsed]);
+  /** 窄屏（手机）：侧栏改成从左侧滑出的抽屉，默认收起 */
+  const narrow = useMediaQuery("(max-width: 760px)");
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  // 切到别的会话后抽屉自动收起，把正文让出来
+  useEffect(() => { setDrawerOpen(false); }, [sessionId]);
+  // 按宽度决定形态，不看平台：电脑和安卓平板（宽屏 / 横屏）都常驻左侧列表，
+  // 手机宽度放不下才收成抽屉——之前只在桌面端渲染，平板上就完全看不到列表。
+  const docked = !narrow;
+  const sidebarVisible = docked ? !sidebarCollapsed : drawerOpen;
+  // 顶栏横贯全宽、侧栏从顶栏下沿开始：实测顶栏高度（换行 / 字体缩放会变）写给侧栏 sticky 定位用
+  const pageRef = useRef<HTMLDivElement | null>(null);
+  const headerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const page = pageRef.current, header = headerRef.current;
+    if (!page || !header) return;
+    const ro = new ResizeObserver(() => page.style.setProperty("--session-topbar-h", `${header.offsetHeight}px`));
+    ro.observe(header);
+    return () => ro.disconnect();
+  }, []);
+  const attentionCount = attention.size;
+  const selectSession = (next: string) => {
+    setDrawerOpen(false);
+    onSwitch(next);
+  };
   const fileRef = useRef<HTMLInputElement | null>(null);
   /** 用户是否停留在消息底部：底部附近才跟随新消息滚动，往上翻历史时不打断 */
   const stick = useRef(true);
@@ -151,8 +202,31 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
   const online = !!session && agents.includes(session.machine);
   const [syncing, setSyncing] = useState(false);
   const autoLoaded = useRef("");
+  const isDoubao = session?.agent === "doubao";
+  // 豆包：正文只在它自己的窗口里（日志和 IndexedDB 都没有），只能读界面。
+  // 每 3 秒抓一次虚拟列表里当前挂着的消息（一次读约 0.7 秒，别把 UIA 走太频）；
+  // 窗口切到别的对话时连标题一起带回来提醒。
   useEffect(() => {
-    if (!id || !online || isPendingSession(id) || autoLoaded.current === id) return;
+    if (!isDesktop || !isDoubao || !id) return;
+    let gone = false;
+    let timer = 0;
+    const tick = () => {
+      if (document.hidden) {
+        timer = window.setTimeout(tick, 3000);
+        return;
+      }
+      desktop
+        .doubaoVisible()
+        .then((v) => { if (!gone) { setDoubaoWin(v); setDoubaoErr(""); } })
+        .catch((e) => { if (!gone) { setDoubaoWin(null); setDoubaoErr(e instanceof Error ? e.message : String(e)); } })
+        .finally(() => { if (!gone) timer = window.setTimeout(tick, 3000); });
+    };
+    tick();
+    return () => { gone = true; window.clearTimeout(timer); };
+  }, [id, isDoubao]);
+  useEffect(() => {
+    // 豆包没有可拉的历史（服务端直接 409），内容靠上面的窗口抓取，别在这里白跑一次
+    if (!id || !online || isDoubao || isPendingSession(id) || autoLoaded.current === id) return;
     autoLoaded.current = id;
     let gone = false;
     setSyncing(true);
@@ -171,7 +245,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       gone = true;
       setSyncing(false);
     };
-  }, [api, id, online]);
+  }, [api, id, online, isDoubao]);
 
   // 会话暂时不在列表里（刚新开、广播还没到）：先显示「加载中」，等够 5 秒才判定不存在
   const exists = !!session;
@@ -228,16 +302,20 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
 
   // 运行中每秒走一次表：思考计时和「刚刚还在执行工具」都得靠它推进
   const active = isRunActive(run);
+  // 只读监听会话（WorkBuddy / 豆包）没有 run，逐条活动也就没有；只要服务端还说这次在跑，就该有一行说明
+  const listenLive = !active && !!session && isListenOnly(session.agent) && session.state === "running";
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!active) return;
+    if (!active && !listenLive) return;
     setNow(Date.now());
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
-  }, [active, run?.id]);
+  }, [active, listenLive, run?.id]);
   // 内容指纹：条数 + 总字数。回复是流式长出来的（同一条消息变长、条数不变），
   // 只盯条数会在回复变长时漏掉跟随，末尾就会滑到输入框后面。
-  const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0);
+  // 豆包的消息不在 messages 里，指纹要把窗口抓到的也算进去，否则新内容长出来不跟随滚动
+  const doubaoFlow = doubaoWin?.messages.reduce((n, m) => n + m.text.length, doubaoWin.messages.length) ?? 0;
+  const flowKey = messages.length + ":" + messages.reduce((n, m) => n + m.text.length, 0) + "|" + doubaoFlow;
   useEffect(() => {
     // 不能用 endRef.scrollIntoView({block:"end"})：输入框是 sticky 悬浮在视口底部的，
     // 那样只会把"末尾"对齐到视口底，最后一条消息 / 授权卡片正好被输入框盖住
@@ -245,6 +323,35 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     // 输入框就会回到它在文档流里的位置，末尾内容自然露在它上方。
     if (stick.current) window.scrollTo({ top: document.documentElement.scrollHeight, behavior: "auto" });
   }, [flowKey, approvals.length]);
+
+  // 打开对话流即视为处理：进来看这一轮，这条会话自动从待处理区撒下（不再单放「处理」按钮）。
+  // 快照每几秒就换新对象，用 ref 记下已 ack 的会话，避免重复发请求；
+  // 之后会话再次变回 pending（新一轮结束）时照样会再 ack 一次。
+  const autoAcked = useRef(new Set<string>());
+  useEffect(() => {
+    if (!session || !isPending(session) || autoAcked.current.has(session.id)) return;
+    autoAcked.current.add(session.id);
+    onAck();
+  }, [session, onAck]);
+
+  // Codex 会话可能被另一个客户端占用（Codex 桌面应用 / IDE / 终端握着 thread writer 锁），
+  // 这时发消息会被直接拒绝。桌面端在本机每 5 秒探一次锁，提前在输入框上方提醒。
+  const isCodex = session?.agent === "codex";
+  const [threadState, setThreadState] = useState<CodexThreadState>("free");
+  const threadKey = isCodex && id.startsWith("codex:") && !isPendingSession(id) ? id.slice("codex:".length) : "";
+  useEffect(() => {
+    if (!isDesktop || !threadKey) return;
+    let gone = false;
+    let timer = 0;
+    const tick = () => {
+      desktop.codexThreadStatus(threadKey)
+        .then((s) => { if (!gone) setThreadState(s); })
+        .catch(() => { /* 探测失败维持上次结果，别刷错误 */ })
+        .finally(() => { if (!gone) timer = window.setTimeout(tick, 5000); });
+    };
+    tick();
+    return () => { gone = true; window.clearTimeout(timer); };
+  }, [threadKey]);
 
   if (!session) {
     return (
@@ -259,6 +366,15 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
 
   const terminalRun = !!run && messages.some(m=>m.runId===run.id && m.role==="system" && m.text.startsWith("已连接原终端"));
   const reason = sendBlockReason({ session, agents, running: active });
+  // 运行中那行：有 run 就说 agent 自己的话；只读监听没有 run，只说「还没结束 + 多久没新记录」
+  const listenSince = Date.parse(session.stateSince);
+  const liveText = approvals.length > 0
+    ? "等待你的确认"
+    : listenLive
+      ? `${listenLabel(session.eventAt, agentName(session.agent), now)}${isStuckRunning(session, now) ? "，可能已经停在那里" : ""}`
+      : liveLabel(activity, agentName(session.agent));
+  // 计时：有 run 按 run 起算；监听会话从进入运行态算起（state_since）
+  const liveElapsed = run ? runElapsed(run, now) : Number.isNaN(listenSince) ? 0 : Math.max(0, now - listenSince);
 
   const guard = (key: "send" | "stop" | "spawn" | "terminal" | "link", fn: () => Promise<unknown>) => {
     setPending(key);
@@ -394,22 +510,28 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       return { ...p, [qid]: cur.includes(label) ? cur.filter((x) => x !== label) : [...cur, label] };
     });
 
+  // ---- 豆包：窗口里抓到的那几条消息（只读，不参与发送 / 分支 / 评价） ----
+  const doubaoMsgs = isDoubao && doubaoWin ? doubaoWin.messages : [];
+  const doubaoConv = (doubaoWin?.title ?? "").replace(/\s*-\s*豆包\s*$/, "").trim();
+  const doubaoOther = !!doubaoConv && !!session.title && doubaoConv !== session.title;
+
   return (
-    <div className={`session-shell${isDesktop && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
-      {isDesktop && (
-        <SessionSidebar
-          sessions={sessions}
-          currentId={id || sessionId}
-          attention={attention}
-          now={nowTick}
-          onSelect={onSwitch}
-          onCollapse={() => setSidebarCollapsed(true)}
-        />
-      )}
-      <div className="app session-view">
-      <header>
+    <div ref={pageRef} className={`session-page${docked && sidebarCollapsed ? " sidebar-collapsed" : ""}`}>
+      <header ref={headerRef}>
         <button className="back-button" onClick={onBack}><Icon name="back"/>返回</button>
-        {isDesktop && sidebarCollapsed && (
+        {!docked && (
+          <button
+            className="icon-button sidebar-open"
+            aria-label="会话列表"
+            title="会话列表"
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen((o) => !o)}
+          >
+            <Icon name="sessions" />
+            {attentionCount > 0 && <span className="sidebar-open-dot" aria-hidden="true" />}
+          </button>
+        )}
+        {docked && sidebarCollapsed && (
           <button className="icon-button sidebar-toggle" aria-label="展开会话列表" title="展开会话列表" onClick={() => setSidebarCollapsed(false)}>
             <Icon name="chevron" />
           </button>
@@ -418,8 +540,8 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         <strong className="project">{session.project || "(未知项目)"}</strong>
         <span className="spacer" />
         <span className="machine">
-          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}</span>
-          {!pendingSession && (
+          <span className="machine-text">{session.machine} · {STATE_LABEL[session.state] ?? session.state}{session.state === "running" && (session.bgTasks ?? 0) > 0 ? ` · ${session.bgTasks} 个后台任务` : ""}</span>
+          {!pendingSession && !isDoubao && (
             <button
               className={`icon-button${syncing ? " spin" : ""}`}
               aria-label="刷新电脑上的记录"
@@ -432,11 +554,38 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           )}
         </span>
       </header>
+      <div className="session-shell">
+      {sidebarVisible && (
+        <SessionSidebar
+          sessions={sessions}
+          currentId={id || sessionId}
+          attention={attention}
+          now={nowTick}
+          onSelect={selectSession}
+          drawer={!docked}
+          onCollapse={() => (docked ? setSidebarCollapsed(true) : setDrawerOpen(false))}
+        />
+      )}
+      {!docked && drawerOpen && (
+        <button className="sidebar-scrim" aria-label="关闭会话列表" tabIndex={-1} onClick={() => setDrawerOpen(false)} />
+      )}
+      <div className="app session-view">
       {session.title && <div className="title wrap">{session.title}</div>}
+      {/* 内部会话的首条气泡是 AgentHub 写的契约提示词（角色助手 / 意见细化），先说明白，别让人以为是自己发的 */}
+      {isInternalSession(session) && <p className="hint">AgentHub 自动开的会话：首条消息是发给执行工具的指令原文，不是人写的对话。跑完的结果会回到对应的角色草稿或任务单上。</p>}
       {isDesktop && isListenOnly(session.agent) && session.machine === localMachine && <div className="btns"><button onClick={() => { setErr(""); desktop.focus(null, session.agent).catch((e) => setErr(e instanceof Error ? e.message : String(e))); }}>打开 {agentName(session.agent)} 客户端</button></div>}
+      {isDesktop && isDoubao && (
+        <p className="hint">
+          {doubaoErr
+            ? `读不到豆包窗口：${doubaoErr}`
+            : doubaoMsgs.length
+              ? `只读：下面是豆包窗口里当前渲染出来的 ${doubaoMsgs.length} 条消息${doubaoOther ? `，但窗口停在「${doubaoConv}」，不是本会话` : ""}；更早的、已经滚出视野的消息拿不到。`
+              : "只读：豆包不把对话正文写到磁盘，只能读它窗口里已经渲染出来的消息。把豆包窗口开着并停在要看的对话上，这里会自动跟随。"}
+        </p>
+      )}
       {/* 会话级操作合并为一行：任务关联、新建会话、终端打开 */}
       <div className="task-links">
-        {tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}>{t.title}</button>)}
+        {tasks.filter(t=>t.sessionIds.includes(sessionId)).map(t=><button key={t.id} onClick={()=>onTask(t.id)}><span className="task-no">#{t.id}</span> {t.title}</button>)}
         <button onClick={()=>setLinkingTask(!linkingTask)} aria-expanded={linkingTask}>关联到任务</button>
         {!pendingSession && !isListenOnly(session.agent) && (
           <>
@@ -452,11 +601,11 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         )}
       </div>
       {canOpenInTerminal && active && <p className="hint">AgentHub 正在运行这个会话，结束后再打开</p>}
-      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={pending==="link"} onClick={()=>guard("link",async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}>{t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/><div className="btns"><button onClick={()=>setLinkingTask(false)}>取消</button></div></div>}
+      {linkingTask&&<div className="selection-panel"><p>选择未完成的任务</p>{tasks.filter(t=>t.status!=="done"&&!t.sessionIds.includes(sessionId)).map(t=><button key={t.id} className="entity-row" disabled={pending==="link"} onClick={()=>guard("link",async()=>{onTaskSaved(await api.linkSession(t.id,sessionId));setLinkingTask(false);})}><span className="task-no">#{t.id}</span> {t.title}</button>)}<QuickCreate placeholder="新建任务并关联…" create={async title=>{const task=await api.createTask({title});onTaskSaved(task);onTaskSaved(await api.linkSession(task.id,sessionId));setLinkingTask(false);}}/><div className="btns"><button onClick={()=>setLinkingTask(false)}>取消</button></div></div>}
       {spawnOpen && !pendingSession && (
         <div className="spawn-panel">
           <h2>{branchMessage ? "从此处分支到新聊天" : "同目录新建会话"}</h2>
-          {branchMessage ? <><p className="hint">保留到所选回复为止的上下文，之后的消息不会带入。新聊天继续使用同一项目目录。</p><blockquote className="branch-preview">{branchMessage.text.slice(0,240)}{branchMessage.text.length>240?"…":""}</blockquote></> : <p className="hint">使用当前项目目录，对话从零开始。</p>}
+          {branchMessage ? <><p className="hint">保留到所选回复为止的上下文，之后的消息不会带入。新聊天继续使用同一项目目录。</p><blockquote className="branch-preview"><Markdown text={branchMessage.text.slice(0,240)} compact />{branchMessage.text.length>240?"…":""}</blockquote></> : <p className="hint">使用当前项目目录，对话从零开始。</p>}
           <textarea aria-label="新会话的第一条消息" value={spawnText} onChange={(e) => setSpawnText(e.target.value)} placeholder="第一条消息…" rows={3} disabled={pending==="spawn"} />
           <div className="btns">
             <button onClick={() => {setSpawnOpen(false);setBranchMessage(null);}}>
@@ -471,12 +620,19 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
       <main className="chat">
         {syncing && <p className="hint" role="status">正在同步电脑上的记录…</p>}
         {loading && <p className="empty">加载中…</p>}
-        {!loading && messages.length === 0 && !syncing && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。点右上角的刷新按钮从电脑上拉取 ${agentName(session.agent)} 的对话记录；继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
+        {!loading && messages.length === 0 && !syncing && !isDoubao && <p className="empty">{isListenOnly(session.agent) ? `还没有同步到消息。${session.machine} 上报状态时会把 ${agentName(session.agent)} 的对话正文一起带上来，不用手动同步；一直空就说明那台电脑还没连上。继续对话请回到 ${agentName(session.agent)} 客户端。` : "还没有消息。可以发一条，或点右上角的刷新按钮同步电脑上的记录。"}</p>}
+        {!loading && isDoubao && !doubaoMsgs.length && doubaoErr && (
+          <p className="empty">读不到豆包窗口：{doubaoErr}</p>
+        )}
         <ul className="msgs">
-          {messages.map((m) => (
-            <li key={m.id} className={`message-entry ${m.role}`}>
+          {foldRepeats(messages).map(({ m, count }) => (
+            <li key={m.id} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
+              {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
               <div className={`msg ${m.role}`}>
-                {m.text}
+                {/* 人和 agent 的话都按 markdown 渲染（都会贴表格、代码、路径）；
+                    tool / system 行还是原文，终端输出里的符号不能被当成格式 */}
+                {m.role === "user" || m.role === "assistant" ? <Markdown text={m.text} lenient={session.agent === "codex"} onFile={openFile} /> : m.text}
+                {count > 1 && <span className="msg-repeat" title={`同一条连续出现了 ${count} 次（旧版本重复记录），已折叠`}>×{count}</span>}
                 {m.images?.map((src, i) => <img key={i} className="msg-image" src={src} alt={`消息图片 ${i + 1}`} onClick={() => setPreview(src)} />)}
               </div>
               <time className="msg-time" dateTime={m.createdAt} title={fullAt(m.createdAt)}>{clockAt(m.createdAt)}</time>
@@ -487,28 +643,44 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                 onBranch={()=>{setBranchMessage(m);setSpawnText("");setSpawnOpen(true);window.scrollTo({top:0,behavior:"auto"});}}/>}
             </li>
           ))}
+          {/* 豆包：窗口里抓到的消息，只读——没有时间、不能分支 / 评价 / 重发 */}
+          {doubaoMsgs.map((m, i) => (
+            <li key={`doubao-${i}`} className={`message-entry ${m.role}${m.role === "assistant" ? " has-avatar" : ""}`}>
+              {m.role === "assistant" && <AgentAvatar agent={session.agent} />}
+              <div className={`msg ${m.role}`}>
+                {doubaoParts(m.text).map((part, k) => part.kind === "text"
+                  ? <Markdown key={k} text={part.text} lenient onFile={openFile} />
+                  : <div key={k} className="doubao-images">
+                      {part.slots.map((slot) => <DoubaoImage key={slot} id={m.images?.[slot]?.id ?? null} w={m.images?.[slot]?.w} h={m.images?.[slot]?.h} />)}
+                    </div>)}
+              </div>
+            </li>
+          ))}
         </ul>
         {/* 运行中：这行只播报 agent 自己说了什么（思考原文 / 工具 / 正在写的正文），不编状态 */}
-        {active && !terminalRun && (
+        {((active && !terminalRun) || listenLive) && (
           <div className="live-row" role="status" aria-live="polite">
             <span className="live-dots" aria-hidden="true"><i /><i /><i /></span>
-            <span className="live-text" title={activity?.text || undefined}>
-              {approvals.length > 0 ? "等待你的确认" : liveLabel(activity, agentName(session.agent))}
-            </span>
-            <span className="live-time">{formatElapsed(run ? runElapsed(run, now) : 0)}</span>
+            <span className="live-text" title={liveText}>{liveText}</span>
+            <span className="live-time">{formatElapsed(liveElapsed)}</span>
           </div>
         )}
         {/* 跑完：这一轮花了多久、烧了多少 token */}
         {run && !active && <p className="run-meta">{runSummary(run, now)}</p>}
         {run && run.status === "failed" && run.error && <p className="run-error">运行失败：{run.error}</p>}
-        {/* 任务单：会话跑完后由项目经理排好「做什么、谁来做、在哪做」，等人确认 */}
-        {proposals.length > 0 && (
-          <section className="proposal-list" aria-label="项目经理的任务单">
-            {proposals.map(p => (
-              <ProposalCard key={p.id} api={api} proposal={p} roles={roles} projects={projects}
-                autoDispatch={autoDispatch} busy={proposalBusy} onBusy={setProposalBusy}
-                onError={setErr} onChanged={onProposal} onTask={onTaskSaved} />
-            ))}
+        {/* 任务单：会话跑完后由项目经理排好「做什么、谁来做、在哪做」。
+            正文很长，这里只留一个入口，点进去才展开全文，聊天流不被卡片挤满 */}
+        {proposalCount > 0 && (
+          <section className="proposal-entry">
+            <button className="proposal-open" onClick={() => onProposals(sessionId)} aria-label={`查看任务单（${proposalCount} 份）`}>
+              <Icon name="tasks" />
+              <span className="proposal-open-main">
+                <strong>任务单</strong>
+                <span className="dim">{pendingProposals > 0 ? pendingLabel : "都已处理"}</span>
+              </span>
+              {proposalCount > pendingProposals && <span className="proposal-count dim">共 {proposalCount} 份</span>}
+              <Icon name="chevron" />
+            </button>
           </section>
         )}
       </main>
@@ -542,10 +714,13 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                       项目经理看过了：{a.decisionReason}。需要你来定。
                     </p>
                   )}
+                  {a.canAllow === false && <p className="hint">远程只能拒绝；要远程允许请在电脑端设置里打开</p>}
                   <div className="btns">
-                    <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
-                      {deciding === a.id ? "处理中…" : "允许"}
-                    </button>
+                    {a.canAllow !== false && (
+                      <button className="primary" disabled={deciding === a.id} onClick={() => decide(a, "allow")}>
+                        {deciding === a.id ? "处理中…" : "允许"}
+                      </button>
+                    )}
                     <button disabled={deciding === a.id} onClick={() => decide(a, "deny")}>
                       {deciding === a.id ? "处理中…" : "拒绝"}
                     </button>
@@ -555,7 +730,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
               return (
                 <div key={a.id} className="approval-card user-input-card">
                   <div className="approval-head">
-                    <span>Codex 提问</span>
+                    <span>提问待回答</span>
                     <time className="msg-time" dateTime={a.createdAt} title={fullAt(a.createdAt)}>{clockAt(a.createdAt)}</time>
                   </div>
                   {qs.map((q) => (
@@ -590,7 +765,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
                       {deciding === a.id ? "处理中…" : "跳过"}
                     </button>
                   </div>
-                  <p className="hint">不选直接提交会把空答案告诉 Codex；跳过后它会按自己的默认继续。</p>
+                  <p className="hint">不选直接提交等于跳过：它拿不到答案，会按自己的默认继续。</p>
                 </div>
               );
             })}
@@ -598,6 +773,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
         </>
       )}
       {/* 图片预览浮层：点击消息里的图片打开，点击任意处或 Esc 关闭 */}
+      {filePreview && <FilePreview title={filePreview.path} load={filePreview.load} onClose={() => setFilePreview(null)} />}
       {preview && (
         <div className="lightbox" role="dialog" aria-modal="true" aria-label="图片预览" onClick={() => setPreview(null)}>
           <img src={preview} alt="图片预览" />
@@ -609,7 +785,12 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           <button className="toast-close" aria-label="关闭提示" onClick={() => { setErr(""); setNote(""); }}><Icon name="close" /></button>
         </div>
       )}
-      {!spawnOpen && <footer className="composer">
+      {/* 只读 agent（豆包 / WorkBuddy）没有发送能力，底部的输入框整块不放出来 */}
+      {!spawnOpen && !isListenOnly(session.agent) && <footer className="composer">
+        {/* AgentHub 自己在跑这条会话时锁是自己握的，不算「被占用」 */}
+        {!active && threadState === "occupied" && (
+          <p className="hint lock-warn">⚠️ 这个会话正被另一个 Codex 客户端占用（Codex 桌面应用 / IDE / 终端），现在发消息会被拒绝——请先在那边停止或关闭这个会话。</p>
+        )}
         {reason && <p className="hint">{reason}</p>}
         {images.length > 0 && (
           <div className="composer-images">
@@ -683,6 +864,7 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
           </button>
         </div>
       </footer>}
+      </div>
       </div>
     </div>
   );

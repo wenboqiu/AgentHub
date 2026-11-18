@@ -100,8 +100,11 @@ describe('目标与任务', () => {
   })
   it('离线和参数错误不改任务；单机自动选择；消息优先级及 fresh 命令',async()=>{
     const t=await newTask();assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
-    await call('PATCH',`/tasks/${t.id}`,{agent:'claude'});assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
-    await call('PATCH',`/tasks/${t.id}`,{cwd:'D:\\TaskTest'});assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
+    // 缺目录 / 缺电脑是「没地方可去」而不是参数格式错：409，并说清去哪补
+    await call('PATCH',`/tasks/${t.id}`,{agent:'claude'})
+    const noDir=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(noDir.status,409);assert.match(noDir.body.error,/没选项目也没填目录/)
+    await call('PATCH',`/tasks/${t.id}`,{cwd:'D:\\TaskTest'})
+    const noPc=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(noPc.status,409);assert.match(noPc.body.error,/没有可派的电脑/)
     const off=await call('POST',`/tasks/${t.id}/start`,{machine:'离线'});assert.equal(off.status,200)
     assert.equal(off.body.queued,true);assert.ok(off.body.task.queuedAt);assert.equal((await get(t.id)).status,'todo')
     await call('DELETE',`/tasks/${t.id}/queue`);await call('PATCH',`/tasks/${t.id}`,{machine:null})
@@ -112,13 +115,16 @@ describe('目标与任务', () => {
       assert.equal(m.mode,'fresh');assert.equal(m.sessionKey,'');assert.equal(m.text,expected);assert.equal(m.cwd,'D:\\TaskTest')
       assert.ok(r.body.task.sessionIds.includes(r.body.sessionId))
     }
-    await call('PATCH',`/tasks/${t.id}`,{notes:'备注',status:'done'});assert.ok((await get(t.id)).doneAt)
+    // 派发过的任务（有 Mandate、有关联会话）不能手工推到 done，只能经验收
+    assert.equal((await call('PATCH',`/tasks/${t.id}`,{notes:'备注',status:'done'})).status,409)
+    await call('PATCH',`/tasks/${t.id}`,{notes:'备注',status:'review'});assert.equal((await call('POST',`/tasks/${t.id}/accept`,{})).status,200);assert.ok((await get(t.id)).doneAt)
     const r=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(r.body.task.status,'doing');assert.equal(r.body.task.doneAt,null)
     assert.equal((await wait(()=>ex.msgs.find(m=>m.runId===r.body.runId))).text,'备注')
     assert.equal((await call('POST',`/tasks/${t.id}/start`,{text:'\0'})).status,400)
     assert.equal((await call('POST',`/tasks/${t.id}/start`,{agent:'bad'})).status,400)
     const ex2=await connect('role=agent&machine=另一台测试机')
-    assert.equal((await call('POST',`/tasks/${t.id}/start`,{})).status,400)
+    // 多台在线又没指明哪台：不替人挑，说清在线的是哪几台
+    const many=await call('POST',`/tasks/${t.id}/start`,{});assert.equal(many.status,409);assert.match(many.body.error,/台电脑在线/)
     ex2.ws.close();ex.ws.close();await waitAsync(async()=>!(await call('GET','/control/status')).body.agents.length)
   })
   it('临时 ID 改名合并重复挂接；完成先于改名及 run.status 完成路径',async()=>{
@@ -134,12 +140,16 @@ describe('目标与任务', () => {
     await call('PATCH',`/tasks/${t.id}`,{status:'doing'})
     ex.ws.send(JSON.stringify({type:'run.status',runId:r.runId,status:'done'}))
     await waitAsync(async()=>(await get(t.id)).status==='review')
-    const r2=(await call('POST',`/tasks/${t.id}/start`,{})).body,key2=randomUUID()
+    const r2=(await call('POST',`/tasks/${t.id}/start`,{})).body
+    // 第二次派发：同一任务默认接着上次派发的会话继续，不再新开一个对话（不产生 pending 会话）
+    assert.equal(r2.sessionId,sid)
+    assert.ok((await get(t.id)).sessionIds.includes(sid))
     ex.ws.send(JSON.stringify({type:'run.status',runId:r2.runId,status:'done'}))
-    ex.ws.send(JSON.stringify({type:'run.session',runId:r2.runId,sessionKey:key2}))
-    await waitAsync(async()=>(await get(t.id)).status==='review'&&(await get(t.id)).sessionIds.includes(`codex:${key2}`))
-    const r3=(await call('POST',`/tasks/${t.id}/start`,{})).body
+    await waitAsync(async()=>(await get(t.id)).status==='review')
+    // 显式要求新会话：仍走「pending → run.session 改名」这条老路径
+    const r3=(await call('POST',`/tasks/${t.id}/start`,{delivery:'fresh'})).body,key3=randomUUID()
     ex.ws.send(JSON.stringify({type:'run.status',runId:r3.runId,status:'failed',error:'测试失败'}))
+    ex.ws.send(JSON.stringify({type:'run.session',runId:r3.runId,sessionKey:key3}))
     await waitAsync(async()=>(await call('GET',`/sessions/${r3.sessionId}/messages`)).body.run.status==='failed')
     assert.equal((await get(t.id)).status,'doing')
     ex.ws.close();await waitAsync(async()=>!(await call('GET','/control/status')).body.agents.length)

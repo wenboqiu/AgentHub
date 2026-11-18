@@ -10,17 +10,21 @@ import {
   ackSession,
   activeRun,
   activeTaskRun,
+  appendEventMessages,
   applyEvent,
   cleanText,
   closeTaskRuns,
   createApproval,
   createPendingSession,
   createRun,
+  lastRunModel,
   createTaskRun,
   annotateApproval,
   decideApproval,
   expireApproval,
   expireApprovalsOfRuns,
+  expireHookApprovalsOfMachine,
+  expirePending,
   failActiveRuns,
   getApproval,
   getRun,
@@ -43,6 +47,7 @@ import {
   renamePendingSession,
   setRunStatus,
   setRunUsage,
+  setRunModelIfEmpty,
   stopTaskRun,
   type Approval,
   type EventIn,
@@ -54,14 +59,17 @@ import {
 import { authenticate, type Kick } from './auth.ts'
 import { ackReminder, collectReminders, listReminders } from './reminders.ts'
 import { evaluateNotify, getSettings, saveSettings } from './notify.ts'
+import { getPrefs, savePrefs } from './prefs.ts'
 import { buildFailureDigest, buildReviewDigest, getDigests } from './digest.ts'
 import { AbortSpreeTracker, cleanupWatchdog, claimStalled, stalledSessions } from './watchdog.ts'
 import { taskThread } from './threads.ts'
-import { addReviewItem, decideReviewItem, getReview } from './review.ts'
+import { addReviewItem, decideReviewItem, getReview, DECISION_RULE } from './review.ts'
 import { bumpAttempts, dequeueDispatch, enqueueDispatch, expireQueued, queuedFor } from './queue.ts'
 import { dispatchBoard } from './board.ts'
-import { applyRole, deleteRole, findRole, getRole, listRoles, roleModel, saveRole } from './roles.ts'
-import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listProjects, pickProjectDir, recentBrief, saveProject } from './projects.ts'
+import { AUTO_ALLOW_PER_TASK_HOUR, acceptTask, createDelivery, decisionStats, getDelivery, getMandate, getMandateMode, judgeByMandate, recentAutoAllowCount, recordDecision, setMandateMode, signMandate, tagApproval, type Mandate, type MandateMode } from './mandate.ts'
+import { applyRole, deleteRole, findRole, getRole, listManagers, listRoles, pickManagerFor, roleModel, saveRole } from './roles.ts'
+import { pickDispatchModel } from './model-pick.ts'
+import { appendBrief, deleteProject, deleteBrief, findProject, getProject, listBrief, listMachines, listProjects, pickProjectDir, recentBrief, renameMachine, saveProject } from './projects.ts'
 import { artifactPath, buildArtifact, deleteArtifact, getArtifact, saveArtifact, summarize } from './artifacts.ts'
 import { addMemory, composeInstructions, deleteMemory, listMemories, markMemoriesUsed, pickMemories, updateMemory } from './memories.ts'
 import {
@@ -82,23 +90,31 @@ import {
 import {
   NO_FORK,
   PROPOSAL_TITLE,
+  createTicket,
   forkInfo,
   generateProposal,
   getProposal,
   listProposals,
   markProposal,
   markRefineRun,
+  missingSessionError,
   planDelivery,
+  promoteToDraft,
   proposalPatch,
   recordRefine,
+  restoreProposal,
   refineMessage,
   sessionKeyOf,
+  ticketMessage,
   toChecklist,
   type Delivery,
+  type Proposal,
 } from './proposals.ts'
-import { getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
+import { composeTicket, getManager, logAuto, quota, recentApproveCount, recentAutoCount, runDispatchTick, runningCount, saveManager } from './dispatch-manager.ts'
 import { boundaryLine, hasConstraints, judgeApproval } from './referee.ts'
+import { StatsParamError, queryStats, resolveStatsTz, rollupStats } from './stats.ts'
 import { TaskError, deleteGoal, deleteTask, getTask, id as entityId, linkSession, listGoals, listTasks, object, saveGoal, saveTask, syncTaskForSession, tasksForSession, text as taskText, type Task } from './tasks.ts'
+import { ATTACHMENT_BODY_LIMIT, addAttachment, assertRefs, attachmentData, deleteAttachment, listAttachments, prepareAttachment, readableNotes, stripRef } from './attachments.ts'
 
 type Sock = {
   send(data: string): void
@@ -109,6 +125,8 @@ type Sock = {
 }
 
 export type RouteOptions = {
+  // 统计页：同一用户两次触发汇总刷新的最短间隔（毫秒），默认 60 秒
+  statsRefreshMs?: number
   // 等执行器返回历史记录的最长时间（毫秒），测试里调短
   historyTimeoutMs?: number
   reminderIntervalMs?: number
@@ -124,9 +142,27 @@ export type RouteOptions = {
   queueSweepIntervalMs?: number
   /** 项目经理自动派发的巡检间隔（默认 60 秒） */
   dispatchIntervalMs?: number
+  /** 完成/中断的会话挂多久没人确认就自动转入已处理（默认 2 小时） */
+  pendingExpireMs?: number
 }
 
-type HistoryResult = { messages: ({ role: string; text: string; at?: string } & MessageMeta)[]; error?: string }
+type HistoryResult = { messages: ({ role: string; text: string; at?: string; images?: string[] } & MessageMeta)[]; error?: string }
+
+/** 历史同步里的图片：只收 data URL，限单张和总量，防止一次同步拖着几十 MB 走 WS */
+const HISTORY_IMAGE_MAX_CHARS = 8_000_000
+const HISTORY_IMAGE_MAX_TOTAL = 48_000_000
+export function historyImages(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  let total = 0
+  const out: string[] = []
+  for (const u of raw) {
+    if (typeof u !== 'string' || !u.startsWith('data:image/') || u.length > HISTORY_IMAGE_MAX_CHARS) continue
+    total += u.length
+    if (total > HISTORY_IMAGE_MAX_TOTAL) break
+    out.push(u)
+  }
+  return out.length ? out : undefined
+}
 
 function bearer(req: FastifyRequest) {
   const h = req.headers.authorization ?? ''
@@ -135,7 +171,7 @@ function bearer(req: FastifyRequest) {
 
 // 一个 WS 连接：属于哪个账号、哪个设备会话（踢设备时按它们关闭）
 type Conn = { sock: Sock; userId: number; authSessionId: number }
-type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean }
+type Exec = Conn & { machine: string; replyBranch: boolean; roleV1: boolean; mandateV1: boolean; agents: string[] }
 const INVALID_LOGIN = 4401
 
 // Codex Desktop 结束一轮时不一定会写终态（直接关窗口、进程被杀都只留下 task_started），
@@ -168,6 +204,27 @@ function parseEvent(raw: unknown): EventIn | null {
       buckets.push({ at: o.at, count: typeof o.count === 'number' && Number.isInteger(o.count) && o.count > 0 && o.count <= 1000 ? o.count : 1 })
     }
   }
+  // 随事件上来的正文（可选，只读监听类用）：坏的条目丢掉，别让整条事件作废——
+  // 状态比正文重要，正文丢了下一轮还能补
+  let messages: { role: 'user' | 'assistant'; text: string; at?: string }[] | undefined
+  if (e.messages !== undefined) {
+    if (!Array.isArray(e.messages) || e.messages.length > 60) return null
+    const kept: { role: 'user' | 'assistant'; text: string; at?: string }[] = []
+    for (const m of e.messages) {
+      if (!m || typeof m !== 'object') continue
+      const o = m as Record<string, unknown>
+      if (o.role !== 'user' && o.role !== 'assistant') continue
+      if (typeof o.text !== 'string') continue
+      const text = clean(o.text)
+      if (!text.trim()) continue
+      kept.push({
+        role: o.role,
+        text,
+        at: typeof o.at === 'string' && !Number.isNaN(Date.parse(o.at)) ? o.at : undefined,
+      })
+    }
+    messages = kept.length ? kept : undefined
+  }
   return {
     agent: e.agent as EventIn['agent'],
     sessionId: clean(e.sessionId),
@@ -179,9 +236,11 @@ function parseEvent(raw: unknown): EventIn | null {
     summary: typeof e.summary === 'string' ? clean(e.summary) : undefined,
     pid: typeof e.pid === 'number' && Number.isInteger(e.pid) && e.pid > 0 ? e.pid : null,
     quiet: e.quiet === true,
+    bgTasks: typeof e.bgTasks === 'number' && Number.isFinite(e.bgTasks) && e.bgTasks > 0 ? Math.trunc(e.bgTasks) : 0,
     expectedAt: e.expectedAt as string | undefined,
     readAt: e.readAt as string | undefined,
     buckets,
+    messages,
   }
 }
 
@@ -190,6 +249,26 @@ const PENDING = ':pending-'
 const SESSION_KEY_RE = /^[A-Za-z0-9_-]{1,100}$/
 
 const execKey = (userId: number, machine: string) => `${userId}:${machine}`
+
+/** 能远程派活的工具；派活校验只认这几个。
+ *  豆包只做监听；WorkBuddy 也只做监听——桌面端内置的 lite bundle 没有独立登录态（实测派活必报
+ *  `Authentication required`），而能自己 `/login` 的那份就是 npm 完整版，也就是 codebuddy。 */
+const DISPATCH_AGENTS = ['claude', 'codex', 'zcode', 'codebuddy'] as const
+type DispatchAgent = (typeof DISPATCH_AGENTS)[number]
+/** 执行器探测后会一并上报的工具 = 可派活的四种 + 只监听的 workbuddy（豆包不探测、不上报）。
+ *  caps 里保留它，设备页才显示得出「装了 WorkBuddy（只监听）」，而不是把整台机器判成「未上报工具」；
+ *  派活校验仍只认 DISPATCH_AGENTS。 */
+const REPORTED_AGENTS: readonly string[] = [...DISPATCH_AGENTS, 'workbuddy']
+const isReportedAgent = (a: unknown): a is string =>
+  typeof a === 'string' && REPORTED_AGENTS.includes(a)
+/** 派活校验同时也是类型收窄：后面拿 agent 当强类型用 */
+const isDispatchAgent = (a: unknown): a is DispatchAgent =>
+  typeof a === 'string' && (DISPATCH_AGENTS as readonly string[]).includes(a)
+/** 解析执行器上报的 agents 参数（逗号分隔）：只留认识的、去重，空 = 不知道 */
+function parseAgents(raw: string | null): string[] {
+  const list = (raw ?? '').split(',').map(s => s.trim().toLowerCase()).filter(s => isReportedAgent(s))
+  return [...new Set(list)]
+}
 
 /** Codex 提问的 questions JSON：解析出问题文本；解析失败退回原文片段 */
 function userInputQuestions(detail: string): { id: string; question: string; options: { label: string; description?: string }[] }[] | null {
@@ -247,8 +326,10 @@ function cleanUsage(raw: unknown): RunUsage | null {
   const cached = num('cached'), reasoning = num('reasoning')
   const total = num('total') || input + output + cached
   const cost = typeof o.costUsd === 'number' && Number.isFinite(o.costUsd) && o.costUsd > 0 ? Math.min(o.costUsd, 1000) : 0
-  if (!input && !output && !cached) return null
-  return { input, output, total, ...(cached ? { cached } : {}), ...(reasoning ? { reasoning } : {}), ...(cost ? { costUsd: cost } : {}) }
+  // 积分制计费（ZCode 系）可能只有积分没有 token 数，也算有效用量
+  const credits = typeof o.credits === 'number' && Number.isFinite(o.credits) && o.credits > 0 ? o.credits : 0
+  if (!input && !output && !cached && !credits) return null
+  return { input, output, total, ...(cached ? { cached } : {}), ...(reasoning ? { reasoning } : {}), ...(cost ? { costUsd: cost } : {}), ...(credits ? { credits } : {}) }
 }
 
 /** 执行器上报的「正在做什么」：kind 为 idle 表示这轮没有在说的话，界面回到中性提示 */
@@ -265,19 +346,45 @@ function approvalHeading(tool: string, detail: string): string {
 
 // 返回 kick：删除设备会话 / 账号后，用它立刻关闭对应的 WS（viewer 和执行器）
 export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteOptions = {}): Kick {
-  const historyTimeoutMs = opts.historyTimeoutMs ?? 10_000
+  // 图片进历史后一次同步可能带几十 MB，10 秒在慢网络上不够
+  const historyTimeoutMs = opts.historyTimeoutMs ?? 30_000
   const stallAfterMs = opts.stallAfterMs ?? 45 * 60_000
   // 排队项 24 小时后作废；一次上线最多投递 3 条，失败 3 次放弃
   const queueTtlMs = opts.queueTtlMs ?? 24 * 3600_000
   const queueDrainLimit = opts.queueDrainLimit ?? 3
   const queueMaxAttempts = opts.queueMaxAttempts ?? 3
+  // 统计：用户 -> 上次刷新汇总的时间（内存态）
+  const statsRefreshMs = opts.statsRefreshMs ?? 60_000
+  const statsRefreshed = new Map<number, number>()
   // 反复失败计数（内存态，服务重启清零）
   const spree = new AbortSpreeTracker(opts.abortSpreeCount ?? 3, opts.abortSpreeWindowMs ?? 2 * 3600_000)
   const clients = new Set<Conn>()
   // (userId, machine) -> 在线执行器连接
   const executors = new Map<string, Exec>()
+  // (userId, machine) -> 开着 AgentHub、但没开「远程执行」的电脑（exec=off 连上来，不接活）。
+  // 单独一张表：executors 里永远只有能接活的，派活 / 续聊 / 读历史那些「在不在线」的判断都不用改
+  const listeners = new Map<string, Conn & { machine: string }>()
+  const listeningList = (userId: number) =>
+    [...listeners.values()].filter(e => e.userId === userId).map(e => e.machine).sort()
+  // (userId, machine) -> 这台电脑上报过能跑哪些工具（claude / codex / zcode）。
+  // 执行器断线也留着：给离线电脑派活是常事，靠它判断「这台装没装这个工具」。
+  // 只放内存——重启后等电脑再连一次就补上；空数组 = 从没上报过（老客户端），按「不知道」处理。
+  const capsByMachine = new Map<string, string[]>()
+  /** 某个账号下每台电脑的工具清单；只返回上报过的，没上报的不出现在表里 */
+  const capsOfUser = (userId: number) => {
+    const out = new Map<string, string[]>()
+    for (const [key, agents] of capsByMachine) {
+      const [uid, ...rest] = key.split(':')
+      if (Number(uid) !== userId) continue
+      out.set(rest.join(':'), agents)
+    }
+    return out
+  }
   // 等待执行器返回的历史请求
   const historyWaits = new Map<string, { userId: number; machine: string; resolve: (r: HistoryResult) => void }>()
+  // 等待执行器返回的文件预览请求
+  type FileResult = { path?: string; text?: string; size?: number; truncated?: boolean; error?: string }
+  const fileWaits = new Map<string, { userId: number; machine: string; resolve: (r: FileResult) => void }>()
   // 每个 run 最近一次「正在做什么」：执行器实时上报，只放内存（不需要持久化），
   // 中途打开会话时随 /messages 一起下发，界面才不会一进来就空着
   const liveActivity = new Map<string, LiveActivity>()
@@ -310,6 +417,25 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
    * 放行 = 写裁决 + 通知执行器继续，人不再被打扰；判不了 = 把理由挂在记录上交给人。
    * 两种情况都会推送，调用方不必再推一次。
    */
+  /** 这条会话关联的任务里，第一份签署过的 Mandate（连同任务）；没有返回 null */
+  const mandateOfSession = async (userId: number, sessionId: string): Promise<{ task: Task; mandate: Mandate } | null> => {
+    const linked = await tasksForSession(pool, userId, sessionId).catch(() => [])
+    for (const t of linked) {
+      const mandate = await getMandate(pool, userId, t.id).catch(() => null)
+      if (mandate) return { task: t, mandate }
+    }
+    return null
+  }
+  /**
+   * run.start 要不要带 mandate：仅 auto 档 + 执行器声明了 mandate-v1 + 任务有冻结 Mandate。
+   * 老执行器不带（也就不会关 CLI 审批），退回逐条代批。Mandate 签署后不可变，所以排队投递时现取与入队时取等价。
+   */
+  const mandateField = async (userId: number, machine: string, taskId: number | undefined): Promise<{ mandate?: { id: number; version: number; mode: MandateMode; scope: Mandate['scope']; rulesetVersion: string } }> => {
+    if (taskId === undefined || !executors.get(execKey(userId, machine))?.mandateV1) return {}
+    if ((await getMandateMode(pool, userId)) !== 'auto') return {}
+    const m = await getMandate(pool, userId, taskId)
+    return m ? { mandate: { id: m.id, version: m.version, mode: 'auto', scope: m.scope, rulesetVersion: m.rulesetVersion } } : {}
+  }
   const refereeHandle = async (userId: number, approval: Approval, machine: string): Promise<void> => {
     const passToHuman = async (rule: string, reason: string, tier = '') => {
       const noted = await annotateApproval(pool, userId, approval.id, rule, reason, tier)
@@ -321,9 +447,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const session = await getSession(pool, userId, approval.sessionId)
     if (!session) return pushApproval(userId, approval, true)
 
-    // 这条审批属于哪个任务：任务自己声明的边界比全局策略更具体，先按它判
+    // 这条审批属于哪个任务：任务自己声明的边界比全局策略更具体，先按它判。
+    // 签署过 Mandate 的任务读冻结快照（范围签署后不会再变，内容与任务上的边界一致）
     const linked = await tasksForSession(pool, userId, approval.sessionId).catch(() => [])
-    const grants = linked.find(t => hasConstraints(t.constraints))?.constraints
+    const frozen = (await mandateOfSession(userId, approval.sessionId))?.mandate.scope
+    const grants = frozen && hasConstraints(frozen) ? frozen : linked.find(t => hasConstraints(t.constraints))?.constraints
     const verdict = judgeApproval({
       tool: approval.tool, detail: approval.detail, cwd: session.cwd, policy: manager.approve, grants,
     })
@@ -368,6 +496,15 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     chain = p.catch(() => {})
     return p
   }
+  // 收尾活儿（同步正文、攒任务单）不挡事件上报的响应，但也不能各跑各的：
+  // 一次事件上报可能连着好几轮完成，几十个查询同时压上去会把连接池抽干，
+  // 后面的接口全在排队。单独一条队列，一次只跑一件。
+  let tailChain: Promise<unknown> = Promise.resolve()
+  const inBackground = <T>(fn: () => Promise<T>): Promise<T> => {
+    const p = tailChain.then(fn, fn)
+    tailChain = p.catch(() => {})
+    return p
+  }
 
   const pushTask = (userId: number, task: Task) => broadcast(userId, { type: 'task', task })
   // 选了角色：补齐空着的执行工具。执行目录不在这里补——那是派发时按项目目录按机器挑的事
@@ -395,32 +532,44 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   const syncTask = async (userId: number, sessionId: string, state: Session['state']) => {
     const tasks = await syncTaskForSession(pool,userId,sessionId,state)
     for (const t of tasks) pushTask(userId,t)
-    // 投机执行：任务进入待验收时预生成验收摘要（调用点都在 serial 内，几条查询不阻塞）
+    // 预摘要：任务进入待验收时预生成验收摘要（调用点都在 serial 内，几条查询不阻塞）
     if (state === 'done') {
       for (const t of tasks) {
-        const digest = await buildReviewDigest(pool,userId,t.id)
-        if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
-        // 每个任务跑完都要有文档产物：这里用摘要兜底生成一份骨架，执行端以后交的会覆盖它
-        const artifact = await buildArtifact(pool,userId,t.id)
-        if (artifact) broadcast(userId,{type:'task.artifact',taskId:t.id,artifact})
+        const digest = await refreshReview(userId,t)
         // 同时往项目近况里记一句：下次派活时项目经理就知道这个项目刚做完什么
         if (t.projectId !== null) {
           await appendBrief(pool,userId,t.projectId,`「${t.title}」${summarize(digest?.lastReply ?? '','已完成',120)}`,t.id)
         }
       }
+      // 已经在待验收的任务，挂接会话又跑完一轮：重新生成摘要 / 交付物 / 产物骨架（不改状态、不记近况）
+      const moved = new Set(tasks.map(t => t.id))
+      for (const t of await tasksForSession(pool,userId,sessionId)) {
+        if (t.status === 'review' && !moved.has(t.id)) await refreshReview(userId,t)
+      }
     }
+  }
+  // 生成 / 重新生成验收摘要 + 交付物快照 + 产物骨架，并广播
+  const refreshReview = async (userId: number, t: Task) => {
+    const digest = await buildReviewDigest(pool,userId,t.id)
+    if (digest) broadcast(userId,{type:'task.digest',taskId:t.id,kind:'review',digest})
+    // 交付物快照：签署过 Mandate 的任务进入待验收时落一份（重跑覆盖未验收的）
+    await createDelivery(pool,userId,t.id,digest).catch(e => app.log.warn({ taskId: t.id, err: String(e) }, '写交付物失败'))
+    // 每个任务跑完都要有文档产物：这里用摘要兜底生成一份骨架，执行端以后交的会覆盖它
+    const artifact = await buildArtifact(pool,userId,t.id)
+    if (artifact) broadcast(userId,{type:'task.artifact',taskId:t.id,artifact})
+    return digest
   }
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
   // prompt 用来把「实际发给 agent 的内容」和「记录里显示的内容」分开（助手在消息前面拼了输出格式契约）。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: 'fork'|'fresh', sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string }, prompt?: string) {
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: Delivery, sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string; modelNote?: string }, prompt?: string) {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
     try {
       await db.query('BEGIN')
       pending = await createPendingSession(db,userId,pendingId,base,title)
-      run = await createRun(db,userId,runId,pendingId,base.machine,taskId ?? null)
+      run = await createRun(db,userId,runId,pendingId,base.machine,taskId ?? null,{ model: role?.model ?? null, note: role?.modelNote ?? '' })
       message = await insertMessage(db,userId,pendingId,runId,'user',text)
       if (taskId !== undefined) {
         await linkSession(db,userId,taskId,pendingId)
@@ -430,7 +579,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
     pushSession(userId,pending,false); pushRun(userId,run); pushMessage(userId,message)
     if (task) pushTask(userId,task)
-    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text:prompt ?? text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {})})) {
+    const mandate = await mandateField(userId, base.machine, taskId)
+    if (!sendExecutor(userId,base.machine,{type:'run.start',runId,sessionId:pendingId,agent:base.agent,sessionKey,cwd:base.cwd,text:prompt ?? text,mode,...(branchPoint ? {branchPoint} : {}),...(role?.model ? {model:role.model} : {}),...(role?.instructions ? {instructions:role.instructions} : {}),...mandate})) {
       const failed = await setRunStatus(pool,userId,runId,'failed','电脑端不在线')
       if (failed) pushRun(userId,failed)
       await abortPending(userId,pendingId,'电脑端不在线')
@@ -444,26 +594,104 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return {runId,sessionId:pendingId,...(task ? {task} : {})}
   }
 
+  /**
+   * 这个任务上次派发落在哪个会话上。只认「本任务自己的 run 产生的真实会话」：
+   * 手动关联进来的来源会话不算——那不是这个任务跑出来的对话。第一次派发返回 null。
+   * 连上一轮的状态一起带回来：上一轮就续不上（会话在本机已经没了）时不能再续它。
+   */
+  async function lastDispatchSession(userId: number, taskId: number): Promise<(Pick<Session, 'id' | 'agent' | 'machine' | 'cwd' | 'state'> & { status: string; error: string }) | null> {
+    const r = await pool.query(
+      `SELECT s.id, s.agent, s.machine, s.cwd, s.state, r.status, r.error
+         FROM runs r JOIN sessions s ON s.user_id = r.user_id AND s.id = r.session_id
+        WHERE r.user_id = $1 AND r.task_id = $2 AND r.session_id IS NOT NULL AND r.session_id NOT LIKE $3
+        ORDER BY r.created_at DESC LIMIT 1`,
+      [userId, taskId, `%${PENDING}%`],
+    )
+    return r.rows[0] ?? null
+  }
+
+  /**
+   * 接着这个任务上次派发的会话继续：不新建会话，直接在原对话里追加这一轮。
+   * 时间轴上还是同一个对话，不会又冒出一个同名的新会话。
+   * 与 startSession 的区别只在「落到哪条会话上」：这里 sessionId 是已经在用的真实会话，
+   * 不需要 pending 会话等待执行器回报 id。
+   */
+  async function resumeTaskSession(userId: number, task: Task, session: Pick<Session, 'id' | 'agent' | 'machine' | 'cwd'>, text: string, role: { model: string | null; instructions: string; modelNote?: string }) {
+    // 同一个会话同时只能有一个运行：在跑时再续就是双写
+    if (await activeRun(pool, userId, session.id)) throw new TaskError('这个会话还有一个运行没结束，等它跑完再继续', 409)
+    const runId = randomUUID()
+    const db = await pool.connect()
+    let run: Run, message: Message, saved: Task
+    try {
+      await db.query('BEGIN')
+      run = await createRun(db, userId, runId, session.id, session.machine, task.id, { model: role.model, note: role.modelNote ?? '' })
+      message = await insertMessage(db, userId, session.id, runId, 'user', text)
+      await linkSession(db, userId, task.id, session.id)
+      saved = await saveTask(db, userId, { status: 'doing' }, task.id)
+      await db.query('COMMIT')
+    } catch (e) { await db.query('ROLLBACK'); throw e } finally { db.release() }
+    pushRun(userId, run); pushMessage(userId, message); pushTask(userId, saved)
+    const mandate = await mandateField(userId, session.machine, task.id)
+    const sent = sendExecutor(userId, session.machine, {
+      type: 'run.start', runId, sessionId: session.id, agent: session.agent,
+      sessionKey: sessionKeyOf(session.id), cwd: session.cwd, text, mode: 'resume',
+      ...(role.model ? { model: role.model } : {}),
+      ...(role.instructions ? { instructions: role.instructions } : {}),
+      ...mandate,
+    })
+    if (!sent) {
+      const failed = await setRunStatus(pool, userId, runId, 'failed', '电脑端不在线')
+      if (failed) pushRun(userId, failed)
+      const reverted = await saveTask(pool, userId, { status: 'todo' }, task.id).catch(() => undefined)
+      if (reverted) pushTask(userId, reverted)
+      throw new TaskError('电脑端不在线', 409)
+    }
+    return { runId, sessionId: session.id, task: saved }
+  }
+
   // 派活编排：手动「开始」与项目经理自动派发共用这一条路径。
   // 先算清「谁来做（角色/配置→执行工具与模型）、在哪做（电脑+目录）、说什么（首条消息）」，
   // 电脑在线就立刻开跑，离线就入队等它上线（排队逻辑不变）。
   // fallbackRoleId 只在任务自己没挂角色时兜底：项目经理派活时用它指定的那个角色。
   const startTaskDispatch = async (userId: number, taskId: number, b: Record<string, unknown>, fallbackRoleId: number | null = null) => {
     const task = await getTask(pool, userId, taskId)
-    // 任务是「谁来做」优先按角色定：角色可以指定执行工具、模型和上下文
-    const role = (await findRole(pool, userId, task.roleId)) ?? (await findRole(pool, userId, fallbackRoleId))
+    // 任务是「谁来做」优先按角色定：任务上指定的 → 派单经理给的建议 → 管这个项目的经理兜底
+    const role = (await findRole(pool, userId, task.roleId))
+      ?? (await findRole(pool, userId, fallbackRoleId))
+      ?? (await pickManagerFor(pool, userId, task.projectId))
     // 项目决定「在哪个项目、这个项目有什么约定」；选中的项目还会带出该角色在这个项目上的经验
     const project = await findProject(pool, userId, task.projectId)
     const online = agentList(userId)
-    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台
-    let machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 4000)
+    // 机器先定：显式指定 > 任务上存的 > 唯一在线的那台 > 项目目录登记的那台。
+    // 多台在线又都没指明时留空，不替人瞎挑（目录检查之后统一报错）
+    let machine = taskText(b.machine ?? task.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 4000, true)
     // 项目里存着各台电脑的目录，按这次要去的机器挑对应那条，目录才不会串设备
     const dir = await pickProjectDir(pool, userId, project?.id ?? null, machine, online)
     if (!machine && dir?.machine) machine = dir.machine
-    const agent = b.agent ?? role?.agent ?? task.agent
-    if (agent === 'doubao' || agent === 'workbuddy') throw new TaskError('豆包、WorkBuddy 只做状态监听，请在客户端里执行后把会话关联到任务')
-    if (agent !== 'claude' && agent !== 'codex' && agent !== 'zcode') throw new TaskError('请选择 Claude、Codex 或 ZCode')
-    const cwd = taskText(b.cwd ?? task.cwd ?? dir?.cwd ?? '', '项目目录', 4000)
+    // WorkBuddy 只做会话监听，不进派活：老角色 / 老任务里存着 workbuddy 的落到 CodeBuddy
+    // （同一份 CLI，能自己 /login 的那份），免得历史数据一编辑就报「请选择有效的执行工具」。
+    const requested = b.agent ?? role?.agent ?? task.agent
+    const agent = requested === 'workbuddy' ? 'codebuddy' : requested
+    if (agent === 'doubao') throw new TaskError('豆包只做状态监听，请在客户端里执行后把会话关联到任务')
+    if (!isDispatchAgent(agent)) throw new TaskError('请选择 Claude、Codex、ZCode 或 CodeBuddy')
+    // 这台电脑上报过装了哪些工具：明确没装就别往里派，排到天亮也跑不起来。
+    // 没上报过（老客户端）不拦，交给执行器自己报错。
+    const caps = machine ? capsByMachine.get(execKey(userId, machine)) : undefined
+    if (caps?.length && !caps.includes(agent)) {
+      throw new TaskError(`${machine} 上没装 ${agent}：换一台电脑，或给这个角色换一个它装了的工具（这台装了 ${caps.join('、')}）`, 409)
+    }
+    // 目录三级来源：这次请求显式给的 > 任务上存的 > 项目里按机器挑的那条。
+    // 一条都没有时不是「格式不对」而是「没地方可去」：这条得说清去哪补。
+    // 直接交给 taskText 会抛「项目目录须为1–4000字符」——人看着像自己填错了，其实是项目还没登记目录。
+    const pickedCwd = b.cwd ?? task.cwd ?? dir?.cwd ?? ''
+    if (typeof pickedCwd === 'string' && !pickedCwd.trim()) throw new TaskError(project
+      ? `项目「${project.name}」还没登记目录：去「设置 → 项目 → 编辑」给它加一条（电脑 + 目录），再回来派这单`
+      : '这单既没选项目也没填目录：先选一个配过目录的项目，或在任务上选一条目录（设置 → 项目）', 409)
+    const cwd = taskText(pickedCwd, '项目目录', 4000)
+    // 目录有了、电脑还是空：排进空机器名的队列永远等不到上线，直接说清是「多台没指明」还是「一台都没有」
+    if (!machine) throw new TaskError(online.length > 1
+      ? `有 ${online.length} 台电脑在线（${online.join('、')}）：在任务上指定一台再派`
+      : '没有可派的电脑：打开要干活的那台电脑上的 AgentHub，或在任务上指定电脑', 409)
     // 开跑方式：任务上记着「第一次接着哪个会话」（确认任务单时定的），请求里显式给了就用请求的。
     // 能不能续按最终的工具 / 电脑 / 目录现算——角色可能被改过，续不上就退回新会话，不硬来。
     const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : task.startMode
@@ -478,11 +706,46 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (mode === 'fork' && src) sessionKey = sessionKeyOf(src.id)
       if (!sessionKey) mode = 'fresh'
     }
-    const text = taskText(b.text ?? (task.notes || task.title), '第一条消息', 8000)
+    // 同一任务被反复派发（失败重试、自动派发、人工再点开始）默认接着上次派发出来的会话继续：
+    // 每次都 fresh 会在本机多开一个同名对话，时间轴上看就像同一件事重复了好几遍。
+    // 只在本该从零开跑时考虑；人明确要求新会话（delivery=fresh）就照办。
+    // 没有目录就不续：执行器会落到 AgentHub 默认工作目录，claude 按目录存会话，肯定找不到原对话。
+    let resumeFrom: Pick<Session, 'id' | 'agent' | 'machine' | 'cwd' | 'state'> | null = null
+    if (mode === 'fresh' && b.delivery !== 'fresh' && cwd) {
+      const prev = await lastDispatchSession(userId, task.id)
+      // 上一轮就续不上它（会话在本机已经没了）：别再撞同一堵墙，直接新开一个——
+      // 新会话会成为「上次派发的会话」，之后的派发再接着它继续。
+      if (prev && !(prev.status === 'failed' && missingSessionError(prev.error))) {
+        const plan = planDelivery('resume', forkInfo(prev), { agent: agent ?? '', machine, cwd })
+        mode = plan.mode
+        deliveryReason = plan.reason
+        if (mode === 'resume') {
+          // 会话键是 agent 自己那半截 id：入队时也靠它找回这条会话
+          sessionKey = sessionKeyOf(prev.id)
+          if (sessionKey) resumeFrom = prev
+          else mode = 'fresh'
+        }
+      }
+    }
     // 员工记忆：项目内的经验优先，其次是跨项目的通用经验；拼进系统提示一起下发
     const memories = role ? await pickMemories(pool, userId, role.id, task.projectId) : []
     // 项目近况：最近几条任务结论，让接手的人知道这个项目眼下到哪一步了
     const recent = await recentBrief(pool, userId, task.projectId)
+    // 发单时正文可以留空：项目经理在这儿补一份骨架并落库，执行端才不会只拿到一个标题。
+    // 只补空正文，人写过的一个字都不动。
+    const filled = task.autoDispatch && !task.notes.trim()
+      ? composeTicket({
+        title: task.title,
+        project: project?.name ?? '',
+        brief: project?.brief ?? '',
+        recent,
+        role: role ? [role.name, role.title].filter(Boolean).join(' · ') : '',
+        cwd,
+      })
+      : ''
+    if (filled) pushTask(userId, await saveTask(pool, userId, { notes: filled }, task.id))
+    // 备注里的 attachment:ID 引用对执行者没有意义，换成引用里的文字再发
+    const text = taskText(b.text ?? (filled || readableNotes(task.notes) || task.title), '第一条消息', 8000)
     const instructions = [
       composeInstructions({
         role: role ? { name: role.name, title: role.title, context: role.context } : { name: '', title: '', context: '' },
@@ -492,8 +755,25 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       }),
       // 任务自己声明的边界：一开始就告诉它，省得做一半被卡住
       boundaryLine(task.constraints),
+      DECISION_RULE,
     ].filter(Boolean).join('\n\n')
-    const dispatch = { model: roleModel(role), instructions }
+    // 模型谁定：角色写了就听角色的；没写就由项目经理按任务的复杂度，在同工具里挑一档。
+    // 挑中的模型和理由一起落进 run，事后能回答「这轮为什么用 opus」。
+    const chosen = pickDispatchModel({
+      agent,
+      roleModel: roleModel(role),
+      task: {
+        title: task.title,
+        notes: filled || readableNotes(task.notes) || task.title,
+        checklist: task.checklist,
+        constraints: task.constraints,
+        priority: task.priority,
+      },
+    })
+    const dispatch = { model: chosen.model, instructions, modelNote: chosen.note }
+    // 开工 = 签署 Mandate：到这里派发参数都已校验通过，范围在此冻结（已签署过的原样返回）。
+    // 排队和立刻开跑都算开工；run.start 里带不带 mandate 在真正发送时才按模式与执行器能力决定。
+    await signMandate(pool, userId, task.id, task.constraints, 'user')
     // 开跑方式只用一次：无论排队还是立刻开跑，也无论最后按 fork 还是 fresh 跑，
     // 都在这儿清掉——显式请求 fresh 时不清，重试就会又续回老上下文
     const settle = async () => {
@@ -507,17 +787,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       await settle()
       const queued = await saveTask(pool, userId, { agent, machine, cwd }, task.id)
       pushTask(userId, queued)
-      return { queued: true, task: queued, delivery: { mode, reason: deliveryReason } }
+      return { queued: true, task: queued, delivery: { mode, reason: deliveryReason }, model: chosen.model, modelNote: chosen.note }
     }
     // 手动派发优先于排队：同一任务曾在队列里就作废掉，避免重复投递
     if (await dequeueDispatch(pool, userId, task.id)) pushTask(userId, await getTask(pool, userId, task.id))
-    const res = await startSession(userId, { agent, machine, cwd }, task.title, text, mode, sessionKey, task.id, undefined, dispatch)
+    // 续写原会话：没有新会话要建，直接进同一个对话。执行器太旧的判断按「这台电脑」来。
+    const resumeTarget = mode === 'resume' ? resumeFrom : null
+    const res = resumeTarget
+      ? await resumeTaskSession(userId, task, resumeTarget, text, dispatch)
+      : await startSession(userId, { agent, machine, cwd }, task.title, text, mode, sessionKey, task.id, undefined, dispatch)
     await settle()
     // 执行器太旧：模型和上下文会随 run.start 发过去但被忽略，得让用户知道角色没真正生效
-    const degraded = !executors.get(execKey(userId, machine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
+    const targetMachine = resumeTarget ? resumeTarget.machine : machine
+    const degraded = !executors.get(execKey(userId, targetMachine))?.roleV1 && !!(dispatch.model || dispatch.instructions)
     if (!degraded) await markMemoriesUsed(pool, memories.map(m => m.id))
     const delivery = { mode, reason: deliveryReason }
-    return degraded ? { ...res, queued: false, roleDegraded: true, delivery } : { ...res, queued: false, delivery }
+    const used = { queued: false, delivery, model: chosen.model, modelNote: chosen.note }
+    return degraded ? { ...res, ...used, roleDegraded: true } : { ...res, ...used }
   }
 
   // 电脑上线后把排队的活按入队顺序投递；失败累计次数，超过上限就放弃并记录
@@ -526,18 +812,25 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!executors.has(execKey(userId, machine))) return
       // 入队时定的「接着原会话」到真投递可能隔了几小时：原会话可能又在跑或被删了，投递前重新判定
       let mode = item.mode as Delivery, sessionKey = item.sessionKey as string
-      if (mode === 'fork') {
+      let resumeSrc: Session | null = null
+      if (mode === 'fork' || mode === 'resume') {
+        const want = mode
         const src = sessionKey ? await getSession(pool, userId, `${item.agent}:${sessionKey}`).catch(() => null) : null
-        const plan = planDelivery('fork', src ? forkInfo(src) : NO_FORK, { agent: item.agent as string, machine, cwd: item.cwd as string })
-        if (plan.mode !== 'fork') {
+        const plan = planDelivery(want, src ? forkInfo(src) : NO_FORK, { agent: item.agent as string, machine, cwd: item.cwd as string })
+        if (plan.mode !== want) {
           mode = 'fresh'; sessionKey = ''
           app.log.warn({ taskId: item.taskId, reason: plan.reason }, '排队投递复核：续不上原会话，退回新会话')
           await logAuto(pool, userId, item.taskId, 'dispatched', null, `排队复核退回新会话：${plan.reason}`)
-        } else if (src) sessionKey = sessionKeyOf(src.id)
+        } else if (src) {
+          sessionKey = sessionKeyOf(src.id)
+          if (mode === 'resume') resumeSrc = src
+        }
       }
       let ok = false
       try {
-        await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions })
+        // 续写原会话不建新会话；其余方式照旧新建一个（fork / fresh）
+        if (resumeSrc) await resumeTaskSession(userId, await getTask(pool, userId, item.taskId), resumeSrc, item.text, { model: item.model, instructions: item.instructions, modelNote: item.modelNote })
+        else await startSession(userId, { agent: item.agent as Session['agent'], machine, cwd: item.cwd }, item.title, item.text, mode, sessionKey, item.taskId, undefined, { model: item.model, instructions: item.instructions, modelNote: item.modelNote })
         ok = true
       } catch (e) {
         const attempts = await bumpAttempts(pool, userId, item.taskId)
@@ -566,12 +859,107 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       runs.map(r => r.id),
     )
     for (const a of expired) await pushApproval(userId, a, false)
+    // Claude 终端会话的 hook 审批没有 run：按机器过期，电脑端 hook 那边会自己放弃
+    for (const a of await expireHookApprovalsOfMachine(pool, userId, machine)) await pushApproval(userId, a, false)
     for (const [id, w] of historyWaits) {
       if (w.userId === userId && w.machine === machine) {
         historyWaits.delete(id)
         w.resolve({ messages: [], error: '电脑端断开' })
       }
     }
+    for (const [id, w] of fileWaits) {
+      if (w.userId === userId && w.machine === machine) {
+        fileWaits.delete(id)
+        w.resolve({ error: '电脑端断开' })
+      }
+    }
+  }
+
+  /** 向电脑端要一个项目内文件的文本（file.request 往返）。null = 没及时回 */
+  async function requestFile(userId: number, machine: string, cwd: string, path: string): Promise<FileResult | null> {
+    if (!executors.has(execKey(userId, machine))) return { error: '电脑端不在线' }
+    const requestId = randomUUID()
+    const waiting = new Promise<FileResult | null>(resolve => {
+      const timer = setTimeout(() => {
+        fileWaits.delete(requestId)
+        resolve(null)
+      }, historyTimeoutMs)
+      fileWaits.set(requestId, {
+        userId,
+        machine,
+        resolve: r => {
+          clearTimeout(timer)
+          resolve(r)
+        },
+      })
+    })
+    if (!sendExecutor(userId, machine, { type: 'file.request', requestId, cwd, path })) {
+      fileWaits.delete(requestId)
+      return { error: '电脑端不在线' }
+    }
+    return waiting
+  }
+
+  /** 向电脑端要一份原生日志（history.request 往返）。null = 电脑端没及时回 */
+  async function requestNativeHistory(userId: number, session: Session): Promise<HistoryResult | null> {
+    if (!executors.has(execKey(userId, session.machine))) return { messages: [], error: '电脑端不在线' }
+    const requestId = randomUUID()
+    const waiting = new Promise<HistoryResult | null>(resolve => {
+      const timer = setTimeout(() => {
+        historyWaits.delete(requestId)
+        resolve(null)
+      }, historyTimeoutMs)
+      historyWaits.set(requestId, {
+        userId,
+        machine: session.machine,
+        resolve: r => {
+          clearTimeout(timer)
+          resolve(r)
+        },
+      })
+    })
+    const sent = sendExecutor(userId, session.machine, {
+      type: 'history.request',
+      requestId,
+      agent: session.agent,
+      sessionKey: session.id.slice(session.id.indexOf(':') + 1),
+      cwd: session.cwd,
+    })
+    if (!sent) {
+      historyWaits.delete(requestId)
+      return { messages: [], error: '电脑端不在线' }
+    }
+    return waiting
+  }
+
+  /**
+   * 拉一次正文并整段替换库里的记录，成功后通知在线客户端重载。
+   * 只读监听类（WorkBuddy）的正文只在电脑上，服务端库里可能停在上一轮。
+   */
+  async function syncNativeHistory(userId: number, session: Session): Promise<{ messages: Message[] } | { error: string; code: number }> {
+    const result = await requestNativeHistory(userId, session)
+    if (!result) return { error: '电脑端没有及时返回历史记录', code: 504 }
+    if (result.error) return { error: result.error, code: 502 }
+    const items = (result.messages ?? [])
+      // 空文本但带图的消息（Codex 生成图）是真实对话，不能当空消息丢掉
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string' &&
+        (m.text.trim() !== '' || (historyImages(m.images)?.length ?? 0) > 0))
+      .map(m => ({
+        role: m.role,
+        text: m.text,
+        sourceId: nativeKey(m.sourceId) ?? undefined,
+        branchPoint: nativeKey(m.branchPoint) ?? undefined,
+        // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
+        at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
+        // Codex 的生成图/附图转成的 data URL；老电脑端不发这个字段
+        images: historyImages(m.images),
+      }))
+    // 电脑端返回空列表时绝不能整体替换：replaceHistory 先删后插，会把库里已有的消息清空。
+    // 老版本桌面端仍可能返回空数组，服务端这里兜住，明确报错并保留原记录。
+    if (!items.length) return { error: '电脑端没有读到对话内容，已保留原有记录', code: 502 }
+    const messages = await serial(() => replaceHistory(pool, userId, session.id, items))
+    broadcast(userId, { type: 'session.history', sessionId: session.id })
+    return { messages }
   }
 
   // 拿到真实 id 之前 run 就结束了：临时会话标 aborted 并提醒（走通知过滤管线）
@@ -617,14 +1005,41 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
             ? await evaluateNotify(pool, req.userId, { kind:'session', agent:r.session.agent, state:r.session.state as 'done'|'aborted'|'waiting', sessionId:r.session.id })
             : false
           pushSession(req.userId,r.session,notify)
-          await syncTask(req.userId,r.session.id,r.session.state)
-          // 会话跑完：攒一条处理意见等人确认。补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，
-          // 否则「问角色」也会产出一条待办，细化还会无限套娃。
+          // 正文跟着事件上来（WorkBuddy）：直接落库，不依赖「电脑端在线」。
+          // 插进去了才通知界面重载，重复上报不发多余广播。
+          if (ev.messages?.length) {
+            const added = await appendEventMessages(pool, req.userId, r.session.id, ev.messages, new Date(ev.at))
+              .catch(e => { app.log.error(e, '落库会话正文失败'); return 0 })
+            if (added) broadcast(req.userId, { type: 'session.history', sessionId: r.session.id })
+          }
+          // 还有在跑的运行（比如 agent 放出后台子代理后回了句「等通知」）：hook 的 done 不转任务，
+          // 由执行器的 run.status done 来转；running 迁移照常
+          const runBusy = r.session.state === 'done' && !!(await activeRun(pool, req.userId, r.session.id))
+          if (!runBusy) await syncTask(req.userId,r.session.id,r.session.state)
+          // 会话跑完：只有挂了未完成任务的会话才攒处理意见（generateProposal 里把关），不挂任务的不产单。
+          // 补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，否则「问角色」也会产出一条待办，
+          // 细化还会无限套娃。WorkBuddy 的正文只在电脑上：先把这一轮的回复同步进库，再按最新回复攒任务单。
+          // 顺序反了就是「任务单先冒出来、最新回复还停在上一轮」，标题也会从旧回复里摘。
           if (r.session.state === 'done' && !ev.quiet &&
               !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
-            const proposal = await generateProposal(pool, req.userId, r.session, r.session.eventAt)
-              .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
-            if (proposal) broadcast(req.userId, { type: 'proposal', proposal })
+            const done = r.session
+            // 两段式：这一段只攒一条简短建议（标题 + 执行人），不叫模型——
+            // 人点「生成任务单」才展开全文并让项目经理细化，省掉「跑完就甩一张看不完的长单」。
+            const draft = async () => {
+              const proposal = await generateProposal(pool, req.userId, done, done.eventAt)
+                .catch(e => { app.log.error(e, '生成处理意见失败'); return null })
+              if (!proposal) return
+              broadcast(req.userId, { type: 'proposal', proposal })
+            }
+            if (done.agent === 'workbuddy') {
+              // 同步要等电脑端回话（最多 10s），放后台跑，别把这次事件上报的响应拖住
+              void inBackground(async () => {
+                await syncNativeHistory(req.userId, done).catch(e => app.log.error(e, '同步会话正文失败'))
+                await draft()
+              })
+            } else {
+              void inBackground(draft)
+            }
           }
           // Watchdog：反复失败达到阈值时提醒一次（running 清零计数）
           if ((ev.state === 'aborted' || ev.state === 'running') && !ev.quiet &&
@@ -645,6 +1060,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { sessions: await listSessions(pool, req.userId, q.all === '1') }
   })
 
+  // 单查一个会话：快照只推「24 小时内且没结束」的会话，任务/日历里引用的旧会话
+  // 不在前端列表里，按 id 补一次才能判断是「已结束」还是「真的删了」。
+  app.get('/sessions/:id', async (req, reply) => {
+    const session = await getSession(pool, req.userId, (req.params as { id: string }).id)
+    if (!session) return reply.code(404).send({ error: '会话不存在' })
+    return { session }
+  })
+
   // ---------- 目标与任务（所有变更与执行器事件串行） ----------
   app.get('/goals', async req => serial(async () => ({goals:await listGoals(pool,req.userId)})))
   app.get('/tasks', async req => serial(async () => ({tasks:await listTasks(pool,req.userId)})))
@@ -661,6 +1084,26 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     broadcast(req.userId, { type: 'notify.settings', settings })
     return { settings }
   }))
+  // 账号级界面偏好（agent 头像）：改了推给同账号所有设备，电脑手机一起换
+  app.get('/prefs', async req => ({ prefs: await getPrefs(pool, req.userId) }))
+  app.patch('/prefs', async req => serial(async () => {
+    const prefs = await savePrefs(pool, req.userId, req.body)
+    broadcast(req.userId, { type: 'prefs', prefs })
+    return { prefs }
+  }))
+  // 角色 / 项目 / 项目经理设置改了：推给同账号所有设备，各自重拉（任务页的下拉、筛选、头像都靠这几份清单）。
+  // 写接口散在好几处（含助手草稿确认建角色），统一在响应后判断，不在每个路由里各写一遍
+  const CATALOG_ROUTES: [RegExp, 'roles' | 'projects'][] = [
+    [/^\/roles(\/:id)?$/, 'roles'],
+    [/^\/assistant\/drafts\/:id\/confirm$/, 'roles'],
+    [/^\/dispatch\/manager$/, 'roles'],
+    [/^\/projects(\/:id)?$/, 'projects'],
+  ]
+  app.addHook('onResponse', async (req, reply) => {
+    if (req.method === 'GET' || reply.statusCode >= 400 || !req.userId) return
+    const hit = CATALOG_ROUTES.find(([re]) => re.test(req.routeOptions.url ?? ''))
+    if (hit) broadcast(req.userId, { type: 'catalog', kind: hit[1] })
+  })
   // 角色：谁来做（执行工具）+ 用什么模型 + 按什么准则（上下文）
   app.get('/roles', async req => serial(async () => ({ roles: await listRoles(pool, req.userId) })))
   app.post('/roles', async req => serial(async () => ({ role: await saveRole(pool, req.userId, req.body) })))
@@ -703,29 +1146,13 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 服务端只额外记住「这个会话属于助手」，好把 agent 回的 JSON 认成草稿。
   app.get('/assistant', async req => serial(async () => {
     const thread = await getThread(pool, req.userId)
-    const [messages, drafts, run, roles, projectRows, dirRows] = await Promise.all([
+    const [messages, drafts, run, roles] = await Promise.all([
       thread?.sessionId ? listMessages(pool, req.userId, thread.sessionId, 100) : Promise.resolve([]),
       thread ? listDrafts(pool, req.userId, thread.id) : Promise.resolve([]),
       thread?.lastRunId ? getRun(pool, req.userId, thread.lastRunId) : Promise.resolve(null),
       listRoles(pool, req.userId),
-      // 项目上登记的目录（每台电脑一条）：这是用户刻意维护的目录候选
-      pool.query(`SELECT dirs FROM projects WHERE user_id = $1 AND dirs <> '[]'::jsonb`, [req.userId]),
-      // 这台账号在电脑上用过的目录，界面下拉直接选，省得每次都手打路径
-      pool.query(`SELECT machine, cwd, max(updated_at) at FROM sessions
-                  WHERE user_id = $1 AND cwd <> '' GROUP BY machine, cwd ORDER BY at DESC LIMIT 40`, [req.userId]),
     ])
     const online = agentList(req.userId)
-    const seen = new Set<string>()
-    const dirs = [
-      // 项目里登记的排在前面：那是用户刻意维护的目录
-      ...projectRows.rows.flatMap((r: any) => Array.isArray(r.dirs) ? r.dirs.filter((d: any) => d && typeof d.cwd === 'string' && d.cwd) : []),
-      ...dirRows.rows.map(r => ({ machine: String(r.machine ?? ''), cwd: String(r.cwd) })),
-    ].filter(d => {
-      const key = `${d.machine ?? ''}\0${d.cwd}`
-      if (seen.has(key)) return false
-      seen.add(key)
-      return true
-    }).slice(0, 40)
     return {
       thread,
       messages,
@@ -734,13 +1161,11 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       pending: !!run && (run.status === 'queued' || run.status === 'running'),
       runError: run && run.status === 'failed' ? run.error : '',
       online,
+      // 不给工作目录建议：建角色跟目录无关，一律交给电脑端用 <文档>/AgentHub
       suggestion: {
         agent: thread?.agent ?? 'claude',
         machine: thread?.machine ?? (online.length === 1 ? online[0] : ''),
-        // 默认就是空：交给电脑端用 <文档>/AgentHub，用户不用为了建角色先挑项目目录
-        cwd: thread?.cwd ?? '',
       },
-      dirs,
       roles: roles.length,
     }
   }))
@@ -775,7 +1200,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (!session) throw new TaskError('助手会话已经不在了，重新开始一次', 409)
     if (!executors.has(execKey(req.userId, session.machine))) throw new TaskError('那台电脑不在线', 409)
     if (await activeRun(pool, req.userId, session.id)) throw new TaskError('上一句还在想，等它回完再说', 409)
-    const run = await createRun(pool, req.userId, randomUUID(), session.id, session.machine)
+    const prev = await lastRunModel(pool, req.userId, session.id)
+    const run = await createRun(pool, req.userId, randomUUID(), session.id, session.machine, null, prev)
     const message = await insertMessage(pool, req.userId, session.id, run.id, 'user', request)
     await markDispatch(pool, req.userId, run.id)
     pushRun(req.userId, run)
@@ -784,6 +1210,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       type: 'run.start', runId: run.id, sessionId: session.id, agent: session.agent,
       sessionKey: session.id.slice(session.id.indexOf(':') + 1), cwd: session.cwd,
       text: followupMessage(request), mode: 'resume',
+      ...(prev.model ? { model: prev.model } : {}),
     })
     if (!sent) {
       const failed = await setRunStatus(pool, req.userId, run.id, 'failed', '电脑端不在线')
@@ -809,6 +1236,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.post('/assistant/reset', async req => serial(async () => {
     await resetThread(pool, req.userId)
     return { ok: true }
+  }))
+  // 可选电脑：项目配置里的下拉项——在线执行器 + 这个账号用过的机器，离线也列出来
+  app.get('/machines', async req => serial(async () => ({ machines: await listMachines(pool, req.userId, agentList(req.userId), capsOfUser(req.userId), listeningList(req.userId)) })))
+  // 电脑改名：本机名一变，旧名下的会话 / 运行 / 项目目录一起挪过去，别留一台「不存在的电脑」
+  app.post('/machines/rename', async req => serial(async () => {
+    const b = object(req.body ?? {})
+    const res = await renameMachine(pool, req.userId, b.from, b.to)
+    // 能力清单跟着改名一起挪：不然改完名到这台电脑重连之前，它看起来像「没上报过工具」
+    const from = typeof b.from === 'string' ? b.from.trim() : ''
+    const to = typeof b.to === 'string' ? b.to.trim() : ''
+    const caps = from && to && from !== to ? capsByMachine.get(execKey(req.userId, from)) : undefined
+    if (caps) {
+      capsByMachine.set(execKey(req.userId, to), caps)
+      capsByMachine.delete(execKey(req.userId, from))
+    }
+    return res
   }))
   // 项目：一个代码库的身份与背景知识，目录列表（每台电脑一条）也挂在它身上
   app.get('/projects', async req => serial(async () => ({ projects: await listProjects(pool, req.userId) })))
@@ -868,6 +1311,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   app.patch('/tasks/:id', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
     const b = object(req.body ?? {})
+    // 备注里的附件引用必须指向这个任务自己的附件：指错了渲染出来是坏图，事后也查不出原因
+    if (typeof b.notes === 'string') await assertRefs(pool,req.userId,id,b.notes)
     let task = await saveTask(pool,req.userId,req.body,id)
     // 只有这次请求显式换了角色才套用，避免每次编辑都重算
     task = await roleDefaults(req.userId, task, b)
@@ -875,6 +1320,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if ((req.body as {status?:unknown}|null)?.status === 'done')
       for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
     // 手动推进到待验收/已完成也补一份产物：不依赖会话事件，「每个任务都有文档」才成立
+    if (b.status === 'review') await createDelivery(pool,req.userId,id,(await getDigests(pool,req.userId,id)).review ?? {}).catch(() => null)
     if (b.status === 'review' || b.status === 'done') {
       const artifact = await buildArtifact(pool,req.userId,id)
       if (artifact) broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
@@ -910,7 +1356,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const item = await decideReviewItem(pool, req.userId, entityId(p.id), entityId(p.itemId), status, note)
     return { item }
   }))
-  // 投机预摘要：验收摘要（进入待验收时后台生成）与失败上下文
+  // 预摘要：验收摘要（进入待验收时后台生成）与失败上下文
   app.get('/tasks/:id/digest', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
     await getTask(pool,req.userId,id)
@@ -949,6 +1395,65 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     await deleteArtifact(pool,req.userId,id)
     return { ok: true }
   }))
+  // ---------- 文件预览：文件在执行任务的电脑上，经 WS 向执行器要；由执行器校验必须落在 cwd 内 ----------
+  // 读接口不进 serial：一次往返最长等 historyTimeoutMs，不能把全局队列占住。
+  const previewFile = async (userId: number, machine: string | null, cwd: string | null, raw: unknown, reply: { code: (n: number) => { send: (b: unknown) => unknown } }) => {
+    const path = typeof raw === 'string' ? raw : ''
+    if (!path.trim() || path.length > 1000 || path.includes('\0')) return reply.code(400).send({ error: '路径不合法' })
+    if (!machine) return reply.code(409).send({ error: '找不到执行这个任务的电脑' })
+    if (!executors.has(execKey(userId, machine))) return reply.code(409).send({ error: '电脑端不在线' })
+    const res = await requestFile(userId, machine, cwd ?? '', path.trim())
+    if (!res) return reply.code(504).send({ error: '电脑端没有及时响应' })
+    if (res.error) return reply.code(res.error === '电脑端不在线' || res.error === '电脑端断开' ? 409 : res.error.includes('找不到') ? 404 : 400).send({ error: res.error })
+    return { path: res.path ?? path, text: res.text ?? '', size: res.size ?? 0, truncated: !!res.truncated }
+  }
+  app.get('/tasks/:id/file', async (req, reply) => {
+    const id = entityId((req.params as {id:string}).id)
+    const task = await getTask(pool,req.userId,id)
+    let machine = task.machine, cwd = task.cwd
+    if (!machine || !cwd) {
+      // 任务自身没配电脑 / 目录：取挂接会话里最近更新的那个
+      const sessions = (await Promise.all(task.sessionIds.map(s => getSession(pool,req.userId,s)))).filter((s): s is Session => !!s)
+      sessions.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt))
+      if (sessions[0]) { machine = machine || sessions[0].machine; cwd = cwd || sessions[0].cwd }
+    }
+    return previewFile(req.userId, machine, cwd, (req.query as {path?: string}).path, reply)
+  })
+  app.get('/sessions/:id/file', async (req, reply) => {
+    const session = await getSession(pool,req.userId,(req.params as {id:string}).id)
+    if (!session) return reply.code(404).send({ error: '会话不存在' })
+    return previewFile(req.userId, session.machine, session.cwd, (req.query as {path?: string}).path, reply)
+  })
+  // ---------- 任务附件：图片 / 文件独立存放，备注里只写 attachment:ID 引用 ----------
+  // 列表只给元信息（图片的 data URL 按 id 单独取）：读接口不进 serial，否则一次列表会把
+  // 全局队列占住，连执行端的事件上报都得排队等它。
+  app.get('/tasks/:id/attachments', async req => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    return { attachments: await listAttachments(pool,req.userId,id) }
+  })
+  // 收 base64：图片是 data URL，文件是裸 base64；body 上限按最大文件放宽。
+  // 校验 + 解码在队列外做（16MB 的活），只有「数量上限 + INSERT」进队列。
+  app.post('/tasks/:id/attachments', { bodyLimit: ATTACHMENT_BODY_LIMIT }, async req => {
+    const id = entityId((req.params as {id:string}).id)
+    const input = prepareAttachment(req.body)
+    return { attachment: await serial(() => addAttachment(pool,req.userId,id,input)) }
+  })
+  app.get('/tasks/:id/attachments/:attachmentId', async req => {
+    const p = req.params as {id:string;attachmentId:string}
+    return attachmentData(pool,req.userId,entityId(p.id),entityId(p.attachmentId))
+  })
+  // 删除附件：顺手把备注里指向它的引用摘掉，免得留下坏图
+  app.delete('/tasks/:id/attachments/:attachmentId', async req => serial(async () => {
+    const p = req.params as {id:string;attachmentId:string}
+    const id = entityId(p.id), attachmentId = entityId(p.attachmentId)
+    const task = await getTask(pool,req.userId,id)
+    await deleteAttachment(pool,req.userId,id,attachmentId)
+    const next = stripRef(task.notes,attachmentId)
+    const saved = next === task.notes ? task : await saveTask(pool,req.userId,{notes:next},id)
+    if (saved !== task) pushTask(req.userId,saved)
+    return { task: saved, attachments: await listAttachments(pool,req.userId,id) }
+  }))
   // Thread 视图：任务 = 统一事件流（关联会话消息 + 执行记录 + 时间提醒 + 摘要）
   app.get('/threads/task/:id', async req => serial(async () => {
     const id = entityId((req.params as {id:string}).id)
@@ -983,6 +1488,29 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const task = await linkSession(pool,req.userId,entityId(p.id),p.sessionId,true)
     pushTask(req.userId,task); return {task}
   }))
+  // 验收：review → done 的唯一入口（门禁：检查项全 pass、没有待处理审批）
+  app.post('/tasks/:id/accept', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const { task, delivery } = await acceptTask(pool,req.userId,id,'user')
+    for (const r of await closeTaskRuns(pool,req.userId,id,'done')) pushRun(req.userId,r)
+    const artifact = await buildArtifact(pool,req.userId,id)
+    if (artifact) broadcast(req.userId,{type:'task.artifact',taskId:id,artifact})
+    if (task.projectId !== null) await appendBrief(pool,req.userId,task.projectId,`「${task.title}」已完成`,id)
+    pushTask(req.userId,task); return {task,delivery}
+  }))
+  // 任务的授权范围快照 + 决策统计（observe 下「本来会自动放行 N 条、会问 M 次」）
+  app.get('/tasks/:id/mandate', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    await getTask(pool,req.userId,id)
+    return {
+      mode: await getMandateMode(pool,req.userId),
+      mandate: await getMandate(pool,req.userId,id),
+      stats: await decisionStats(pool,req.userId,id),
+      delivery: await getDelivery(pool,req.userId,id),
+    }
+  }))
+  app.get('/mandate/settings', async req => ({ mode: await getMandateMode(pool,req.userId) }))
+  app.put('/mandate/settings', async req => serial(async () => ({ mode: await setMandateMode(pool,req.userId,object(req.body ?? {}).mode) })))
   app.post('/tasks/:id/start', async req => serial(async () =>
     startTaskDispatch(req.userId, entityId((req.params as {id:string}).id), object(req.body ?? {}))))
   app.delete('/tasks/:id/queue', async req => serial(async () => {
@@ -1000,56 +1528,130 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const limit = Math.min(Math.max(Number.parseInt(q.limit ?? '50', 10) || 50, 1), 200)
     return { proposals: await listProposals(pool, req.userId, { sessionId, limit }) }
   })
-  // 细化：借电脑上已登录的 agent 重写这份意见。和角色助手同一条通道，服务端仍然没有模型凭据。
-  app.post('/proposals/:id/refine', async req => serial(async () => {
-    const id = entityId((req.params as {id:string}).id)
-    const proposal = await getProposal(pool, req.userId, id)
-    if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
-    const b = object(req.body ?? {})
-    const session = await getSession(pool, req.userId, proposal.sessionId)
-    const online = agentList(req.userId)
-    const machine = taskText(b.machine ?? session?.machine ?? (online.length === 1 ? online[0] : ''), '电脑名', 200)
-    if (!executors.has(execKey(req.userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
-    const manager = await getManager(pool, req.userId)
-    const role = await findRole(pool, req.userId, manager.roleId)
-    // 谁来判断：优先用项目经理角色配的执行工具；没配就跟着原会话那台用同一个工具
-    const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode'
+  // 细化：借电脑上已登录的 agent 把草稿重写一遍。和角色助手同一条通道，服务端仍然没有模型凭据。
+  // 两种草稿共用这一条：会话攒出来的意见（有会话尾部可读）、人直接发的单（只有一句话和项目背景）。
+  const startRefine = async (userId: number, proposal: Proposal, b: Record<string, unknown>) => {
+    const isTicket = proposal.kind === 'ticket'
+    const session = isTicket ? null : await getSession(pool, userId, proposal.sessionId).catch(() => null)
+    const online = agentList(userId)
+    // 在哪台机器上想：显式指定 > 人发单时选的 > 原会话那台 > 唯一在线的那台
+    const wanted = typeof b.machine === 'string' && b.machine.trim() ? b.machine.trim() : proposal.machine || session?.machine || ''
+    const machine = taskText(wanted || online[0] || '', '电脑名', 200)
+    if (!executors.has(execKey(userId, machine))) throw new TaskError('那台电脑不在线，先在电脑上打开 AgentHub', 409)
+    // 谁来判断：这一单归哪位项目经理管——本项目专属经理优先，其次是管所有项目的那位
+    const role = await pickManagerFor(pool, userId, proposal.projectId)
+    // 用谁的执行工具：优先用项目经理角色配的；没配就跟着原会话那台用同一个工具
+    const agent = role?.agent === 'claude' || role?.agent === 'codex' || role?.agent === 'zcode' || role?.agent === 'codebuddy'
       ? role.agent
-      : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode') ? session.agent : 'claude')
-    const [msgs, task, roles, projects] = await Promise.all([
-      listMessages(pool, req.userId, proposal.sessionId, 8),
-      proposal.taskId === null ? Promise.resolve(null) : getTask(pool, req.userId, proposal.taskId).catch(() => null),
-      listRoles(pool, req.userId),
-      listProjects(pool, req.userId),
+      : (session && (session.agent === 'claude' || session.agent === 'codex' || session.agent === 'zcode' || session.agent === 'codebuddy') ? session.agent : 'claude')
+    const msgs = isTicket ? [] : await listMessages(pool, userId, proposal.sessionId, 8)
+    const [task, roles, projects] = await Promise.all([
+      proposal.taskId === null ? Promise.resolve(null) : getTask(pool, userId, proposal.taskId).catch(() => null),
+      listRoles(pool, userId),
+      listProjects(pool, userId),
     ])
-    const prompt = refineMessage({
-      sessionTitle: proposal.sessionTitle,
-      agent: proposal.sessionAgent,
-      project: proposal.sessionProject,
-      task: task ? { title: task.title, notes: task.notes, todo: task.checklist.filter(i => !i.done).map(i => i.text) } : null,
-      tail: msgs.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => ({ role: m.role, text: m.text })),
-      evidence: proposal.evidence,
-      draft: {
-        title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
-        constraints: proposal.constraints,
-        delivery: proposal.delivery,
-        // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
-        assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
-      },
-      roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
-      projects: projects.map(p => ({ id: p.id, name: p.name })),
-    })
+    // 发单场景要多给一份项目背景（说明 + 近况）和发单人指定的地方：这些是它唯一能依靠的材料
+    const project = projects.find(p => p.id === proposal.projectId) ?? null
+    const dir = project ? await pickProjectDir(pool, userId, project.id, machine, online) : null
+    const cwd = proposal.cwd || dir?.cwd || session?.cwd || ''
+    const prompt = isTicket
+      ? ticketMessage({
+        title: proposal.title,
+        notes: proposal.notes,
+        project: project?.name ?? proposal.sessionProject,
+        projectBrief: project?.brief ?? '',
+        recent: await recentBrief(pool, userId, proposal.projectId),
+        role: proposal.assignee.roleId === null ? null
+          : { name: proposal.assignee.roleName, title: proposal.assignee.roleTitle, agent: proposal.assignee.agent },
+        machine, cwd,
+        roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
+        projects: projects.map(p => ({ id: p.id, name: p.name })),
+      })
+      : refineMessage({
+        sessionTitle: proposal.sessionTitle,
+        agent: proposal.sessionAgent,
+        project: proposal.sessionProject,
+        task: task ? { title: task.title, notes: task.notes, todo: task.checklist.filter(i => !i.done).map(i => i.text) } : null,
+        tail: msgs.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => ({ role: m.role, text: m.text })),
+        evidence: proposal.evidence,
+        draft: {
+          title: proposal.title, notes: proposal.notes, checklist: proposal.checklist,
+          constraints: proposal.constraints,
+          delivery: proposal.delivery,
+          // 现在的执行人一并给项目经理看：它可以选择沿用，也可以换人
+          assignee: [proposal.assignee.roleName, proposal.assignee.agent, proposal.assignee.machine].filter(Boolean).join(' · '),
+        },
+        roles: roles.map(r => ({ id: r.id, name: r.name, title: r.title, agent: r.agent ?? '' })),
+        projects: projects.map(p => ({ id: p.id, name: p.name })),
+      })
     // 项目经理自己的上下文就是它做判断的准则，拼在首条消息前面（与派活时的系统提示同源）
     const brief = role?.context ? `${role.context}\n\n${prompt}` : prompt
     // 第 9 参是「这次 run 用谁的身份」：漏了它，细化就会用执行工具自己的默认模型，
     // 项目经理角色配的模型等于没配。上下文已经在 brief 里，这里不再重复注入 instructions。
     const res = await startSession(
-      req.userId, { agent, machine, cwd: session?.cwd ?? '' },
+      userId, { agent, machine, cwd },
       `${PROPOSAL_TITLE}${proposal.title.slice(0, 40)}`, prompt, 'fresh', '', undefined, undefined,
       { model: roleModel(role), instructions: '' }, brief,
     )
-    await markRefineRun(pool, req.userId, id, res.runId)
+    await markRefineRun(pool, userId, proposal.id, res.runId)
+    return res
+  }
+  app.post('/proposals/:id/refine', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const proposal = await getProposal(pool, req.userId, id)
+    if (proposal.status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
+    const res = await startRefine(req.userId, proposal, object(req.body ?? {}))
     return { runId: res.runId }
+  }))
+  // 建议 → 任务单：会话跑完只留一行建议（类型 + 标题 + 执行人），人点了才走这里。
+  // 先把完整草稿交出去，界面立刻能展开；同时让项目经理用模型重写一遍，回来会替换成更好的版本。
+  // 电脑不在线也照样能继续——内容停在规则稿，把原因带回去让界面提示。
+  app.post('/proposals/:id/draft', async req => serial(async () => {
+    const id = entityId((req.params as {id:string}).id)
+    const proposal = await getProposal(pool, req.userId, id)
+    if (proposal.status !== 'pending') throw new TaskError('这条建议已经处理过了', 409)
+    // 发单本身就是任务单（只有一句话 + 项目背景，细化在发单时已经跑过）
+    if (proposal.kind === 'ticket') throw new TaskError('发单本身就是任务单，不用再生成', 409)
+    let next = await promoteToDraft(pool, req.userId, id)
+    broadcast(req.userId, { type: 'proposal', proposal: next })
+    let refineError = ''
+    try {
+      await startRefine(req.userId, next, {})
+      // 带上 refineRunId 再推一次：界面据此显示「项目经理正在写完整任务单」
+      next = await getProposal(pool, req.userId, id)
+      broadcast(req.userId, { type: 'proposal', proposal: next })
+    } catch (e) { refineError = e instanceof Error ? e.message : String(e) }
+    return { proposal: next, refineError }
+  }))
+  // 发单：人写一句话，先落成一份待确认的任务单，再让项目经理用模型补成能开工的样子。
+  // 不直接建任务——建了再改等于让人对着半成品做验收；这里坚持「预览 → 人确认 → 才派发」。
+  app.post('/tickets', async req => serial(async () => {
+    const b = object(req.body ?? {})
+    const title = taskText(b.title, '工单标题', 200)
+    if (b.projectId === undefined || b.projectId === null || b.projectId === '') throw new TaskError('先选一个项目')
+    const projectId = entityId(b.projectId)
+    const project = await findProject(pool, req.userId, projectId)
+    if (!project) throw new TaskError('项目不存在', 404)
+    const roleId = b.roleId === undefined || b.roleId === null || b.roleId === '' ? null : entityId(b.roleId)
+    if (roleId !== null && !(await findRole(pool, req.userId, roleId))) throw new TaskError('角色不存在', 404)
+    // 发单的前置条件：这个项目得有人管。没人管的单发出去也没人补、没人派
+    const owner = await pickManagerFor(pool, req.userId, projectId)
+    if (!owner) throw new TaskError('这个项目还没有项目经理：先到「设置 → 角色」把某个角色设为项目经理，再回来发单', 409)
+    const proposal = await createTicket(pool, req.userId, {
+      title,
+      notes: typeof b.notes === 'string' ? b.notes.slice(0, 4000) : '',
+      projectId,
+      projectName: project.name,
+      roleId,
+      machine: typeof b.machine === 'string' ? b.machine.trim().slice(0, 200) : '',
+      cwd: typeof b.cwd === 'string' ? b.cwd.trim().slice(0, 4000) : '',
+    })
+    broadcast(req.userId, { type: 'proposal', proposal })
+    // 立刻让项目经理写一遍；电脑不在线或没配项目经理角色就把草稿留着，人可以在卡片上点重写
+    let refineError = ''
+    try { await startRefine(req.userId, proposal, {}) }
+    catch (e) { refineError = e instanceof Error ? e.message : String(e) }
+    return { proposal: await getProposal(pool, req.userId, proposal.id), refineError }
   }))
   // 确认：这张任务单已经是「谁做、在哪做、做什么」都齐了的，确认即落库。
   // 默认顺手派发（人点了确认就是要它开始）；dispatch:false 表示只建任务，留着以后自己派或交给项目经理。
@@ -1064,6 +1666,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 去向：界面可以改，没改就按项目经理给的那条。写进任务里而不是只传给这次派发——
     // 「只建任务」之后由项目经理自动派发时，也得按同样的方式开场。
     const want: Delivery = b.delivery === 'fork' || b.delivery === 'fresh' ? b.delivery : proposal.delivery
+    // 发单没有原会话可续：无论界面传什么都从零开跑，否则会把 ticket:xxx 当成 forkFrom
+    const isTicket = proposal.kind === 'ticket'
+    const delivery: Delivery = isTicket ? 'fresh' : want
     const body: Record<string, unknown> = {
       title: proposal.title,
       notes: proposal.notes,
@@ -1073,8 +1678,15 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       checklist: toChecklist(proposal.checklist),
       // 项目经理声明的执行边界跟着任务走：代批和派发都要用它
       constraints: proposal.constraints,
-      startMode: want,
-      forkFrom: want === 'fork' ? proposal.sessionId : null,
+      startMode: delivery,
+      forkFrom: delivery === 'fork' ? proposal.sessionId : null,
+    }
+    // 发单时人指定过的电脑/目录钉进任务：他写的就是他想要的，别在派发时又换一台
+    if (isTicket) {
+      if (proposal.machine) body.machine = proposal.machine
+      if (proposal.cwd) body.cwd = proposal.cwd
+      // 人已经确认过了，剩下的派发动作就归项目经理——和卡片上那句提示保持一致
+      body.autoDispatch = true
     }
     // 清单传的是文本数组，转成任务的 {id,text,done}
     for (const [k, v] of Object.entries(patch)) {
@@ -1083,7 +1695,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         : v
     }
     const task = await createTaskWithDefaults(req.userId, body)
-    const linked = await linkSession(pool, req.userId, task.id, proposal.sessionId)
+    // 确认任务单 = 签署 Mandate：范围从这一刻起冻结，之后不能再改
+    await signMandate(pool, req.userId, task.id, task.constraints, 'user')
+    // 发单没有会话可挂；会话攒出来的意见才需要把来源会话关联上
+    const linked = isTicket ? task : await linkSession(pool, req.userId, task.id, proposal.sessionId)
     await markProposal(pool, req.userId, id, 'accepted', task.id)
     pushTask(req.userId, linked)
     // 派发失败不影响任务已建好这件事，把原因带回去让界面提示
@@ -1095,29 +1710,42 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }
     return { task: await getTask(pool, req.userId, linked.id), proposal: await getProposal(pool, req.userId, id), dispatched, dispatchError }
   }))
-  app.post('/proposals/:id/discard', async req => serial(async () => ({
-    proposal: await markProposal(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded'),
-  })))
+  app.post('/proposals/:id/discard', async req => serial(async () => {
+    const proposal = await markProposal(pool, req.userId, entityId((req.params as {id:string}).id), 'discarded')
+    // 忽略也要广播：别的窗口 / 手机上这张单还挂着「待确认」，会话底部的入口和标签上的计数得跟着收掉
+    broadcast(req.userId, { type: 'proposal', proposal })
+    return { proposal }
+  }))
+  // 撤回忽略：把丢掉的那张单放回待确认。已确认的撤不回来——任务已经建好，撤回来只会重复
+  app.post('/proposals/:id/restore', async req => serial(async () => {
+    const proposal = await restoreProposal(pool, req.userId, entityId((req.params as {id:string}).id))
+    broadcast(req.userId, { type: 'proposal', proposal })
+    return { proposal }
+  }))
 
-  // ---------- 项目经理：全局一个，负责细化意见 + （可选）自动派发已确认的任务 ----------
+  // ---------- 项目经理：谁当经理由角色上的标记决定，可以有多位、各管一摊 ----------
   app.get('/dispatch/manager', async req => serial(async () => {
     const manager = await getManager(pool, req.userId)
-    const [roles, running, recent] = await Promise.all([
+    const [roles, managers, running, recent] = await Promise.all([
       listRoles(pool, req.userId),
+      listManagers(pool, req.userId),
       runningCount(pool, req.userId),
       recentAutoCount(pool, req.userId),
     ])
-    return { manager, roles, running, recent, quota: quota(manager, running, recent) }
+    return { manager, roles, managers, running, recent, quota: quota(manager, running, recent) }
   }))
   app.patch('/dispatch/manager', async req => serial(async () => {
     const manager = await saveManager(pool, req.userId, req.body)
-    const [running, recent] = await Promise.all([runningCount(pool, req.userId), recentAutoCount(pool, req.userId)])
-    return { manager, running, recent, quota: quota(manager, running, recent) }
+    const [running, recent, roles, managers] = await Promise.all([
+      runningCount(pool, req.userId), recentAutoCount(pool, req.userId),
+      listRoles(pool, req.userId), listManagers(pool, req.userId),
+    ])
+    return { manager, roles, managers, running, recent, quota: quota(manager, running, recent) }
   }))
 
   // 派活看板：排队中 / 在跑 / 卡住（进行中无运行）的任务聚到一张板上
   app.get('/dispatch/board', async req => serial(async () =>
-    dispatchBoard(pool, req.userId, agentList(req.userId))))
+    dispatchBoard(pool, req.userId, agentList(req.userId), await getMandateMode(pool, req.userId))))
 
   app.post('/sessions/ack-all', async req => {
     const list = await ackAll(pool, req.userId)
@@ -1171,18 +1799,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       const session = await getSession(pool, userId, id)
       if (!session) return { code: 404, error: '会话不存在' } as const
       if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，请在豆包客户端中继续对话' } as const
-      if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，请在 WorkBuddy 中继续对话' } as const
       if (!executors.has(execKey(userId, session.machine))) return { code: 409, error: '电脑端不在线' } as const
       if (await activeRun(pool, userId, id)) return { code: 409, error: '这个会话正在运行' } as const
       if (session.agent === 'codex' && session.state === 'running' && !stuckRunning(session)) return { code: 409, error: 'Codex 会话正在 Desktop 里运行' } as const
-      const run = await createRun(pool, userId, randomUUID(), id, session.machine)
+      const prev = await lastRunModel(pool, userId, id)
+      const run = await createRun(pool, userId, randomUUID(), id, session.machine, null, prev)
       const message = await insertMessage(pool, userId, id, run.id, 'user', clean, {}, images.length ? images : null)
-      return { code: 200, run, message, session } as const
+      return { code: 200, run, message, session, prev } as const
     })
     if (res.code !== 200) return reply.code(res.code).send({ error: (res as { error: string }).error })
-    const { run, message, session } = res as Extract<typeof res, { code: 200 }>
+    const { run, message, session, prev } = res as Extract<typeof res, { code: 200 }>
     pushRun(userId, run)
     pushMessage(userId, message)
+    // 后续消息只是上下文，不是授权：这条会话挂着签过 Mandate 的任务，就原样带上那份冻结快照，
+    // 消息正文怎么写（「可以 push 了」「联网装吧」）都不读、不改范围。要换范围只能新开任务。
+    const scoped = await mandateOfSession(userId, id)
+    const mandate = scoped ? await mandateField(userId, session.machine, scoped.task.id) : {}
     const sent = sendExecutor(userId, session.machine, {
       type: 'run.start',
       runId: run.id,
@@ -1193,6 +1825,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       text: clean,
       ...(images.length ? { images } : {}),
       mode: 'resume',
+      ...(prev.model ? { model: prev.model } : {}),
+      ...mandate,
     })
     if (!sent) {
       const failed = await setRunStatus(pool, userId, run.id, 'failed', '电脑端不在线')
@@ -1234,7 +1868,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       if (!session) return { code: 404, error: '会话不存在' } as const
       let point:string|undefined
       if (session.agent === 'doubao') return { code: 409, error: '豆包仅支持状态监听，暂不支持新开或分支会话' } as const
-      if (session.agent === 'workbuddy') return { code: 409, error: 'WorkBuddy 仅支持状态监听，暂不支持新开或分支会话' } as const
+      // WorkBuddy 的 CLI 不支持 --resume-session-at：分叉退化为从末尾分，这里直接拒绝指定回复分支
+      if (session.agent === 'workbuddy' && mode === 'fork') return { code: 409, error: 'WorkBuddy 暂不支持按回复分叉：可以从末尾分叉或直接续聊' } as const
       if (session.agent === 'zcode' && mode === 'fork') return { code: 409, error: 'ZCode 暂不支持按回复分叉：可以同目录新开，或直接在会话里继续聊' } as const
       if(messageId!==undefined) {
         const message=await getMessage(pool,userId,id,messageId as number)
@@ -1276,6 +1911,23 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     return { activity: await listActivity(pool, req.userId, from, to) }
   })
 
+  // 统计：读接口，不进 serial()。查询前对当前用户做一次节流刷新，界面数据准实时
+  app.get('/stats', async (req, reply) => {
+    const userId = req.userId
+    const tz = await resolveStatsTz(pool, m => app.log.warn(m))
+    const last = statsRefreshed.get(userId) ?? 0
+    if (Date.now() - last >= statsRefreshMs) {
+      statsRefreshed.set(userId, Date.now())
+      await rollupStats(pool, { userId, tz }).catch(e => req.log.error(e, '统计刷新失败'))
+    }
+    try {
+      return await queryStats(pool, userId, req.query as Record<string, string | undefined>, tz)
+    } catch (e) {
+      if (e instanceof StatsParamError) return reply.code(400).send({ error: e.message })
+      throw e
+    }
+  })
+
   app.post('/approvals/:id', async (req, reply) => {
     const userId = req.userId
     const id = (req.params as { id: string }).id
@@ -1285,6 +1937,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const cur = await getApproval(pool, userId, id)
     if (!cur) return reply.code(404).send({ error: '授权请求不存在' })
     if (cur.status !== 'pending') return reply.code(409).send({ error: '这个授权请求已经处理过了' })
+    // Claude 终端会话的 hook 审批：没有 run，机器取自会话；结果用 hook.approval.decide 回给电脑端
+    if (cur.runId.startsWith('hook:')) {
+      const machine = (await getSession(pool, userId, cur.sessionId))?.machine
+      if (!machine || !executors.has(execKey(userId, machine))) return reply.code(409).send({ error: '电脑端不在线' })
+      if (decision === 'allow' && !cur.canAllow) return reply.code(403).send({ error: '这条审批只能拒绝，要远程允许请在电脑端设置里打开' })
+      const done = await decideApproval(pool, userId, id, decision === 'allow' ? 'allowed' : 'denied', 'user')
+      if (!done) return reply.code(409).send({ error: '这个授权请求已经处理过了' })
+      const message = await insertMessage(pool, userId, done.sessionId, null, 'approval', `${decision === 'allow' ? '已允许' : '已拒绝'}：${done.tool} ${done.detail}`)
+      await pushApproval(userId, done, false)
+      pushMessage(userId, message)
+      if (!sendExecutor(userId, machine, { type: 'hook.approval.decide', approvalId: id, decision })) {
+        // 刚好断线：电脑端 hook 已经放弃，终端会弹原生确认框，别让客户端以为生效了
+        return reply.code(409).send({ error: '电脑端不在线，请在终端里处理' })
+      }
+      return { ok: true }
+    }
     const run = await getRun(pool, userId, cur.runId)
     if (!run || !executors.has(execKey(userId, run.machine))) return reply.code(409).send({ error: '电脑端不在线' })
     // Codex 提问：allow 需要带答案 {"问题id": ["选项"]}；deny = 跳过
@@ -1336,46 +2004,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     // 一同步草稿卡就全变成孤儿；这条会话本来也只在助手面板里看，我们的记录就是全文。
     if (await isAssistantSession(pool, userId, id)) return { messages: await listMessages(pool, userId, id, 100) }
     if (!executors.has(execKey(userId, session.machine))) return reply.code(409).send({ error: '电脑端不在线' })
-    const requestId = randomUUID()
-    const waiting = new Promise<HistoryResult | null>(resolve => {
-      const timer = setTimeout(() => {
-        historyWaits.delete(requestId)
-        resolve(null)
-      }, historyTimeoutMs)
-      historyWaits.set(requestId, {
-        userId,
-        machine: session.machine,
-        resolve: r => {
-          clearTimeout(timer)
-          resolve(r)
-        },
-      })
-    })
-    sendExecutor(userId, session.machine, {
-      type: 'history.request',
-      requestId,
-      agent: session.agent,
-      sessionKey: id.slice(id.indexOf(':') + 1),
-      cwd: session.cwd,
-    })
-    const result = await waiting
-    if (!result) return reply.code(504).send({ error: '电脑端没有及时返回历史记录' })
-    if (result.error) return reply.code(502).send({ error: result.error })
-    const items = (result.messages ?? [])
-      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string' && m.text.trim() !== '')
-      .map(m => ({
-        role: m.role,
-        text: m.text,
-        sourceId: nativeKey(m.sourceId) ?? undefined,
-        branchPoint: nativeKey(m.branchPoint) ?? undefined,
-        // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
-        at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
-      }))
-    // 电脑端返回空列表时绝不能整体替换：replaceHistory 先删后插，会把库里已有的消息清空。
-    // 老版本桌面端仍可能返回空数组，服务端这里兜住，明确报错并保留原记录。
-    if (!items.length) return reply.code(502).send({ error: '电脑端没有读到对话内容，已保留原有记录' })
-    const messages = await serial(() => replaceHistory(pool, userId, id, items))
-    return { messages }
+    const result = await syncNativeHistory(userId, session)
+    if ('error' in result) return reply.code(result.code).send({ error: result.error })
+    return { messages: result.messages }
   })
 
   // ---------- WebSocket：viewer 和执行器（role=agent） ----------
@@ -1394,7 +2025,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!updated) return
         pushRun(userId, updated)
         if (updated.sessionId && !isPendingId(updated.sessionId) && (status === 'done' || status === 'running')) await syncTask(userId,updated.sessionId,status)
-        // 投机执行：run 失败时预收集错误上下文挂到任务上（关联任务或会话所属任务）
+        // 预摘要：run 失败时预收集错误上下文挂到任务上（关联任务或会话所属任务）
         if (status === 'failed') {
           const ids = updated.taskId ? [Number(updated.taskId)]
             : updated.sessionId ? (await tasksForSession(pool,userId,updated.sessionId)).map(t => t.id) : []
@@ -1472,24 +2103,96 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       case 'run.usage': {
         const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine) return
-        const usage = cleanUsage(m.usage)
-        if (!usage) return
-        const updated = await setRunUsage(pool, userId, run.id, usage)
-        if (updated) pushRun(userId, updated)
+        const usageRaw = (m.usage && typeof m.usage === 'object' ? m.usage : null) as Record<string, unknown> | null
+        const usage = cleanUsage(usageRaw)
+        if (usage) {
+          const updated = await setRunUsage(pool, userId, run.id, usage)
+          if (updated) pushRun(userId, updated)
+        }
+        // 执行端报上来的实测模型（在 usage 对象里）：run 还没记过模型才填，不覆盖角色配的
+        const actualModel = typeof usageRaw?.model === 'string' ? usageRaw.model.trim().slice(0, 200) : ''
+        if (actualModel && !run.model) {
+          const withModel = await setRunModelIfEmpty(pool, userId, run.id, actualModel)
+          if (withModel) pushRun(userId, withModel)
+        }
         return
       }
       case 'run.approval': {
         const run = await getRun(pool, userId, str(m.runId))
         if (!run || run.machine !== machine || !run.sessionId || TERMINAL.includes(run.status)) return
         const tool = cleanText(str(m.tool), 100) || 'tool'
+        // Mandate：observe 只留痕、不改流程；auto 且执行器认 mandate-v1 时，范围内直接放行（不建审批行、
+        // 不插消息、不广播、不通知），范围外 / danger / unknown 照旧交人。mode=off 或任务没签署过 = 与旧版一致。
+        let scoped: { mandate: Mandate; taskId: number; verdict: ReturnType<typeof judgeByMandate>; auto: boolean } | null = null
+        const mode = await getMandateMode(pool, userId)
+        if (mode !== 'off') {
+          const ctx = await mandateOfSession(userId, run.sessionId)
+          if (ctx) {
+            const cwd = (await getSession(pool, userId, run.sessionId))?.cwd ?? ''
+            const verdict = judgeByMandate(ctx.mandate.scope, { tool, detail: str(m.detail), cwd })
+            const auto = mode === 'auto' && !!executors.get(execKey(userId, machine))?.mandateV1
+            scoped = { mandate: ctx.mandate, taskId: ctx.task.id, verdict, auto }
+            if (auto && verdict.action === 'allow') {
+              if ((await recentAutoAllowCount(pool, userId, ctx.task.id)) < AUTO_ALLOW_PER_TASK_HOUR) {
+                const approvalId = randomUUID()
+                await recordDecision(pool, userId, { taskId: ctx.task.id, mandateId: ctx.mandate.id, approvalId, wouldAllow: true, inScope: true, rule: verdict.rule, tier: verdict.tier, mode: 'auto' })
+                // 没有审批行：只给执行器一个 id 让它继续
+                sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId })
+                sendExecutor(userId, machine, { type: 'approval.decide', approvalId, decision: 'allow' })
+                return
+              }
+              // 一小时内放行太多：说明 agent 在跑飞，后面的全交给人
+              scoped.verdict = { action: 'escalate', tier: 'gray', rule: 'quota', reason: `这个任务一小时内自动放行已满 ${AUTO_ALLOW_PER_TASK_HOUR} 次，可能在跑飞` }
+            }
+          }
+        }
         const approval = await createApproval(pool, userId, randomUUID(), run.id, run.sessionId, tool, str(m.detail))
         // Codex 提问（request_user_input）：detail 是 questions 的 JSON，消息里给人看问题文本
         const message = await insertMessage(pool, userId, run.sessionId, run.id, 'approval', approvalHeading(approval.tool, approval.detail))
         pushMessage(userId, message)
         // 先告诉执行器这个审批拿到了 id，再发裁决；顺序反了执行器只能走迟到分支
         sendExecutor(userId, machine, { type: 'approval.created', localId: m.localId, approvalId: approval.id })
+        if (scoped) {
+          const v = scoped.verdict
+          await recordDecision(pool, userId, {
+            taskId: scoped.taskId, mandateId: scoped.mandate.id, approvalId: approval.id,
+            wouldAllow: v.action === 'allow', inScope: v.action === 'allow', rule: v.rule, tier: v.tier, mode: scoped.auto ? 'auto' : 'observe',
+          })
+          if (scoped.auto) {
+            // auto：范围外（含 danger / unknown / 限额）一律交人，不走项目经理代批
+            await tagApproval(pool, userId, approval.id, scoped.mandate.id, v.action === 'allow')
+            const noted = await annotateApproval(pool, userId, approval.id, v.rule, v.reason, v.tier)
+            await pushApproval(userId, noted ?? approval, true)
+            return
+          }
+        }
         // 项目经理先看：能自己放行就直接让 agent 继续，判不了才弹给人
         await refereeHandle(userId, approval, machine)
+        return
+      }
+      case 'hook.approval': {
+        // Claude 终端会话的权限确认：会话必须已由 hook 事件登记过、且属于这台电脑；一律交人，不走项目经理 / mandate
+        const sessionId = 'claude:' + str(m.sessionKey)
+        const session = str(m.sessionKey) ? await getSession(pool, userId, sessionId) : null
+        if (!session || session.machine !== machine) {
+          sendExecutor(userId, machine, { type: 'hook.approval.created', localId: m.localId, approvalId: '' })
+          return
+        }
+        const tool = cleanText(str(m.tool), 100) || 'tool'
+        const approval = await createApproval(pool, userId, randomUUID(), `hook:${sessionId}`, sessionId, tool, str(m.detail), m.canAllow === true)
+        const message = await insertMessage(pool, userId, sessionId, null, 'approval', approvalHeading(approval.tool, approval.detail))
+        pushMessage(userId, message)
+        sendExecutor(userId, machine, { type: 'hook.approval.created', localId: m.localId, approvalId: approval.id })
+        await pushApproval(userId, approval, true)
+        return
+      }
+      case 'hook.approval.expired': {
+        const cur = await getApproval(pool, userId, str(m.approvalId))
+        if (!cur || !cur.runId.startsWith('hook:')) return
+        const session = await getSession(pool, userId, cur.sessionId)
+        if (!session || session.machine !== machine) return
+        const expired = await expireApproval(pool, userId, cur.id, cur.runId)
+        if (expired) await pushApproval(userId, expired, false)
         return
       }
       case 'run.approvalExpired': {
@@ -1497,6 +2200,19 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (!run || run.machine !== machine) return
         const expired = await expireApproval(pool, userId, str(m.approvalId), run.id)
         if (expired) await pushApproval(userId, expired, false)
+        return
+      }
+      case 'file.result': {
+        const w = fileWaits.get(str(m.requestId))
+        if (!w || w.userId !== userId || w.machine !== machine) return
+        fileWaits.delete(str(m.requestId))
+        w.resolve({
+          path: typeof m.path === 'string' ? m.path : undefined,
+          text: typeof m.text === 'string' ? m.text : undefined,
+          size: typeof m.size === 'number' ? m.size : undefined,
+          truncated: m.truncated === true,
+          error: typeof m.error === 'string' && m.error ? m.error : undefined,
+        })
         return
       }
       case 'history.result': {
@@ -1520,9 +2236,42 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         return
       }
       const key = execKey(userId, machine)
-      // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）
+      // 同一台电脑只留一条连接：开关来回拨时，新连接顶掉另一种身份的旧连接
+      const oldListener = listeners.get(key)
+      if (oldListener) {
+        listeners.delete(key)
+        try { oldListener.sock.close(4000, '被新连接顶掉') } catch {}
+      }
+      // exec=off：开着 AgentHub 但没开「远程执行」。只登记「在线、不接活」和工具清单，
+      // 不进 executors，服务端也不会给它发任何指令；它发来的消息一律不理
+      if (q.get('exec') === 'off') {
+        const agents = parseAgents(q.get('agents'))
+        const old = executors.get(key)
+        if (old) {
+          executors.delete(key)
+          try { old.sock.close(4000, '被新连接顶掉') } catch {}
+          pushAgents(userId)
+          await serial(() => dropExecutor(userId, machine))
+        }
+        if (socket.readyState !== 1) return
+        const me = { sock: socket, userId, authSessionId, machine }
+        listeners.set(key, me)
+        if (agents.length) capsByMachine.set(key, agents)
+        // 在线名单（agents）没变，界面的电脑列表不会自己重拉：单独推一声
+        broadcast(userId, { type: 'machines' })
+        socket.on('close', () => {
+          if (listeners.get(key) !== me) return
+          listeners.delete(key)
+          broadcast(userId, { type: 'machines' })
+        })
+        socket.on('error', () => {})
+        return
+      }
+      // capabilities 是逗号分隔的能力清单：reply-branch-v1（指定回复分支）、role-v1（认模型与上下文）、mandate-v1（认 run.start.mandate，auto 档下按范围关掉 CLI 逐动作审批）
       const caps = new Set((q.get('capabilities') ?? '').split(',').map(s => s.trim()).filter(Boolean))
-      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1') }
+      // agents 是这台电脑装有哪几个工具：老客户端不带这个参数 = 不知道，保留上次上报的结果
+      const agents = parseAgents(q.get('agents'))
+      const me: Exec = { sock: socket, userId, authSessionId, machine, replyBranch: caps.has('reply-branch-v1'), roleV1: caps.has('role-v1'), mandateV1: caps.has('mandate-v1'), agents }
       let registered = false
       const queue: unknown[] = []
       const handle = (data: unknown) => {
@@ -1554,6 +2303,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
       await serial(() => dropExecutor(userId, machine))
       if (socket.readyState !== 1) return
       executors.set(key, me)
+      // 只在真的探到工具时才覆盖：老客户端不带 agents，别把它上次上报的结果抹成空
+      if (agents.length) capsByMachine.set(key, agents)
       registered = true
       pushAgents(userId)
       void serial(() => drainQueue(userId, machine)).catch(e => app.log.error(e, '投递排队派发失败'))
@@ -1642,12 +2393,22 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     }).catch(e => app.log.error(e, '自动派发失败'))
   }, opts.dispatchIntervalMs ?? 60_000)
   dispatchTimer.unref()
+  // 完成态自动过期：done/aborted 挂太久没人确认就转入已处理，不在待处理区永久堆积；
+  // waiting（授权）是真正要人拍板的，不在此列。逐条广播，各端列表即时收敛。
+  const pendingExpireMs = opts.pendingExpireMs ?? 2 * 60 * 60_000
+  const expireTimer = setInterval(() => {
+    void (async () => {
+      for (const d of await expirePending(pool, pendingExpireMs)) pushSession(d.userId, d.session, false)
+    })().catch(e => app.log.error(e, '自动过期完成态失败'))
+  }, 60_000)
+  expireTimer.unref()
   app.addHook('onClose', async () => {
     clearInterval(ping)
     clearInterval(reminderTimer)
     clearInterval(watchdogTimer)
     clearInterval(queueTimer)
     clearInterval(dispatchTimer)
+    clearInterval(expireTimer)
     for (const c of clients) c.sock.close()
     for (const c of executors.values()) c.sock.close()
   })

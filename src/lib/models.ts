@@ -1,4 +1,7 @@
-/** 各执行端的常用模型：留空 = 用执行端自己的默认，避免把版本写死 */
+/** 各执行端的常用模型：与服务端 MODEL_CATALOG 对齐（test/model-catalog.test.ts 守两边不跑偏）。
+ *  注意：本文件会被 node --test 直接加载（服务端镜像可能只拷 server/src），
+ *  保持无 import 的纯数据；从本机读模型清单的动态部分在 lib/agent-models.ts。 */
+
 export const MODEL_HINTS: Record<string, string[]> = {
   // Claude Code 别名：opus/sonnet/haiku/fable 已解析到 5.5 家族与 Fable 5.1（2026-11 核对）
   claude: ["opus", "sonnet", "haiku", "fable"],
@@ -8,3 +11,16 @@ export const MODEL_HINTS: Record<string, string[]> = {
 
 export const modelHints = (agent: string | null | undefined): string[] =>
   (agent ? MODEL_HINTS[agent] : undefined) ?? [];
+
+/** 每一档派谁：角色没指定模型时，项目经理按任务复杂度挑一档。
+ *  与 server/src/models.ts 的 TIER_PICK 一致，test/model-catalog.test.ts 守两边不跑偏。 */
+export const MODEL_PICKS: Record<string, { light: string; standard: string; heavy: string }> = {
+  claude: { light: "haiku", standard: "sonnet", heavy: "opus" },
+  codex: { light: "gpt-5.6-luna", standard: "gpt-6.1-sol", heavy: "gpt-6.1-sol" },
+};
+
+/** 这个工具会被项目经理挑到的模型（去重）：用来在界面上说清「没指定模型会发生什么」 */
+export const autoModelRange = (agent: string | null | undefined): string[] => {
+  const p = agent ? MODEL_PICKS[agent] : undefined;
+  return p ? [...new Set([p.light, p.standard, p.heavy])] : [];
+};

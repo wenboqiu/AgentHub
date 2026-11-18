@@ -2,6 +2,7 @@ import type pg from 'pg'
 import { listMessages } from './db.ts'
 import { TaskError, getTask, type ChecklistItem, type Task } from './tasks.ts'
 import { addMemory } from './memories.ts'
+import { randomUUID } from 'node:crypto'
 
 // 验收检查项与证据链（思路来自 LobeHub 的 Acceptance：把需求拆成看得见的检查项，
 // 逐项跑并附证据，人整体通过或部分打回，打回原因沉淀成下次交付前的标准）。
@@ -13,7 +14,39 @@ export type EvidenceKind = 'file' | 'command' | 'test' | 'shot' | 'log'
 export type Evidence = { kind: EvidenceKind; label: string; value: string; at: string | null }
 export type ItemStatus = 'pending' | 'pass' | 'fail'
 export type ReviewItem = { id: number; key: string; title: string; status: ItemStatus; note: string; manual: boolean; updatedAt: string }
-export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[] }
+export type Decision = { text: string; reason: string; reversible: 'easy' | 'hard' | 'unknown'; at: string }
+export type Review = { items: ReviewItem[]; evidence: Evidence[]; standards: string[]; decisions: Decision[] }
+
+/** 写进派活指令的约定：agent 自己拍板时留一行记录，验收页统一摘出来给人复核 */
+export const DECISION_RULE = [
+  '遇到需要选择的岔路时，在不打断的前提下自己拍板继续做，并在回复里单独写一行记录：',
+  '决定：<选了什么>；原因：<为什么>；可逆性：易 或 难',
+  '可逆性为「难」的操作（删除数据、对外发布、花钱、改动授权范围之外的东西）不要自己拍板，先停下来问。',
+].join('\n')
+
+const DECISION_RE = /^[\s>*\-\d.、]*(?:\*\*)?决定(?:\*\*)?[:：]\s*(.+)$/
+// 从 agent 的回复里摘出「决定：X；原因：Y；可逆性：易/难」。纯文本匹配，宁可少抓；难逆的排前面。
+export function harvestDecisions(msgs: { role: string; text: string; createdAt: string }[]): Decision[] {
+  const out: Decision[] = []
+  const seen = new Set<string>()
+  for (const m of msgs) {
+    if (m.role === 'user') continue
+    for (const raw of m.text.split('\n').slice(0, 300)) {
+      const hit = DECISION_RE.exec(raw.trim())
+      if (!hit) continue
+      const parts = hit[1].split(/[;；]/).map(s => s.trim()).filter(Boolean)
+      const text = (parts[0] ?? '').slice(0, 200)
+      if (!text || seen.has(text)) continue
+      const reasonPart = parts.find(p => /^原因[:：]/.test(p))
+      const revPart = parts.find(p => /^可逆性[:：]/.test(p)) ?? ''
+      const reversible = /难/.test(revPart) ? 'hard' : /易/.test(revPart) ? 'easy' : 'unknown'
+      seen.add(text)
+      out.push({ text, reason: (reasonPart ?? '').replace(/^原因[:：]\s*/, '').slice(0, 200), reversible, at: m.createdAt })
+    }
+  }
+  const rank = { hard: 0, unknown: 1, easy: 2 }
+  return out.sort((a, b) => rank[a.reversible] - rank[b.reversible]).slice(0, 30)
+}
 
 const LABEL: Record<EvidenceKind, string> = { file: '文件变更', command: '执行命令', test: '测试结果', shot: '截图', log: '错误日志' }
 const CAP: Record<EvidenceKind, number> = { file: 15, command: 10, test: 6, shot: 6, log: 5 }
@@ -142,7 +175,46 @@ export async function decideReviewItem(db: DB, userId: number, taskId: number, i
       } catch { /* 记忆条数到上限等情况忽略 */ }
     }
   }
+  // 签署过 Mandate 的任务：打回不是在原任务里重跑，而是出一张新的任务单提案，人确认后重新授权
+  if (status === 'fail') {
+    try { await proposeRetry(db, userId, taskId, note.trim()) } catch { /* 提案是附加产物，失败不挡住打回本身 */ }
+  }
   return item(r.rows[0])
+}
+
+/**
+ * 打回 → 新 Ticket：原任务保持 review 不动，生成一条带打回原因与原 Mandate 摘要的待确认提案。
+ * 没有 Mandate 的老任务 / 纯人工任务保持原行为（只沉淀经验），返回 null。
+ */
+export async function proposeRetry(db: DB, userId: number, taskId: number, reason: string): Promise<number | null> {
+  const m = (await db.query(
+    `SELECT m.version, m.scope FROM tasks t JOIN task_mandates m ON m.user_id=t.user_id AND m.id=t.mandate_id
+      WHERE t.user_id=$1 AND t.id=$2`, [userId, taskId])).rows[0]
+  if (!m) return null
+  const t = (await db.query(
+    'SELECT title, priority, role_id, project_id, machine, cwd, constraints FROM tasks WHERE user_id=$1 AND id=$2', [userId, taskId])).rows[0]
+  if (!t) return null
+  const s = (await db.query(
+    `SELECT s.id, s.title, s.agent, s.project FROM task_sessions ts JOIN sessions s ON s.user_id=ts.user_id AND s.id=ts.session_id
+      WHERE ts.user_id=$1 AND ts.task_id=$2 ORDER BY ts.created_at, ts.session_id LIMIT 1`, [userId, taskId])).rows[0]
+  const scope = m.scope as { paths?: string[]; net?: boolean; push?: boolean; scripts?: boolean } | null
+  const summary = `原授权范围（v${m.version}）：${scope?.paths?.length ? `只能改 ${scope.paths.join('、')}` : '整个工作目录'}；`
+    + `${scope?.net ? '可联网' : '不联网'}、${scope?.push ? '可推远端' : '不推远端'}、${scope?.scripts ? '可跑脚本' : '不跑脚本'}`
+  const why = reason || '验收未通过'
+  const kind = s ? 'fix' : 'ticket'
+  const r = await db.query(
+    `INSERT INTO session_proposals(
+       user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,note,origin,machine,cwd)
+     VALUES($1,$2,$3,$4,$5,$6,now(),$7,$8,$9,'[]'::jsonb,$10,'fresh',$11,$12,$13,$14,'heuristic',$15,$16) RETURNING id`,
+    [userId, s?.id ?? `ticket:${randomUUID()}`, (s?.title ?? '').slice(0, 200), s?.agent ?? '', (s?.project ?? '').slice(0, 200), taskId, kind,
+      `打回重做：${String(t.title).slice(0, 180)}`.slice(0, 200), [`验收打回原因：${why}`, summary, '（范围已冻结：确认这张新任务单会签署新的授权范围。）'].join('\n').slice(0, 4000),
+      JSON.stringify(t.constraints ?? {}), t.priority, t.role_id, t.project_id, why.slice(0, 500), t.machine, t.cwd],
+  )
+  const id = Number(r.rows[0].id)
+  // 同一任务多次打回只留最新一张待确认的
+  await db.query("UPDATE session_proposals SET status='discarded', updated_at=now() WHERE user_id=$1 AND task_id=$2 AND status='pending' AND id<>$3", [userId, taskId, id])
+  return id
 }
 
 export async function addStandard(db: DB, userId: number, taskId: number, text: string) {
@@ -177,6 +249,15 @@ async function reviewEvidence(pool: pg.Pool, userId: number, taskId: number, tas
   return harvestEvidence(msgs.map(m => ({ role: m.role, text: m.text, createdAt: m.createdAt })))
 }
 
+async function reviewDecisions(pool: pg.Pool, userId: number, taskId: number): Promise<Decision[]> {
+  const rows = (await pool.query<{ session_id: string }>(
+    'SELECT session_id FROM task_sessions WHERE user_id=$1 AND task_id=$2 ORDER BY created_at, session_id',
+    [userId, taskId],
+  )).rows
+  const msgs = (await Promise.all(rows.map(r => listMessages(pool, userId, r.session_id, 200)))).flat()
+  return harvestDecisions(msgs.map(m => ({ role: m.role, text: m.text, createdAt: m.createdAt })))
+}
+
 export async function getReview(pool: pg.Pool, userId: number, taskId: number): Promise<Review> {
   const task = await getTask(pool, userId, taskId)
   await syncReviewItems(pool, userId, taskId, task.checklist)
@@ -184,5 +265,6 @@ export async function getReview(pool: pg.Pool, userId: number, taskId: number): 
     items: await listReviewItems(pool, userId, taskId),
     evidence: await reviewEvidence(pool, userId, taskId, task),
     standards: await listStandards(pool, userId),
+    decisions: await reviewDecisions(pool, userId, taskId),
   }
 }

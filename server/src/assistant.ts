@@ -24,6 +24,9 @@ export type Draft = {
   model: string | null
   context: string
   tools: string[]
+  // 项目经理是组织上的安排，agent 不猜，留给人在草稿卡上勾；确认时一起落库
+  manager?: boolean
+  managerProjects?: number[]
   /** agent 自己交代的缺口或假设，不落库，只给人看 */
   note: string
 }
@@ -52,8 +55,8 @@ export type AssistantThread = {
 // 一个账号只留一条助手对话：换工具/换电脑就重开，不留历史包袱
 export const MAX_MESSAGE = 4000
 export const MAX_DRAFT_CONTEXT = 1500
-/** 助手会话的标题前缀：会话列表里能认出来，通知也按它静音 */
-export const ASSISTANT_TITLE = '角色助手：'
+/** 助手会话的标题前缀：会话列表里能认出来，通知也按它静音（定义在 session-kind.ts，与意见细化共用） */
+export { ASSISTANT_TITLE } from './session-kind.ts'
 const MAX_TOOLS = 10
 const ASSISTANTS: Agent[] = ['claude', 'codex', 'zcode']
 
@@ -89,11 +92,11 @@ export async function migrateAssistant(db: DB) {
 export const CONTRACT = `你在 AgentHub 里当「角色顾问」，把用户一句需求整理成一份角色草稿。
 
 只回一个 JSON 对象（可以用 \`\`\`json 包起来），不要写任何解释、寒暄或额外段落。字段：
-{"name":"角色名，不超过 60 字，必填","title":"一句话职责，不超过 120 字","agent":"claude | codex | zcode | null","model":"模型 id，不确定就 null","context":"这个角色的做事准则，不超过 1500 字","tools":["Read","Edit"],"note":"你还缺什么信息、替用户做了哪些假设"}
+{"name":"角色名，不超过 60 字，必填","title":"一句话职责，不超过 120 字","agent":"claude | codex | zcode | codebuddy | null","model":"模型 id，不确定就 null","context":"这个角色的做事准则，不超过 1500 字","tools":["Read","Edit"],"note":"你还缺什么信息、替用户做了哪些假设"}
 
 规矩：
 - 信息不全也别反问，先给最合理的草稿，缺口写进 note，用户会在界面上改。
-- agent 只能从 claude / codex / zcode 里选；用户没指定就按职责挑一个最合适的。
+- agent 只能从 claude / codex / zcode / codebuddy 里选；用户没指定就按职责挑一个最合适的。
 - model 写成执行端的模型 id（例如 opus、sonnet、gpt-6.1-sol）；拿不准一律 null，别编。
 - context 写成对这个角色下的命令式约定：做什么、不做什么、改完怎么验证；不要复述用户原话。
 - 不要读写任何文件，不要执行任何命令。
@@ -272,7 +275,7 @@ export async function markDraft(db: DB, user: number, id: number, status: 'creat
 export function draftPatch(raw: unknown): Record<string, unknown> {
   const b = object(raw ?? {})
   const out: Record<string, unknown> = {}
-  for (const key of ['name', 'title', 'agent', 'model', 'context', 'tools'] as const) {
+  for (const key of ['name', 'title', 'agent', 'model', 'context', 'tools', 'manager', 'managerProjects'] as const) {
     if (key in b) out[key] = b[key]
   }
   return out

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formatElapsed, liveLabel, runElapsed, runSummary, shortTokens, usageText } from '../src/lib/runMeta.ts';
+import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary, shortTokens, usageText } from '../src/lib/runMeta.ts';
 import type { Run, RunActivity } from '../src/lib/api.ts';
 
 const now = Date.parse('2026-11-05T12:00:00Z');
@@ -70,4 +70,15 @@ test('运行中的话术只说 agent 自己的内容', () => {
   assert.equal(liveLabel(null, 'Claude'), '等待 Claude 回应');
   assert.equal(liveLabel(act('idle', ''), 'Codex'), '等待 Codex 回应');
   assert.equal(liveLabel(act('thinking', '   '), 'Claude'), '等待 Claude 回应');
+});
+
+test('只读监听会话：只说还没结束和多久没新记录，不编思考中', () => {
+  // 刚有记录：只报「还没结束」
+  assert.equal(listenLabel(at(1_000), 'WorkBuddy', now), 'WorkBuddy 这一轮还没结束');
+  assert.equal(listenLabel(at(30_000), 'WorkBuddy', now), 'WorkBuddy 这一轮还没结束 · 30 秒前有新记录');
+  assert.equal(listenLabel(at(150_000), '豆包', now), '豆包 这一轮还没结束 · 2 分钟前有新记录');
+  // 超过安静阈值：把「没动静」说出来
+  assert.equal(listenLabel(at(9 * 60_000), 'WorkBuddy', now), 'WorkBuddy 这一轮还没结束 · 9 分钟没有新记录');
+  // 时间戳坏了也不至于显示 NaN 分钟
+  assert.equal(listenLabel('bad', 'WorkBuddy', now), 'WorkBuddy 这一轮还没结束');
 });

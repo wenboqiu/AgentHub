@@ -1,6 +1,6 @@
 [package]
 name = "agenthub"
-version = "0.9.11"
+version = "0.17.0"
 description = "Claude Code / Codex 会话状态集中监控"
 authors = ["wenbo"]
 edition = "2021"
@@ -29,6 +29,8 @@ tauri-plugin-notification = "2"
 tiny_http = "0.12"
 tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+# 只读 WorkBuddy 的 sqlite（已读标记）：只要读，bundled 免装系统 sqlite
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 ab_glyph = "0.2"
@@ -40,6 +42,18 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_UI_WindowsAndMessaging",
 ] }
+# 读豆包窗口里已经渲染出来的对话（UI Automation，只读）
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Com",
+  "Win32_System_Ole",
+  "Win32_System_Variant",
+  "Win32_UI_Accessibility",
+] }
+
+# 探测 Codex 的 thread writer 锁（~/.codex/thread-writer-locks 上的 flock）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1

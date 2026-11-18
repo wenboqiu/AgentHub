@@ -1,3 +1,5 @@
+> **复核提示（2026-11-09）**：本文结论已过时。Mandate 化设计（`docs/super-agent-mandate-design.md`）已落地，授权与验收层不再是「半成品」。请以 `docs/architecture-review-super-agent-2.md` 为准；本文保留为 11-05 当时的历史快照。
+>
 > 记录日期：2026-11-05
 > 背景：评审 AgentHub 当前架构，判断是否实现了 DeepSeek harness / Super-agent 的思想。评审对象是 master（91ba914）现状，不是某次 diff。
 

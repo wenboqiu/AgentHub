@@ -17,14 +17,22 @@ pub struct Config {
     /// 旧版这里是 allowedRoots 白名单，语义相反，因此不兼容旧键：老配置读进来等于「黑名单为空」，
     /// 不会因为升级就把原来的工作目录全部封掉。
     pub denied_roots: Vec<String>,
-    /// 总开关：关闭时不连服务端的执行器通道
+    /// 远程执行总开关：关闭时执行器通道仍然连着（服务端据此显示「开着、没开远程执行」），但声明不接活。默认开启
     pub remote_enabled: bool,
-    /// 待处理会话用图模式展示（项目气泡 + 会话气泡）
+    /// 「远程执行默认开启」的一次性迁移做过没有：老版本默认关、很多电脑从没拨过开关，
+    /// 升级后第一次读配置时打开一次；之后人再关掉就尊重人的选择（save 时总写 true）。
+    /// 字段级 default = false：老配置文件里没有这个键，正好读成「还没迁移」
+    #[serde(default)]
+    pub remote_default_migrated: bool,
+    /// 对话页（待处理 / 进行中）用气泡图展示；false = 卡片列表
     pub graph_mode: bool,
-    /// Hub 任务队列：是否开放 127.0.0.1:47822 的拉单接口
-    pub hub_enabled: bool,
-    /// Hub 鉴权 token；为空时本机回环不鉴权
-    pub hub_token: String,
+    /// ZCode 权限请求的自动放行档位：off = 每条都弹审批卡；low = 只放行 low；
+    /// medium = low 与 medium 都放行。high / critical 永远弹卡，riskLevel 缺失也不放。
+    pub zcode_auto_approve: String,
+    /// 在客户端处理 Claude 终端会话的权限确认：开了才会阻塞等待并生成审批卡。默认关
+    pub hook_remote_approve: bool,
+    /// 允许在客户端远程「允许」；关着只能远程「拒绝」。默认关
+    pub hook_remote_allow: bool,
 }
 
 impl Default for Config {
@@ -36,10 +44,12 @@ impl Default for Config {
             notify_desktop: true,
             email: String::new(),
             denied_roots: Vec::new(),
-            remote_enabled: false,
-            graph_mode: false,
-            hub_enabled: true,
-            hub_token: String::new(),
+            remote_enabled: true,
+            remote_default_migrated: true,
+            graph_mode: true,
+            zcode_auto_approve: "low".into(),
+            hook_remote_approve: false,
+            hook_remote_allow: false,
         }
     }
 }
@@ -73,12 +83,56 @@ impl TokenBlock {
     }
 }
 
+/// 老版本兜底出来的名字：读不到主机名时写死成 "my-pc"，界面上看着像一台陌生电脑。
+/// 升级后遇到这些名字就换回系统里的真名，并把服务端记在旧名下的记录一起改名（见 machines.rs）。
+pub const LEGACY_NAMES: [&str; 3] = ["my-pc", "my pc", "unknown"];
+
+/// 这个机器名是不是老版本兜底出来的占位名（空字符串也算）
+pub fn is_legacy_name(name: &str) -> bool {
+    let n = name.trim().to_ascii_lowercase();
+    n.is_empty() || LEGACY_NAMES.contains(&n.as_str())
+}
+
+/// 本机名：先看环境变量，再问系统。
+/// macOS 从访达 / LaunchAgent 启动时没有 HOSTNAME，所以必须问系统，
+/// 用 `scutil --get ComputerName`（就是访达「共享」里显示的名字，例如「wenboqiu's Mac mini」）。
 pub fn hostname() -> String {
-    std::env::var("COMPUTERNAME")
+    let env = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "my-pc".to_string())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    env.or_else(system_hostname).unwrap_or_else(|| "这台电脑".to_string())
+}
+
+fn system_hostname() -> Option<String> {
+    // macOS：和朋友在访达里看到的一致，带空格和撇号也没关系（上报时会 URL 编码）
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("scutil").args(["--get", "ComputerName"]).output() {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    // 其余系统：hostname 命令到处都有，省得为一件事加依赖
+    #[cfg(not(windows))]
+    {
+        let out = std::process::Command::new("hostname").output().ok()?;
+        let mut s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // macOS 回的是 "wenboqius-Mac-mini.local"，去掉尾缀才像台自己的电脑
+        if let Some(t) = s.strip_suffix(".local").map(str::to_string) {
+            s = t;
+        }
+        return (!s.is_empty()).then_some(s);
+    }
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("hostname").output().ok()?;
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!s.is_empty()).then_some(s)
+    }
 }
 
 pub fn load(path: &Path) -> Config {
@@ -89,6 +143,10 @@ pub fn load(path: &Path) -> Config {
     if c.machine.trim().is_empty() {
         c.machine = hostname();
     }
+    if !c.remote_default_migrated {
+        c.remote_enabled = true;
+        c.remote_default_migrated = true;
+    }
     c
 }
 
@@ -96,7 +154,9 @@ pub fn save(path: &Path, c: &Config) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let text = serde_json::to_string_pretty(c).map_err(|e| e.to_string())?;
+    // 前端传回来的配置不认识迁移标记（读成 false）：写盘时总记成已迁移，别让下次启动又把人关掉的开关打开
+    let c = Config { remote_default_migrated: true, ..c.clone() };
+    let text = serde_json::to_string_pretty(&c).map_err(|e| e.to_string())?;
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
@@ -119,10 +179,12 @@ mod tests {
             notify_desktop: false,
             email: "a@b.c".into(),
             denied_roots: vec!["D:/Tmp".into()],
-            remote_enabled: true,
+            remote_enabled: false,
+            remote_default_migrated: true,
             graph_mode: true,
-            hub_enabled: false,
-            hub_token: "t-hub".into(),
+            zcode_auto_approve: "medium".into(),
+            hook_remote_approve: true,
+            hook_remote_allow: true,
         };
         save(&p, &c).unwrap();
         assert_eq!(load(&p), c);
@@ -131,8 +193,11 @@ mod tests {
         let d = load(&p);
         assert_eq!(d.server_url, "http://y");
         assert!(d.notify_desktop);
-        assert!(!d.remote_enabled);
-        assert!(!d.graph_mode);
+        assert!(d.remote_enabled, "老配置升级：远程执行打开一次");
+        // 气泡图是默认展示方式：老配置里没有 graphMode 时按 true 读
+        assert!(d.graph_mode);
+        assert_eq!(d.zcode_auto_approve, "low", "老配置里没有这个键时按 low 读");
+        assert!(!d.hook_remote_approve && !d.hook_remote_allow, "Claude 终端远程审批默认关");
         assert!(d.denied_roots.is_empty() && d.email.is_empty());
         // 旧配置的 allowedRoots（白名单）不会被当成黑名单读进来，避免升级后把工作目录封死
         std::fs::write(&p, r#"{"serverUrl":"http://w","allowedRoots":["D:/Work2"]}"#).unwrap();
@@ -142,6 +207,24 @@ mod tests {
         std::fs::write(&p, r#"{"serverUrl":"http://z","token":"t","controlToken":"old"}"#).unwrap();
         let o = load(&p);
         assert_eq!((o.server_url.as_str(), o.token.as_str()), ("http://z", "t"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn remote_default_on_and_one_time_migration() {
+        let dir = std::env::temp_dir().join(format!("agenthub-cfg-mig-{}", std::process::id()));
+        let p = config_path(dir.clone());
+        assert!(Config::default().remote_enabled, "新装默认开启远程执行");
+        // 老版本存下的「关」：升级后第一次读打开
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&p, r#"{"serverUrl":"http://x","remoteEnabled":false}"#).unwrap();
+        let mut c = load(&p);
+        assert!(c.remote_enabled);
+        // 人之后又关掉：即使前端传来的配置没带迁移标记，写盘后再读也保持关
+        c.remote_enabled = false;
+        c.remote_default_migrated = false;
+        save(&p, &c).unwrap();
+        assert!(!load(&p).remote_enabled, "关掉之后不再被迁移打开");
         let _ = std::fs::remove_dir_all(dir);
     }
 

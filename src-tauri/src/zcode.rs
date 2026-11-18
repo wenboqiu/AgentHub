@@ -191,7 +191,9 @@ impl SessionState {
             summary,
             pid: None,
             quiet,
+            bg_tasks: 0,
             buckets,
+           messages: Vec::new(),
         }
     }
 }

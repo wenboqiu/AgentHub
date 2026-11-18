@@ -1,14 +1,15 @@
 import type pg from 'pg'
 import { TaskError } from './tasks.ts'
 
-// 通知两级过滤管线（思路来自 DeepSeek Super-agent 的事件过滤：程序规则做 Fast Path，
-// 语义判断做 Slow Path）。本模块实现 Fast Path：agent 静音、免打扰时段、最低优先级门槛，
-// 并为 Slow Path 预留 setSemanticFilter 接缝（当前默认不启用，接 LLM 判断时无需改调用方）。
+// 通知过滤（程序规则）：agent 静音、免打扰时段、最低优先级门槛。
+// 服务端没有模型凭据，不做语义判断；真要加，到时再在 evaluateNotify 末尾接。
 //
 // 硬性规则：审批（approval）与等待授权（waiting）永远放行——审批 30 分钟无人处理会按
 // 拒绝处理，会话会卡住，任何规则都不允许把它们静音。
+// （Mandate auto 档下，落在冻结范围内的审批根本不建审批行、不进这条管线——不是静音，是没有这件事；
+//  只要审批行存在，也就是范围外 / danger / unknown 交给人的那些，照样永远放行。）
 
-export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode'] as const
+export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
 export type AgentKey = (typeof AGENT_KEYS)[number]
 export type Priority = 'high' | 'medium' | 'low'
 export type NotifyKind = 'done' | 'aborted' | 'reminder'
@@ -26,7 +27,7 @@ type DB = Pick<pg.Pool, 'query'>
 export const PRIORITY_RANK: Record<Priority, number> = { low: 0, medium: 1, high: 2 }
 
 export const DEFAULT_SETTINGS: NotifySettings = {
-  agents: { claude: true, codex: true, doubao: true, workbuddy: true, zcode: true },
+  agents: { claude: true, codex: true, doubao: true, workbuddy: true, zcode: true, codebuddy: true },
   minPriority: 'low',
   quiet: { enabled: false, start: '22:00', end: '08:00', tzOffsetMinutes: 480, muteKinds: ['done'] },
 }
@@ -130,15 +131,7 @@ async function entityPriority(db: DB, userId: number, entityType: 'task' | 'goal
   return r.rows[0]?.priority ?? 'medium'
 }
 
-// Slow Path 接缝：返回 false = 静音；true / null = 不表态（放行）；抛错按放行处理。
-// 将来接 LLM 语义判断时通过 setSemanticFilter 注入，事件量大时只在 Fast Path 全通过后调用。
-export type SemanticFilter = (ev: NotifyEvent) => Promise<boolean | null>
-let semanticFilter: SemanticFilter | null = null
-export function setSemanticFilter(fn: SemanticFilter | null) {
-  semanticFilter = fn
-}
-
-// Fast Path 评估。只在底层已判定「可通知」的事件上调用；返回 false 表示该事件静音
+// 只在底层已判定「可通知」的事件上调用；返回 false 表示该事件静音
 export async function evaluateNotify(db: DB, userId: number, ev: NotifyEvent): Promise<boolean> {
   if (ev.kind === 'approval') return true
   if (ev.kind === 'session' && ev.state === 'waiting') return true
@@ -151,13 +144,6 @@ export async function evaluateNotify(db: DB, userId: number, ev: NotifyEvent): P
       ? await sessionPriority(db, userId, ev.sessionId)
       : await entityPriority(db, userId, ev.entityType, ev.entityId)
     if (PRIORITY_RANK[p] < PRIORITY_RANK[s.minPriority]) return false
-  }
-  if (semanticFilter) {
-    try {
-      if ((await semanticFilter(ev)) === false) return false
-    } catch {
-      /* 语义层故障不阻塞通知 */
-    }
   }
   return true
 }

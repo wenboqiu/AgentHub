@@ -657,7 +657,7 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
       {showUnsched && <ul className="list">{unscheduled.map(t => <li key={t.id}>
         <button className="entity-row" onClick={() => onOpenTask(t.id)}>
           <span className="entity-main">
-            <strong>{t.title}</strong>
+            <strong><span className="task-no">#{t.id}</span> {t.title}</strong>
             <span className="dim">{TASK_LABEL[t.status]}{t.checklist.length ? ` · 清单 ${t.checklist.filter(c => c.done).length}/${t.checklist.length}` : ""} · 最后更新 {md(Date.parse(t.updatedAt))}</span>
           </span>
           <span className="exec-status queued">待排期</span>

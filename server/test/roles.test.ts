@@ -4,6 +4,7 @@ import type { FastifyInstance } from 'fastify'
 import { buildApp } from '../src/index.ts'
 import { createPool } from '../src/db.ts'
 import { DATABASE_URL, makeUser } from './helpers.ts'
+import { pickManager } from '../src/roles.ts'
 
 const stamp = Date.now()
 let n = 0
@@ -183,5 +184,55 @@ describe('角色：谁来做 + 用什么模型 + 按什么准则', () => {
     assert.equal(stolen.status, 404)
     const theirs = await h.call('GET', '/roles', undefined, other.token)
     assert.equal(theirs.body.roles.some((x: any) => x.id === mine.id), false, '别人的角色不该出现在列表里')
+  })
+})
+
+describe('项目经理：角色上的标记，可以有多位、各管一摊', () => {
+  const h = harness()
+
+  before(() => h.start())
+  after(() => h.stop())
+
+  const project = async (name: string) => {
+    const r = await h.call('POST', '/projects', { name })
+    assert.equal(r.status, 200, JSON.stringify(r.body))
+    return r.body.project as any
+  }
+
+  it('按项目挑人：本项目专属 → 管所有项目 → 只剩一位就兜底', () => {
+    const who = (id: number, managerProjects: number[], manager = true) =>
+      ({ id, name: `m${id}`, manager, managerProjects }) as any
+    const all = who(1, [])
+    const own = who(2, [7])
+    assert.equal(pickManager([all, own], 7)?.id, 2, '专属经理优先')
+    assert.equal(pickManager([all, own], 9)?.id, 1, '没人认领的项目交给管所有的')
+    assert.equal(pickManager([own], 9)?.id, 2, '只设了一位经理时由它兜底')
+    assert.equal(pickManager([who(3, [7]), who(4, [8])], 9), null, '多位各管一摊、没人管这个项目 → 没有负责人')
+    assert.equal(pickManager([who(3, [7], false)], 7), null, '没标经理的角色不算')
+  })
+
+  it('同一个项目只允许一位专属经理', async () => {
+    const p = await project(uniq('专属项目'))
+    const a = await h.role({ name: uniq('经理A'), manager: true, managerProjects: [p.id] })
+    assert.equal(a.manager, true)
+    assert.deepEqual(a.managerProjects, [p.id])
+    assert.equal((await h.call('POST', '/roles', { name: uniq('经理B'), manager: true, managerProjects: [p.id] })).status, 409)
+    // 撤掉管辖后可以交给别人
+    assert.equal((await h.call('PATCH', `/roles/${a.id}`, { managerProjects: [] })).status, 200)
+    assert.equal((await h.call('POST', '/roles', { name: uniq('经理C'), manager: true, managerProjects: [p.id] })).status, 200)
+  })
+
+  it('没有项目经理就发不了单；有了之后名单里有它', async () => {
+    // 换个人来验：上面几条已经给这个账号设过经理了，前置条件得从「一个都没有」开始
+    const other = await makeUser(h.pool)
+    const p = (await h.call('POST', '/projects', { name: uniq('发单项目') }, other.token)).body.project
+    assert.equal((await h.call('POST', '/tickets', { title: uniq('单'), projectId: p.id }, other.token)).status, 409)
+    const m = (await h.call('POST', '/roles', { name: uniq('经理'), manager: true, managerProjects: [p.id] }, other.token)).body.role
+    assert.equal(m.manager, true)
+    const ok = await h.call('POST', '/tickets', { title: uniq('单'), projectId: p.id }, other.token)
+    assert.equal(ok.status, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.proposal.kind, 'ticket')
+    const state = await h.call('GET', '/dispatch/manager', undefined, other.token)
+    assert.equal(state.body.managers.some((r: any) => r.id === m.id), true)
   })
 })

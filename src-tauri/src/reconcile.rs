@@ -127,11 +127,13 @@ pub fn spawn(config: SharedConfig) {
         let Some(home) = claude::home_dir() else { return };
         let Ok(client) = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build() else { return };
         let mut reads = crate::codex_read::ReadSync::default();
+        let mut wb_reads = crate::workbuddy_read::ReadSync::default();
         let mut read_config = None;
         loop {
             let cfg = config.read().unwrap().clone();
             if read_config.as_ref() != Some(&cfg) {
                 reads = crate::codex_read::ReadSync::default();
+                wb_reads = crate::workbuddy_read::ReadSync::default();
                 read_config = Some(cfg.clone());
             }
             if !cfg.server_url.trim().is_empty() && !cfg.token.trim().is_empty() {
@@ -145,6 +147,8 @@ pub fn spawn(config: SharedConfig) {
                         .cloned().collect();
                     let mut events: Vec<_> = sessions.iter().filter_map(|s| correction(&home, s, &names)).collect();
                     events.extend(reads.events(&home,&sessions));
+                    // WorkBuddy 在桌面端读完回复不算事件：靠它自己的已读标记补一条回执
+                    events.extend(wb_reads.events(&home,&sessions));
                     for batch in events.chunks(100) {
                         // Credentials changed during the read: wait for the next pass.
                         if *config.read().unwrap() != cfg { break; }

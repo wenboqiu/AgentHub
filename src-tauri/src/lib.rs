@@ -3,6 +3,8 @@
 #[cfg(desktop)]
 mod activity;
 #[cfg(desktop)]
+mod agent_models;
+#[cfg(desktop)]
 mod claude;
 #[cfg(desktop)]
 mod claude_live;
@@ -12,8 +14,14 @@ mod codex;
 mod codex_read;
 #[cfg(desktop)]
 mod doubao;
+#[cfg(all(desktop, windows))]
+mod doubao_cache;
+#[cfg(all(desktop, windows))]
+mod doubao_ui;
 #[cfg(desktop)]
 mod workbuddy;
+#[cfg(desktop)]
+mod workbuddy_read;
 #[cfg(desktop)]
 mod zcode;
 #[cfg(desktop)]
@@ -27,7 +35,9 @@ mod focus;
 #[cfg(desktop)]
 mod forwarder;
 #[cfg(desktop)]
-mod hub;
+mod hook_approval;
+#[cfg(desktop)]
+mod machines;
 #[cfg(desktop)]
 mod remote;
 #[cfg(desktop)]
@@ -49,9 +59,8 @@ mod desktop {
     use crate::collector::{self, CollectorStatus};
     use crate::config::{self, Config, SharedConfig};
     use crate::forwarder::{ForwardStatus, Forwarder};
-    use crate::hub::{self, SharedHub};
     use crate::remote::{self, RemoteStatus, Status as RemoteInfo};
-    use crate::{codex, focus, terminal, tray};
+    use crate::{codex, focus, machines, terminal, tray};
     use serde::Serialize;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, RwLock};
@@ -66,7 +75,6 @@ mod desktop {
         forwarder: Forwarder,
         collector: CollectorStatus,
         remote: RemoteStatus,
-        hub: SharedHub,
     }
 
     #[derive(Serialize)]
@@ -84,7 +92,18 @@ mod desktop {
 
     #[tauri::command]
     fn set_config(state: State<AppState>, config: Config) -> Result<(), String> {
+        let (old_machine, old_url, old_token) = {
+            let c = state.config.read().unwrap();
+            (c.machine.clone(), c.server_url.clone(), c.token.clone())
+        };
         config::save(&state.config_path, &config)?;
+        // 改了「本机名称」：服务端按机器名归档会话 / 运行 / 项目目录，旧名下的记录要一起改过去，
+        // 不然项目配置的下拉里会多出一台名字已经没人用的电脑
+        if old_machine.trim() != config.machine.trim() {
+            let url = if config.server_url.trim().is_empty() { old_url } else { config.server_url.clone() };
+            let token = if config.token.trim().is_empty() { old_token } else { config.token.clone() };
+            machines::spawn_rename(&url, &token, &old_machine, &config.machine);
+        }
         *state.config.write().unwrap() = config;
         Ok(())
     }
@@ -101,29 +120,6 @@ mod desktop {
     #[tauri::command]
     fn remote_status(state: State<AppState>) -> RemoteInfo {
         state.remote.lock().unwrap().clone()
-    }
-
-    #[tauri::command]
-    fn hub_tasks(state: State<AppState>) -> Vec<hub::Task> {
-        state.hub.lock().unwrap().list(None, hub::now_ms())
-    }
-
-    #[tauri::command]
-    fn hub_workers(state: State<AppState>) -> Vec<hub::WorkerView> {
-        state.hub.lock().unwrap().workers_view(hub::now_ms())
-    }
-
-    #[tauri::command]
-    fn hub_create_task(state: State<AppState>, title: String, body: String, worker: String, workspace: String) -> Result<hub::Task, String> {
-        if title.trim().is_empty() || worker.trim().is_empty() {
-            return Err("title 和 worker 不能为空".into());
-        }
-        Ok(state.hub.lock().unwrap().create(title.trim().to_string(), body, worker.trim().to_string(), workspace.trim().to_string(), hub::now_ms()))
-    }
-
-    #[tauri::command]
-    fn hub_cancel_task(state: State<AppState>, id: String) -> Result<(), String> {
-        state.hub.lock().unwrap().cancel(&id, hub::now_ms())
     }
 
     #[tauri::command]
@@ -150,9 +146,58 @@ mod desktop {
         focus::focus_session(pid, &agent, session_key.as_deref())
     }
 
+    /// Codex 会话是否被另一个客户端占用（~/.codex/thread-writer-locks 上的排他 flock）：
+    /// "free" 没锁 / "occupied" 有活进程握着（发消息会被拒）/ "stale" 残留锁（进程已退出，可正常发）
+    #[tauri::command]
+    fn codex_thread_status(session_key: String) -> &'static str {
+        codex::thread_writer_status(&session_key)
+    }
+
     #[tauri::command]
     fn open_in_terminal(agent: String, session_key: String, cwd: String) -> Result<String, String> {
         terminal::open_in_terminal(&agent, &session_key, &cwd)
+    }
+
+    /// 拉某个执行端的模型清单（只读、毫秒级，不启动任何 agent 进程）：
+    /// CodeBuddy 读 CLI 缓存的账号配置，ZCode 解析安装包内置 provider 配置。
+    /// `refresh` = 重新读一遍来源（账号 / 套餐换过之后用）。
+    #[tauri::command]
+    async fn agent_models(agent: String, refresh: Option<bool>) -> Result<crate::agent_models::ModelList, String> {
+        let refresh = refresh.unwrap_or(false);
+        tauri::async_runtime::spawn_blocking(move || crate::agent_models::list(&agent, refresh))
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// 豆包客户端不把正文落盘，只能读它窗口里已经渲染出来的消息（UIA，只读）。
+    /// 返回 `{ title, messages: [{ role, text }] }`；豆包没开 / 不在对话页时给错误。
+    #[tauri::command]
+    async fn doubao_visible() -> Result<serde_json::Value, String> {
+        #[cfg(windows)]
+        {
+            let window = tauri::async_runtime::spawn_blocking(crate::doubao_ui::read)
+                .await
+                .map_err(|e| e.to_string())??;
+            return serde_json::to_value(window).map_err(|e| e.to_string());
+        }
+        #[cfg(not(windows))]
+        Err("只有 Windows 桌面端能读豆包窗口".into())
+    }
+
+    /// 读豆包缓存里的一张图（`doubao_visible` 返回的 images[].id），返回 data URL。
+    #[tauri::command]
+    async fn doubao_image(id: String) -> Result<String, String> {
+        #[cfg(windows)]
+        {
+            return tauri::async_runtime::spawn_blocking(move || crate::doubao_cache::read_data_url(&id))
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = id;
+            Err("只有 Windows 桌面端能读豆包图片".into())
+        }
     }
 
     #[tauri::command]
@@ -216,9 +261,21 @@ mod desktop {
     }
 
     pub fn run() {
+        // 第一件事：补齐 PATH。GUI 启动的 PATH 很窄（mac 尤其），
+        // claude / codex 既探测不到也 exec 不起来，晚一步漏的就是「没装这个工具」。
+        crate::runner::widen_path();
+        crate::boot_log(&format!(
+            "start pid={} args={:?}",
+            std::process::id(),
+            std::env::args().collect::<Vec<_>>()
+        ));
+        std::panic::set_hook(Box::new(|info| crate::boot_log(&format!("PANIC: {info}"))));
         let silent = std::env::args().any(|a| a == "--silent");
         tauri::Builder::default()
-            .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+            .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+                crate::boot_log(&format!("second-instance 连入（说明有另一个进程刚被拉起又退出）: {args:?}"));
+                show_main(app);
+            }))
             .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--silent"])))
             .plugin(tauri_plugin_notification::init())
             .invoke_handler(tauri::generate_handler![
@@ -226,39 +283,60 @@ mod desktop {
                 set_config,
                 get_status,
                 remote_status,
-                hub_tasks,
-                hub_workers,
-                hub_create_task,
-                hub_cancel_task,
                 claude_hooks_status,
                 install_claude_hooks,
                 uninstall_claude_hooks,
                 focus_session,
+                codex_thread_status,
                 open_in_terminal,
+                agent_models,
+                doubao_visible,
+                doubao_image,
                 set_badge,
                 show_main_window
             ])
             .setup(move |app| {
                 let config_path = config::config_path(app.path().app_config_dir()?);
-                let shared: SharedConfig = Arc::new(RwLock::new(config::load(&config_path)));
+                let mut cfg = config::load(&config_path);
+                // 老版本在 macOS 上读不到主机名，把本机名兜底成了 "my-pc"，界面上就像多了一台陌生电脑。
+                // 换回系统里的真名（访达里显示的那个），并把服务端记在旧名下的记录一起改名。
+                let mut pending_rename = None;
+                if config::is_legacy_name(&cfg.machine) {
+                    let real = config::hostname();
+                    if !real.is_empty() && real != cfg.machine {
+                        pending_rename = Some((cfg.machine.clone(), real.clone()));
+                        cfg.machine = real;
+                        let _ = config::save(&config_path, &cfg);
+                    }
+                }
+                let shared: SharedConfig = Arc::new(RwLock::new(cfg));
+                if let Some((from, to)) = pending_rename {
+                    let c = shared.read().unwrap();
+                    machines::spawn_rename(&c.server_url, &c.token, &from, &to);
+                }
                 let forwarder = Forwarder::new();
                 let collector_status: CollectorStatus = Arc::new(Mutex::new(None));
                 forwarder.spawn(shared.clone());
                 if let Ok(d) = claude::default_hooks_dir() {
                     claude::refresh_script(&d);
                 }
-                collector::spawn(forwarder.clone(), collector_status.clone());
+                // 已装 hook 的老用户：把 PermissionRequest 组的 timeout 升上去（阻塞等人点按钮需要）
+                if let (Ok(s), Ok(d)) = (claude::default_settings_path(), claude::default_hooks_dir()) {
+                    if claude::hooks_status(&s, &d).installed {
+                        let _ = claude::install_hooks(&s, &d);
+                    }
+                }
+                let hook_bridge = crate::hook_approval::HookBridge::new();
+                collector::spawn(forwarder.clone(), collector_status.clone(), hook_bridge.clone(), shared.clone());
                 codex::spawn(forwarder.clone());
                 crate::doubao::spawn(forwarder.clone());
                 crate::workbuddy::spawn(forwarder.clone());
                 crate::zcode::spawn(forwarder.clone());
                 crate::reconcile::spawn(shared.clone());
-                let remote_status = remote::spawn(shared.clone());
-                let hub_path = app.path().app_config_dir().ok().map(|d| d.join("hub.json"));
-                let shared_hub: SharedHub = std::sync::Arc::new(std::sync::Mutex::new(hub::Hub::load(hub_path)));
-                hub::start(shared.clone(), shared_hub.clone());
-                app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status, hub: shared_hub });
+                let remote_status = remote::spawn(shared.clone(), hook_bridge);
+                app.manage(AppState { config: shared, config_path, forwarder, collector: collector_status, remote: remote_status });
                 build_tray(app.handle())?;
+                crate::boot_log("setup done（托盘已建，进入事件循环）");
                 if silent {
                     if let Some(w) = app.get_webview_window("main") {
                         let _ = w.hide();
@@ -273,8 +351,33 @@ mod desktop {
                     let _ = w.hide();
                 }
             })
-            .run(tauri::generate_context!())
-            .expect("error while running tauri application");
+            .build(tauri::generate_context!())
+            .expect("error while building tauri application")
+            .run(|_app, event| match event {
+                tauri::RunEvent::ExitRequested { code, .. } => {
+                    crate::boot_log(&format!("ExitRequested: code={code:?}"));
+                }
+                tauri::RunEvent::Exit => crate::boot_log("exit（进程即将退出）"),
+                _ => {}
+            });
+    }
+}
+
+/// 启动/退出诊断日志：装完自动拉起时若进程闪退，这里留下最后一步的证据。
+/// 写 %LOCALAPPDATA%\AgentHub\boot.log；环境不全（NSIS RunAsUser 降权启动的已知坑）
+/// 时依次退到 TEMP、exe 同目录——连写哪个位置都记在首行，本身就是线索。
+pub fn boot_log(msg: &str) {
+    use std::io::Write;
+    let path = std::env::var_os("LOCALAPPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("AgentHub").join("boot.log"))
+        .or_else(|| std::env::var_os("TEMP").map(|d| std::path::PathBuf::from(d).join("agenthub-boot.log")))
+        .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_extension("boot.log"));
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let _ = writeln!(f, "[{now}] {msg}");
     }
 }
 

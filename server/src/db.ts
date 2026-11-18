@@ -1,6 +1,7 @@
 import pg from 'pg'
 import { migrateTasks } from './tasks.ts'
 import { migrateNotify } from './notify.ts'
+import { migratePrefs } from './prefs.ts'
 import { migrateDigests } from './digest.ts'
 import { migrateWatchdog } from './watchdog.ts'
 import { migrateReview } from './review.ts'
@@ -11,12 +12,17 @@ import { migrateMemories } from './memories.ts'
 import { migrateAssistant } from './assistant.ts'
 import { migrateProposals } from './proposals.ts'
 import { migrateArtifacts } from './artifacts.ts'
+import { migrateAttachments } from './attachments.ts'
 import { migrateReferee } from './referee.ts'
+import { migrateMandate, pruneMandateDecisions } from './mandate.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
+import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
+import { isInternalTitle } from './session-kind.ts'
+import { migrateStats } from './stats.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
-export const AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode'] as const
+export const AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
 export type Agent = (typeof AGENTS)[number]
 
 export type EventIn = {
@@ -32,8 +38,16 @@ export type EventIn = {
   summary?: string
   pid?: number | null
   quiet?: boolean
+  /** 主对话这一轮结束但还有几个后台子代理没回报；只对 running 有意义 */
+  bgTasks?: number
   /** 只听不聊的 agent（WorkBuddy）从 transcript 报过来的活动桶，落 session_activity 供日历画跨度 */
   buckets?: { at: string; count: number }[]
+  /**
+   * 只读监听类（WorkBuddy）随事件顺路上报的正文。
+   * 正文只存在那台电脑的 transcript 里，而拉历史要走执行器通道——没开「允许手机远程执行」
+   * 的电脑永远拉不到；跟着状态事件上来就与通道无关。
+   */
+  messages?: { role: 'user' | 'assistant'; text: string; at?: string }[]
 }
 
 export type Session = {
@@ -48,11 +62,16 @@ export type Session = {
   stateSince: string
   acked: boolean
   pid: number | null
+  /** running 时还有几个后台子代理没回报，其余状态恒为 0 */
+  bgTasks: number
   eventAt: string
   updatedAt: string
 }
 
 const ALERT_STATES: State[] = ['waiting', 'done', 'aborted']
+
+// 能在本机读到「已读」证据的 agent：Codex Desktop 的已读存储、WorkBuddy 的 sessions.unread
+const READ_RECEIPT_AGENTS: Agent[] = ['codex', 'workbuddy']
 
 export function createPool(url: string) {
   return new pg.Pool({ connectionString: url, max: 10 })
@@ -113,6 +132,7 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     primary key (user_id, id)
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(user_id, updated_at DESC)')
+  await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bg_tasks integer NOT NULL DEFAULT 0')
   await pool.query(`CREATE TABLE IF NOT EXISTS runs (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -131,6 +151,10 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
   await pool.query("ALTER TABLE runs ADD COLUMN IF NOT EXISTS title text NOT NULL DEFAULT ''")
   // 一次运行的 token 用量（执行器上报）：{input,output,cached,reasoning,total,costUsd}
   await pool.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS usage jsonb')
+  // 这一轮用的模型：角色写死的、还是项目经理按复杂度挑的，连理由一起记下来——
+  // 模型是花多少钱的关键变量，事后要能回答「这轮为什么用 opus」
+  await pool.query('ALTER TABLE runs ADD COLUMN IF NOT EXISTS model text')
+  await pool.query("ALTER TABLE runs ADD COLUMN IF NOT EXISTS model_note text NOT NULL DEFAULT ''")
   await pool.query('CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(user_id, task_id, created_at DESC)')
   await pool.query(`CREATE TABLE IF NOT EXISTS messages (
     id bigserial primary key,
@@ -184,6 +208,8 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
     decided_at timestamptz
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_approvals_session ON approvals(user_id, session_id, status)')
+  // Claude 终端会话的 hook 审批：电脑端设置里没开「远程允许」时只能拒绝
+  await pool.query('ALTER TABLE approvals ADD COLUMN IF NOT EXISTS can_allow boolean NOT NULL DEFAULT true')
 }
 
 // 多个进程同时启动（或测试并行）时，CREATE TABLE IF NOT EXISTS 会互相撞，用 advisory lock 串行
@@ -194,6 +220,7 @@ export async function migrate(pool: pg.Pool) {
     await migrateAll(client)
     await migrateTasks(client)
     await migrateNotify(client)
+    await migratePrefs(client)
     await migrateDigests(client)
     await migrateWatchdog(client)
     await migrateReview(client)
@@ -211,8 +238,14 @@ export async function migrate(pool: pg.Pool) {
     await migrateDispatchManager(client)
     // 任务产物引用 tasks；项目近况的表在 migrateProjects 里一起建（同属项目上下文）
     await migrateArtifacts(client)
+    // 任务附件引用 tasks（备注里只存 attachment:ID 引用，本体在这张表）
+    await migrateAttachments(client)
     // 审批来源（人 / 项目经理代批）加在 approvals 上，表在建库时就存在了
     await migrateReferee(client)
+    // Mandate 快照 / 决策留痕 / 交付物 / 授权模式；给 tasks 与 approvals 加列，必须排在两者建表之后
+    await migrateMandate(client)
+    // 数据统计：给 sessions 加 first_seen_at、建日汇总表；依赖 tasks / projects / review_items / session_activity，排在所有迁移之后
+    await migrateStats(client)
     // profiles 实体已废弃（执行目录收进项目）：各处引用清完后删表兜底（CASCADE 清残留约束）
     await client.query('DROP TABLE IF EXISTS profiles CASCADE')
   } finally {
@@ -233,6 +266,7 @@ type Row = {
   state_since: Date
   acked: boolean
   pid: number | null
+  bg_tasks: number
   event_at: Date
   updated_at: Date
 }
@@ -250,6 +284,7 @@ function toSession(r: Row): Session {
     stateSince: r.state_since.toISOString(),
     acked: r.acked,
     pid: r.pid,
+    bgTasks: r.bg_tasks ?? 0,
     eventAt: r.event_at.toISOString(),
     updatedAt: r.updated_at.toISOString(),
   }
@@ -289,8 +324,9 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
 
   // Native read receipts acknowledge one exact completed turn only. Never clear an
   // approval or overwrite a newer completion that arrived during the local read.
+  // 只有能读到本机已读存储的 agent（Codex Desktop / WorkBuddy）才有资格发回执。
   if (ev.readAt !== undefined) {
-    if (!cur || ev.agent !== 'codex' || !ev.quiet || ev.expectedAt === undefined ||
+    if (!cur || !READ_RECEIPT_AGENTS.some(a => a === ev.agent) || !ev.quiet || ev.expectedAt === undefined ||
         cur.machine !== ev.machine || cur.state !== ev.state || !['done', 'aborted'].includes(cur.state) ||
         at.getTime() !== cur.event_at.getTime() || !Number.isFinite(Date.parse(ev.readAt)) || Date.parse(ev.readAt) < at.getTime()) return null
   }
@@ -312,17 +348,23 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const notify = alert && !quiet && !duplicate
   const stateSince = !cur || cur.state !== ev.state || notify ? at : cur.state_since
   const cwd = ev.cwd || cur?.cwd || ''
-  const title = (['codex', 'doubao', 'workbuddy', 'zcode'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
+  // 内部会话（角色助手 / 意见细化）的标题是 startSession 起的名字，钉住不放：本机 transcript 里的
+  // 标题是「首条用户消息截 40 字」，而这轮的首条消息正是 AgentHub 写的契约提示词，顶上去就成了提示词原文。
+  const pinned = isInternalTitle(cur?.title ?? '')
+  const title = pinned
+    ? cur!.title
+    : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
+  const bgTasks = ev.state === 'running' && Number.isFinite(ev.bgTasks) ? Math.max(0, Math.min(99, Math.trunc(ev.bgTasks ?? 0))) : 0
   const row = (
     await pool.query<Row>(
-      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
-       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at, bg_tasks)
+       VALUES ($13,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now(), $14)
        ON CONFLICT (user_id, id) DO UPDATE SET machine=$3, cwd=$4, project=$5, title=$6, state=$7, summary=$8,
-         state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now()
+         state_since=$9, acked=$10, pid=$11, event_at=$12, updated_at=now(), bg_tasks=$14
        RETURNING *`,
-      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId],
+      [id, ev.agent, ev.machine, cwd, projectOf(cwd), title, ev.state, summary.slice(0, 300), stateSince, acked, pid, at, userId, bgTasks],
     )
   ).rows[0]
   // 活动桶随事件顺路上报（WorkBuddy 只读 transcript，没有消息同步）：已有真实消息的桶以更大者为准，不被覆盖
@@ -352,6 +394,21 @@ export async function ackSession(pool: pg.Pool, userId: number, id: string): Pro
 export async function ackAll(pool: pg.Pool, userId: number): Promise<Session[]> {
   const r = await pool.query<Row>('UPDATE sessions SET acked = true WHERE user_id = $1 AND acked = false RETURNING *', [userId])
   return r.rows.map(toSession)
+}
+
+/**
+ * 完成态自动过期：done/aborted 挂太久没人确认就自动记为已处理。
+ * 「完成」只是通知，不该永久占用待处理区；waiting（授权）要人拍板，不在此列。
+ * 返回被改的会话（带 userId），调用方逐条广播让各端列表即时收敛。
+ */
+export async function expirePending(pool: pg.Pool, olderThanMs: number): Promise<{ userId: number; session: Session }[]> {
+  const r = await pool.query<Row & { user_id: number }>(
+    `UPDATE sessions SET acked = true, updated_at = now()
+     WHERE acked = false AND state IN ('done', 'aborted') AND state_since < now() - ($1::bigint * interval '1 millisecond')
+     RETURNING *`,
+    [olderThanMs],
+  )
+  return r.rows.map(row => ({ userId: row.user_id, session: toSession(row) }))
 }
 
 export async function removeSession(pool: pg.Pool, userId: number, id: string): Promise<boolean> {
@@ -404,9 +461,17 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
       out = (await client.query<Row>('UPDATE sessions SET id = $3, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING *', [userId, from, to])).rows[0]
     } else {
       out = real
-      if (!real.title && pending.title) {
+      // 真实行多半是 hook / 轮询抢先上报的，标题来自 transcript 首条消息：派任务时那是任务说明原文，
+      // 内部会话是契约提示词原文。临时行上的标题才是服务端特意起的名字（任务标题 / 新开时正文开头），一律让它赢。
+      // 说明原文当标题的后果：任务单说明里引用会话标题，一轮套一层「来源会话：来源会话：…」。
+      const keepPending = !!pending.title
+      if (keepPending && real.title !== pending.title) {
         out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
       }
+      // 同一个会话只算一次新建：保留下来的真实行取两者较早的首次出现时间（LEAST 忽略 NULL）
+      await client.query(
+        'UPDATE sessions SET first_seen_at = LEAST(first_seen_at, (SELECT first_seen_at FROM sessions WHERE user_id = $1 AND id = $3)) WHERE user_id = $1 AND id = $2',
+        [userId, to, from])
       await client.query('DELETE FROM sessions WHERE user_id = $1 AND id = $2', [userId, from])
     }
     for (const t of ['runs', 'messages', 'approvals']) {
@@ -441,6 +506,7 @@ export async function purgeOld(pool: pg.Pool): Promise<number> {
   const r = await pool.query("DELETE FROM sessions WHERE updated_at < now() - interval '30 days'")
   await pool.query("DELETE FROM runs WHERE updated_at < now() - interval '90 days'")
   await pool.query("DELETE FROM approvals WHERE created_at < now() - interval '7 days'")
+  await pruneMandateDecisions(pool)
   await pool.query("DELETE FROM auth_sessions WHERE last_used_at < now() - interval '180 days'")
   return r.rowCount ?? 0
 }
@@ -457,9 +523,11 @@ export type RunStatus = (typeof RUN_STATUSES)[number]
 export const MESSAGE_ROLES = ['user', 'assistant', 'tool', 'approval', 'system'] as const
 export type MessageRole = (typeof MESSAGE_ROLES)[number]
 export const KEEP_MESSAGES = 200
+/** 消息正文入库上限：执行器侧 TEXT_MAX 同步（16000），两边不一致会导致历史同步时再截一次 */
+export const MESSAGE_TEXT_MAX = 16000
 
-export type RunUsage = { input: number; output: number; cached?: number; reasoning?: number; total: number; costUsd?: number }
-export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage: RunUsage | null; createdAt: string; updatedAt: string }
+export type RunUsage = { input: number; output: number; cached?: number; reasoning?: number; total: number; costUsd?: number; credits?: number }
+export type Run = { id: string; sessionId: string | null; taskId: number | null; title: string; machine: string; status: RunStatus; error: string; usage: RunUsage | null; /** 这一轮用的模型；空 = 执行端默认 */ model: string | null; /** 谁定的、为什么，给界面和事后复盘看 */ modelNote: string; createdAt: string; updatedAt: string }
 export type MessageMeta = { sourceId?: string; branchPoint?: string }
 export type Message = MessageMeta & { rating?: 'up'|'down'|null; id: number; sessionId: string; runId: string | null; role: MessageRole; text: string; images?: string[]; createdAt: string }
 export type ApprovalStatus = 'pending' | 'allowed' | 'denied' | 'expired'
@@ -477,11 +545,13 @@ export type Approval = {
   decisionReason: string
   /** 裁决层级：pending 时是「为什么轮不到规则定」，decided 时是「凭什么放的」 */
   decisionTier: string
+  /** false = 只能远程拒绝（Claude 终端 hook 审批，电脑端没开「远程允许」） */
+  canAllow: boolean
   createdAt: string
   decidedAt: string | null
 }
 
-type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; created_at: Date; updated_at: Date }
+type RunRow = { id: string; session_id: string | null; task_id?: string | number | null; title?: string | null; machine: string; status: RunStatus; error: string; usage?: RunUsage | null; model?: string | null; model_note?: string | null; created_at: Date; updated_at: Date }
 type MessageRow = { source_id?: string | null; branch_point?: string | null; rating?: 'up'|'down'|null; images?: string[] | null; id: string | number; session_id: string; run_id: string | null; role: MessageRole; text: string; created_at: Date }
 type ApprovalRow = {
   id: string
@@ -494,6 +564,7 @@ type ApprovalRow = {
   decision_rule?: string | null
   decision_reason?: string | null
   decision_tier?: string | null
+  can_allow?: boolean | null
   created_at: Date
   decided_at: Date | null
 }
@@ -507,6 +578,8 @@ const toRun = (r: RunRow): Run => ({
   status: r.status,
   error: r.error,
   usage: r.usage ?? null,
+  model: r.model ?? null,
+  modelNote: r.model_note ?? '',
   createdAt: r.created_at.toISOString(),
   updatedAt: r.updated_at.toISOString(),
 })
@@ -532,6 +605,7 @@ const toApproval = (r: ApprovalRow): Approval => ({
   decisionRule: r.decision_rule ?? '',
   decisionReason: r.decision_reason ?? '',
   decisionTier: r.decision_tier ?? '',
+  canAllow: r.can_allow !== false,
   createdAt: r.created_at.toISOString(),
   decidedAt: r.decided_at ? r.decided_at.toISOString() : null,
 })
@@ -541,9 +615,22 @@ export function cleanText(v: string, max: number) {
   return v.replaceAll('\0', '').slice(0, max)
 }
 
-export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string, taskId: number | null = null): Promise<Run> {
-  const r = await pool.query<RunRow>("INSERT INTO runs (id, user_id, session_id, machine, status, task_id, title) SELECT $1,$4,$2,$3,'queued',$5,COALESCE((SELECT title FROM tasks WHERE user_id=$4 AND id=$5),'') RETURNING *", [id, sessionId, machine, userId, taskId])
+/** 这一轮用的模型由调用方算好后一起落库：模型和「谁定的」是事后复盘的关键，不能只发不记 */
+export type RunModel = { model?: string | null; note?: string }
+
+export async function createRun(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, sessionId: string, machine: string, taskId: number | null = null, model: RunModel = {}): Promise<Run> {
+  const r = await pool.query<RunRow>(
+    "INSERT INTO runs (id, user_id, session_id, machine, status, task_id, title, model, model_note) SELECT $1,$4,$2,$3,'queued',$5,COALESCE((SELECT title FROM tasks WHERE user_id=$4 AND id=$5),''),$6,$7 RETURNING *",
+    [id, sessionId, machine, userId, taskId, model.model ?? null, (model.note ?? '').slice(0, 500)],
+  )
   return toRun(r.rows[0])
+}
+
+/** 追问沿用这条会话上一轮实际用的模型（含思考强度）：执行端每轮都是新进程，不带 model 就会落回写死的默认模型 */
+export async function lastRunModel(pool: Pick<pg.Pool, 'query'>, userId: number, sessionId: string): Promise<RunModel> {
+  const r = await pool.query<{ model: string }>("SELECT model FROM runs WHERE user_id = $1 AND session_id = $2 AND model IS NOT NULL AND model <> '' ORDER BY created_at DESC LIMIT 1", [userId, sessionId])
+  const model = r.rows[0]?.model
+  return model ? { model, note: '沿用会话上一轮的模型' } : {}
 }
 
 // 任务手动计时：不依赖任何会话的执行记录；标题做快照，任务删掉也还能看懂
@@ -595,6 +682,15 @@ export async function setRunStatus(pool: pg.Pool, userId: number, id: string, st
 /** 执行器上报的 token 用量：运行结束后迟到也照样收（只是记账，不回写状态） */
 export async function setRunUsage(pool: pg.Pool, userId: number, id: string, usage: RunUsage): Promise<Run | null> {
   const r = await pool.query<RunRow>('UPDATE runs SET "usage" = $2, updated_at = now() WHERE user_id = $3 AND id = $1 RETURNING *', [id, usage, userId])
+  return r.rows[0] ? toRun(r.rows[0]) : null
+}
+
+/** 执行端报上来的实测模型：只在 run 还没记过模型时填（角色配的不覆盖） */
+export async function setRunModelIfEmpty(pool: pg.Pool, userId: number, id: string, model: string): Promise<Run | null> {
+  const r = await pool.query<RunRow>(
+    "UPDATE runs SET model = $2, updated_at = now() WHERE user_id = $3 AND id = $1 AND (model IS NULL OR model = '') RETURNING *",
+    [id, model.slice(0, 200), userId],
+  )
   return r.rows[0] ? toRun(r.rows[0]) : null
 }
 
@@ -656,7 +752,7 @@ export async function insertMessage(pool: Pick<pg.Pool, 'query'>, userId: number
     sessionId,
     runId,
     role,
-    cleanText(text, 4000),
+    cleanText(text, MESSAGE_TEXT_MAX),
     userId,
     nativeKey(meta.sourceId),
     nativeKey(meta.branchPoint),
@@ -709,9 +805,9 @@ export function historyTimes(items: { at: number | null; sourceId: string | null
   return out
 }
 
-export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string; at?: string } & MessageMeta)[]): Promise<Message[]> {
+export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: string, items: ({ role: string; text: string; at?: string; images?: string[] } & MessageMeta)[]): Promise<Message[]> {
   const snapshot = items
-    .map(it => ({ role: it.role, text: cleanText(it.text, 4000), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null }))
+    .map(it => ({ role: it.role, text: cleanText(it.text, MESSAGE_TEXT_MAX), sourceId: nativeKey(it.sourceId), branchPoint: nativeKey(it.branchPoint), at: it.at && !Number.isNaN(Date.parse(it.at)) ? Date.parse(it.at) : null, images: historyImageJson(it.images) }))
     .filter(it => it.text)
     .slice(-KEEP_MESSAGES)
   const client = await pool.connect()
@@ -729,6 +825,32 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
       [userId, sessionId],
     )
     const keepRun = active.rows[0]?.id ?? null
+    // 正在跑的 run 关联的消息要保留（流式正文可能还没落进 transcript），但 transcript
+    // 快照里同一条消息会再来一份——刚才发的那条 user 消息、已落盘的助手回复都算，
+    // 不去重的话界面上就是「发送的消息等一会又出现一条」。按 (role, 归一化后正文前 400 字)
+    // 多重集匹配（transcript 会把多行用户输入折成一行，得先归一化才认得出是同一句）：
+    // 快照里与保留消息对得上的副本跳过，对不上的（真正新增的）照常插入。
+    const key = (role: string, text: string) => `${role}|${sameKey(text)}`
+    const keptCounts = new Map<string, number>()
+    if (keepRun) {
+      const kept = await client.query<{ role: string; text: string }>(
+        'SELECT role, text FROM messages WHERE user_id = $1 AND session_id = $2 AND run_id = $3',
+        [userId, sessionId, keepRun],
+      )
+      for (const r of kept.rows) {
+        const k = key(r.role, r.text)
+        keptCounts.set(k, (keptCounts.get(k) ?? 0) + 1)
+      }
+    }
+    const deduped = snapshot.filter(it => {
+      const k = key(it.role, it.text)
+      const n = keptCounts.get(k) ?? 0
+      if (n > 0) {
+        keptCounts.set(k, n - 1)
+        return false
+      }
+      return true
+    })
     // 注意不能写成 run_id IS DISTINCT FROM $3：keepRun 为 null 时 null 和 null 不算不同，历史消息就删不掉了
     if (keepRun) await client.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2 AND run_id IS DISTINCT FROM $3', [userId, sessionId, keepRun])
     else await client.query('DELETE FROM messages WHERE user_id = $1 AND session_id = $2', [userId, sessionId])
@@ -736,12 +858,12 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
       'SELECT COALESCE(min(created_at), now()) AS t FROM messages WHERE user_id = $1 AND session_id = $2',
       [userId, sessionId],
     )
-    const times = historyTimes(snapshot, prevTimes, base.rows[0].t.getTime())
-    for (let i = 0; i < snapshot.length; i++) {
+    const times = historyTimes(deduped, prevTimes, base.rows[0].t.getTime())
+    for (let i = 0; i < deduped.length; i++) {
       await client.query(
-        `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, created_at)
-         VALUES ($1, $2, null, $3, $4, $6, $7, $5::timestamptz)`,
-        [userId, sessionId, snapshot[i].role, snapshot[i].text, new Date(times[i]), snapshot[i].sourceId, snapshot[i].branchPoint],
+        `INSERT INTO messages (user_id, session_id, run_id, role, text, source_id, branch_point, images, created_at)
+         VALUES ($1, $2, null, $3, $4, $6, $7, $8, $5::timestamptz)`,
+        [userId, sessionId, deduped[i].role, deduped[i].text, new Date(times[i]), deduped[i].sourceId, deduped[i].branchPoint, deduped[i].images ? JSON.stringify(deduped[i].images) : null],
       )
     }
     // 活动计数按当前消息重算：历史是整体替换的，按增量累计会重复入账
@@ -760,10 +882,100 @@ export async function replaceHistory(pool: pg.Pool, userId: number, sessionId: s
   return listMessages(pool, userId, sessionId, KEEP_MESSAGES)
 }
 
+/**
+ * 随事件上来的原生正文（WorkBuddy / CodeBuddy 这类只读监听通道）：去重后插入。
+ *
+ * 去重口径见 `message-merge.ts`：正文按空白归一化（transcript 会把多行折成一行），
+ * 时间只容忍毫秒级抖动；本次 run 自己发出去的用户消息按正文认回显——不这么做，
+ * 用户从 AgentHub 发进 CodeBuddy 会话的那句话会在 transcript 回显后变成两条。
+ * 返回新插入的条数，0 表示这条事件带的内容库里已经有了。
+ */
+export async function appendEventMessages(
+  pool: pg.Pool,
+  userId: number,
+  sessionId: string,
+  items: { role: string; text: string; at?: string }[],
+  fallbackAt: Date,
+): Promise<number> {
+  const incoming = items
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({ role: m.role as MessageRole, text: cleanText(m.text ?? '', MESSAGE_TEXT_MAX), at: m.at && !Number.isNaN(Date.parse(m.at)) ? Date.parse(m.at) : null }))
+    .filter(m => m.text.trim())
+  if (!incoming.length) return 0
+
+  const now = Date.now()
+  // 原生日志的时间是准的；但不能排到未来（机器时钟跑快时会把日历画到明天）
+  const rows = incoming.map(m => ({ role: m.role as string, text: m.text, at: Math.min(m.at ?? fallbackAt.getTime(), now) }))
+  const from = new Date(Math.min(...rows.map(r => r.at)) - EVENT_DEDUPE_MS)
+  const to = new Date(Math.max(...rows.map(r => r.at)) + EVENT_DEDUPE_MS)
+
+  // 只取时间相近的那一段，不按「最近 N 条」：重发一条很旧的消息原本会落到窗口外，
+  // 于是同一段正文被再插一次（界面上一段回复连着两遍）。
+  const [known, active] = await Promise.all([
+    pool.query<{ role: string; text: string; created_at: Date }>(
+      `SELECT role, text, created_at FROM messages
+       WHERE user_id = $1 AND session_id = $2 AND created_at BETWEEN $3 AND $4`,
+      [userId, sessionId, from, to],
+    ),
+    // 这轮 run 自己发出去的用户消息：transcript 里那条回显要认出来，别当新消息再插一遍
+    pool.query<{ text: string }>(
+      `SELECT m.text FROM messages m JOIN runs r ON r.id = m.run_id
+       WHERE m.user_id = $1 AND m.session_id = $2 AND m.role = 'user' AND r.status IN ('queued', 'running')`,
+      [userId, sessionId],
+    ),
+  ])
+  const fresh: { role: MessageRole; text: string; at: Date }[] = mergeEventMessages(
+    rows,
+    known.rows.map(r => ({ role: r.role, text: r.text, at: r.created_at.getTime() })),
+    active.rows.map(r => r.text),
+  ).map(m => ({ role: m.role as MessageRole, text: m.text, at: new Date(m.at) }))
+  if (!fresh.length) return 0
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    for (const m of fresh) {
+      await client.query(
+        `INSERT INTO messages (user_id, session_id, run_id, role, text, created_at)
+         VALUES ($1, $2, null, $3, $4, $5::timestamptz)`,
+        [userId, sessionId, m.role, m.text, m.at],
+      )
+    }
+    // 活动计数按插入时间累加（日历的跨度靠它）；同一桶里合并成一行
+    const buckets = new Map<number, number>()
+    for (const m of fresh) {
+      const b = Math.floor(m.at.getTime() / 300_000) * 300_000
+      buckets.set(b, (buckets.get(b) ?? 0) + 1)
+    }
+    for (const [b, count] of buckets) {
+      await client.query(
+        `INSERT INTO session_activity (user_id, session_id, bucket, count)
+         VALUES ($1, $2, to_timestamp($3::bigint / 1000.0), $4)
+         ON CONFLICT (user_id, session_id, bucket) DO UPDATE SET count = session_activity.count + excluded.count`,
+        [userId, sessionId, b, count],
+      )
+    }
+    await client.query('COMMIT')
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw e
+  } finally {
+    client.release()
+  }
+  await trimMessages(pool, userId, sessionId)
+  return fresh.length
+}
+
 export function nativeKey(value: unknown): string | null {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(value) ? value : null
 }
 
+/** 历史快照里的图片落库前收一遍：只收 data URL（jsonb 里存超大串没意义），上限 8MB/张 */
+function historyImageJson(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null
+  const out = raw.filter((u): u is string => typeof u === 'string' && u.startsWith('data:image/') && u.length <= 8_000_000)
+  return out.length ? out : null
+}
 export async function getMessage(pool: pg.Pool,userId:number,sessionId:string,id:number):Promise<Message|null> {
   const r=await pool.query<MessageRow>('SELECT m.*,f.rating FROM messages m LEFT JOIN message_feedback f ON f.user_id=m.user_id AND f.session_id=m.session_id AND f.source_id=m.source_id WHERE m.user_id=$1 AND m.session_id=$2 AND m.id=$3',[userId,sessionId,id])
   return r.rows[0] ? toMessage(r.rows[0]) : null
@@ -782,11 +994,11 @@ export async function listMessages(pool: pg.Pool, userId: number, sessionId: str
   return r.rows.map(toMessage)
 }
 
-export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string): Promise<Approval> {
+export async function createApproval(pool: pg.Pool, userId: number, id: string, runId: string, sessionId: string, tool: string, detail: string, canAllow = true): Promise<Approval> {
   // userInput 的 detail 是 questions 的 JSON，放宽上限才能让 UI 渲染完整选项
   const r = await pool.query<ApprovalRow>(
-    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status) VALUES ($1,$6,$2,$3,$4,$5,'pending') RETURNING *",
-    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId],
+    "INSERT INTO approvals (id, user_id, run_id, session_id, tool, detail, status, can_allow) VALUES ($1,$6,$2,$3,$4,$5,'pending',$7) RETURNING *",
+    [id, runId, sessionId, cleanText(tool, 100), cleanText(detail, 6000), userId, canAllow],
   )
   return toApproval(r.rows[0])
 }
@@ -830,6 +1042,15 @@ export async function reopenApproval(pool: pg.Pool, userId: number, id: string):
 export async function expireApprovalsOfRuns(pool: pg.Pool, userId: number, runIds: string[]): Promise<Approval[]> {
   if (!runIds.length) return []
   const r = await pool.query<ApprovalRow>("UPDATE approvals SET status = 'expired', decided_at = now() WHERE user_id = $2 AND run_id = ANY($1) AND status = 'pending' RETURNING *", [runIds, userId])
+  return r.rows.map(toApproval)
+}
+
+/** 电脑端断开：它名下 Claude 终端会话（run_id 以 hook: 开头）的 pending 审批全部过期 */
+export async function expireHookApprovalsOfMachine(pool: pg.Pool, userId: number, machine: string): Promise<Approval[]> {
+  const r = await pool.query<ApprovalRow>(
+    "UPDATE approvals a SET status = 'expired', decided_at = now() FROM sessions s WHERE a.user_id = $1 AND a.run_id LIKE 'hook:%' AND a.status = 'pending' AND s.user_id = a.user_id AND s.id = a.session_id AND s.machine = $2 RETURNING a.*",
+    [userId, machine],
+  )
   return r.rows.map(toApproval)
 }
 

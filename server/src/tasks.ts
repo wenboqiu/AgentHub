@@ -7,7 +7,7 @@ type DB = Pick<pg.Pool, 'query'>
 export type Schedule = { startAt: string | null; dueAt: string | null; remindStart: boolean; remindDue: boolean }
 export type ChecklistItem = { id: string; text: string; done: boolean }
 export type Goal = Schedule & { id: number; title: string; notes: string; priority: 'high' | 'medium' | 'low'; status: 'active' | 'done' | 'archived'; createdAt: string; updatedAt: string; doneAt: string | null }
-export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: 'fork' | 'fresh'; forkFrom: string | null; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null }
+export type Task = Schedule & { checklist: ChecklistItem[]; constraints: TaskConstraints; startMode: 'fork' | 'fresh'; forkFrom: string | null; /** 发单时留空的项目配置（电脑+目录）、角色、正文交给项目经理补，标记为 true 才会进它的候选 */ autoDispatch: boolean; id: number; goalId: number | null; projectId: number | null; roleId: number | null; priority: 'high' | 'medium' | 'low'; title: string; notes: string; status: 'todo' | 'doing' | 'review' | 'done'; agent: 'claude' | 'codex' | 'doubao' | 'workbuddy' | 'zcode' | 'codebuddy' | null; machine: string | null; cwd: string | null; sessionIds: string[]; createdAt: string; updatedAt: string; doneAt: string | null; timerStartedAt: string | null; queuedAt: string | null; /** 授权范围冻结的时间；非空 = 范围已签署，constraints 不能再改 */ mandateFrozenAt?: string | null }
 export class TaskError extends Error {
   statusCode: number
   constructor(message: string, statusCode = 400) { super(message); this.statusCode = statusCode }
@@ -31,7 +31,7 @@ export function id(raw: unknown): number {
 const iso = (v: Date) => v.toISOString()
 const entity = (r: any) => ({ id: Number(r.id), title: r.title, notes: r.notes, status: r.status, createdAt: iso(r.created_at), updatedAt: iso(r.updated_at), startAt: r.start_at ? iso(r.start_at) : null, dueAt: r.due_at ? iso(r.due_at) : null, remindStart: r.remind_start, remindDue: r.remind_due })
 const goal = (r: any): Goal => ({ ...entity(r), priority: r.priority, doneAt: r.done_at ? iso(r.done_at) : null })
-const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], constraints: normalizeConstraints(r.constraints), startMode: r.start_mode === 'fork' ? 'fork' : 'fresh', forkFrom: r.fork_from ?? null, goalId: r.goal_id === null ? null : Number(r.goal_id), projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id), roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null, queuedAt: r.queued_at ? iso(r.queued_at) : null })
+const task = (r: any): Task => ({ ...entity(r), checklist: r.checklist ?? [], constraints: normalizeConstraints(r.constraints), startMode: r.start_mode === 'fork' ? 'fork' : 'fresh', forkFrom: r.fork_from ?? null, autoDispatch: !!r.auto_dispatch, goalId: r.goal_id === null ? null : Number(r.goal_id), projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id), roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id), priority: r.priority ?? 'medium', status: r.status, agent: r.agent, machine: r.machine, cwd: r.cwd, sessionIds: r.session_ids ?? [], doneAt: r.done_at ? iso(r.done_at) : null, timerStartedAt: r.timer_since ? iso(r.timer_since) : null, queuedAt: r.queued_at ? iso(r.queued_at) : null, mandateFrozenAt: r.mandate_frozen_at ? iso(r.mandate_frozen_at) : null })
 // 排队态由 task_dispatch_queue 推导（任务被删时队列行随 FK 一起走）
 const TASK_COLUMNS = `t.*, ARRAY(SELECT session_id FROM task_sessions s WHERE s.user_id=t.user_id AND s.task_id=t.id ORDER BY s.created_at,s.session_id) session_ids,
       (SELECT min(r.created_at) FROM runs r WHERE r.user_id=t.user_id AND r.task_id=t.id AND r.status IN ('queued','running')) timer_since,
@@ -48,7 +48,7 @@ export async function migrateTasks(db: DB) {
     id bigserial PRIMARY KEY, user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     goal_id bigint REFERENCES goals(id) ON DELETE SET NULL, title text NOT NULL, notes text NOT NULL DEFAULT '',
     status text NOT NULL DEFAULT 'todo' CHECK (status IN ('todo','doing','review','done')),
-    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode')), machine text, cwd text,
+    agent text CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode','codebuddy')), machine text, cwd text,
     created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), done_at timestamptz,
     UNIQUE(user_id,id))`)
   // profiles 实体已废弃（执行目录收进项目）：任务不再挂配置，列连带外键一起清掉（必须在建表之后）
@@ -60,12 +60,12 @@ export async function migrateTasks(db: DB) {
   BEGIN
     SELECT pg_get_constraintdef(c.oid) INTO def FROM pg_constraint c
       WHERE c.conrelid = 'tasks'::regclass AND c.contype = 'c' AND c.conname = 'tasks_agent_check';
-    IF def IS NOT NULL AND def NOT LIKE '%zcode%' THEN
+    IF def IS NOT NULL AND def NOT LIKE '%codebuddy%' THEN
       ALTER TABLE tasks DROP CONSTRAINT tasks_agent_check;
       def := NULL;
     END IF;
     IF def IS NULL THEN
-      ALTER TABLE tasks ADD CONSTRAINT tasks_agent_check CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode'));
+      ALTER TABLE tasks ADD CONSTRAINT tasks_agent_check CHECK (agent IN ('claude','codex','doubao','workbuddy','zcode','codebuddy'));
     END IF;
   END $$`)
   for (const table of ['goals','tasks']) {
@@ -81,6 +81,8 @@ export async function migrateTasks(db: DB) {
   // 开跑方式：这个任务第一次派发时接着哪个会话、还是从零开始。开跑后清掉，免得重试又续回老上下文
   await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS start_mode text NOT NULL DEFAULT 'fresh'`)
   await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fork_from text`)
+  // 发单时只填了标题（和可选的项目）：配置、角色、正文都留给项目经理补，这一位标着「这单归它管」
+  await db.query(`ALTER TABLE tasks ADD COLUMN IF NOT EXISTS auto_dispatch boolean NOT NULL DEFAULT false`)
   // runs.task_id 指向任务；任务删除后执行记录保留，只解除关联
   await db.query(`DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'runs_task_id_fkey') THEN
@@ -156,6 +158,11 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
   if (isTask && 'forkFrom' in b) {
     out.fork_from = b.forkFrom === null ? null : text(b.forkFrom, '来源会话', 200, true) || null
   }
+  // 交给项目经理：发单时配置/角色/正文可以留空，靠这位标记进它的候选队列
+  if (isTask && 'autoDispatch' in b) {
+    if (typeof b.autoDispatch !== 'boolean') throw new TaskError('交给项目经理开关必须是布尔值')
+    out.auto_dispatch = b.autoDispatch
+  }
   if (!create && 'status' in b) {
     const valid = isTask ? ['todo','doing','review','done'] : ['active','done','archived']
     if (!valid.includes(b.status as string)) throw new TaskError('状态不合法')
@@ -168,7 +175,7 @@ async function fields(db: DB, user: number, raw: unknown, isTask: boolean, creat
       out.goal_id = g
     }
     if ('agent' in b) {
-      if (![null,'','claude','codex','doubao','workbuddy','zcode'].includes(b.agent as any)) throw new TaskError('请选择有效的执行工具')
+      if (![null,'','claude','codex','doubao','workbuddy','zcode','codebuddy'].includes(b.agent as any)) throw new TaskError('请选择有效的执行工具')
       out.agent = b.agent || null
     }
     for (const key of ['machine','cwd']) if (key in b) out[key] = b[key] === null ? null : text(b[key], key === 'cwd' ? '项目目录' : '电脑名', 4000, true) || null
@@ -202,8 +209,34 @@ export async function saveGoal(db: DB, user: number, raw: unknown, goalId?: numb
   if (!r.rows[0]) throw missing()
   return goal(r.rows[0])
 }
-export async function saveTask(db: DB, user: number, raw: unknown, taskId?: number): Promise<Task> {
-  if (taskId !== undefined) await getTask(db,user,taskId)
+/**
+ * Mandate 守卫：范围一经签署就冻结（append-only 快照），任务上的 constraints 不能再改；
+ * 有 mandate 或关联过会话的任务不能被手工推到 done，只能走 POST /tasks/:id/accept。
+ * 纯人工任务（既没 mandate 也没关联会话）保留直接完成的通道。
+ * viaAccept 只给 accept 路径用。
+ */
+async function assertMandateGuards(db: DB, user: number, taskId: number, raw: unknown, current: Task, viaAccept: boolean) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return
+  const b = raw as Record<string, unknown>
+  if ('constraints' in b) {
+    const frozen = (await db.query('SELECT mandate_frozen_at FROM tasks WHERE user_id=$1 AND id=$2', [user,taskId])).rows[0]?.mandate_frozen_at
+    // 原样回传（界面整单保存）不算修改；只要内容有变化就拒绝
+    if (frozen && JSON.stringify(normalizeConstraints(b.constraints)) !== JSON.stringify(current.constraints)) {
+      throw new TaskError('范围已冻结，请新开任务', 409)
+    }
+  }
+  if (b.status === 'done' && !viaAccept && current.status !== 'done') {
+    const r = await db.query(
+      `SELECT (SELECT mandate_id FROM tasks WHERE user_id=$1 AND id=$2) IS NOT NULL
+           OR EXISTS (SELECT 1 FROM task_mandates WHERE user_id=$1 AND task_id=$2)
+           OR EXISTS (SELECT 1 FROM task_sessions WHERE user_id=$1 AND task_id=$2) AS guarded`,
+      [user,taskId],
+    )
+    if (r.rows[0]?.guarded) throw new TaskError('这个任务已授权或关联了会话，请验收通过（POST /tasks/:id/accept）后再完成', 409)
+  }
+}
+export async function saveTask(db: DB, user: number, raw: unknown, taskId?: number, opts: { viaAccept?: boolean } = {}): Promise<Task> {
+  if (taskId !== undefined) await assertMandateGuards(db,user,taskId,raw,await getTask(db,user,taskId),!!opts.viaAccept)
   const f = await fields(db,user,raw,true,taskId === undefined)
   await validateSchedule(db,user,'tasks',taskId,f)
   const keys = Object.keys(f), values = Object.values(f)

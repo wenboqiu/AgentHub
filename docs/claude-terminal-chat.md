@@ -12,7 +12,9 @@
 
 ## 本机边界
 
-原有账号鉴权、电脑在线和目录黑名单检查继续生效。收件地址必须是本机 Windows 命名管道，且来自 `claude agents --json` 返回的活跃进程，对应会话 ID 与项目目录必须匹配。使用该管道对应的 peer key 做认证；key 不进入服务端、日志或 UI，也不声明自己拥有绕过终端权限的模式。
+原有账号鉴权、电脑在线和目录黑名单检查继续生效。收件地址必须是本机 Windows 命名管道，直接取自 `~/.claude/sessions/<pid>.json` 登记表，并要求登记项里的会话 ID 与 pid 匹配、该进程仍然存活。不再用两次 `claude agents --json` 快照交叉判断——两次调用的结果可能刚好不同，本来开着的会话会被判成「无法唯一确认」。会话 ID 全球唯一，所以终端在别的目录 resume 过也能投递，记录按终端那边的目录读。使用该管道对应的 peer key 做认证；key 不进入服务端、日志或 UI，也不声明自己拥有绕过终端权限的模式。
+
+只有本机登记表里找不到存活持有者时，才回头用 `claude agents --json` 判断是不是「仍被占着但没有收件通道」（后台任务、过旧 CLI）；这种情况宁可报错，也不另起一个进程写同一份会话。
 
 参考 [Claude Code 本机会话收件接口](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)。原终端通常将外来消息显示为 AgentHub 的消息预览，斜杠命令按普通文本处理。
 

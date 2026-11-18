@@ -1,7 +1,7 @@
 {
   "name": "agenthub",
   "private": true,
-  "version": "0.9.11",
+  "version": "0.17.0",
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.ts",
@@ -11,14 +11,23 @@
     "tauri": "tauri",
     "release": "tauri build && node scripts/publish-release.mjs --latest",
     "release:check": "node scripts/publish-release.mjs --check",
-    "publish:artifact": "node scripts/publish-release.mjs"
+    "publish:artifact": "node scripts/publish-release.mjs",
+    "watch:tasks": "node scripts/watch-tasks.mjs",
+    "notify:tasks": "node scripts/notify-tasks.mjs",
+    "daemon": "node scripts/task-daemon.mjs",
+    "task:run": "node scripts/task-run.mjs",
+    "task:next": "node scripts/task-run.mjs --next"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-autostart": "^2",
     "@tauri-apps/plugin-notification": "^2",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "react-markdown": "^10.1.0",
+    "remark-breaks": "^4.0.0",
+    "remark-cjk-friendly": "^2.3.4",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2",

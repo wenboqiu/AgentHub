@@ -1,30 +1,53 @@
 import type pg from 'pg'
+import { randomUUID } from 'node:crypto'
 import { listMessages, type Session } from './db.ts'
 import { TaskError, type Task } from './tasks.ts'
+import { readableNotes } from './attachments.ts'
 import { harvestEvidence, type Evidence } from './review.ts'
 import { NO_CONSTRAINTS, normalizeConstraints, hasConstraints, boundaryLine, type TaskConstraints } from './referee.ts'
 import type { ProjectDir } from './projects.ts'
+import { ASSISTANT_TITLE, CONTRACT_HEADS, PROPOSAL_TITLE } from './session-kind.ts'
 
 // 处理意见（Proposal）：一个会话跑完后，先替人把「接下来该做什么」想好，放在会话上等人确认。
 //
 // 和角色助手（assistant.ts）的分工——助手是「从一句话造一个角色」，这里是「从一段刚结束的工作
 // 攒出下一件事」。两者共用同一套范式：先出结构化草稿、人在界面上改、确认了才落库。
 //
-// 两档生成，默认第一档：
-//   ① 规则档（零成本、同步）：从最后一条助手回复、证据链、未完成清单里拼出草稿，几十毫秒；
-//   ② 细化档（一次 run、要电脑在线）：把会话尾部交给项目经理角色重写，质量高但慢。
-// 规则档先生成，人觉得不够好再点「让项目经理细化」——不让人为每次会话完成付一次模型的账。
+// 两段式，先建议后任务单（两档生成，缺一不可）：
+//   ① 规则档（零成本、同步）：从最后一条助手回复、证据链、未完成清单里拼出底稿，几十毫秒；
+//      会话跑完只落一条「建议」（stage=suggest）——一行「做什么 · 谁来做」，不叫模型。
+//   ② 细化档（一次 run、要电脑在线）：人点「生成任务单」才展开全文（stage=draft），
+//      同时把会话尾部交给项目经理角色用模型重写；写好了替换规则稿，电脑不在线就停在规则稿。
+//
+// 只有挂了未完成任务的会话才攒建议（没挂任务的闲聊不产单）。
 //
 // 一条会话可以有多次完成（多段任务），用 (session, event_at) 做唯一键：同一时刻只出一条，
 // 新一轮完成（event_at 变了）才会再出一条。
 
 type DB = Pick<pg.Pool, 'query'>
 
-export type ProposalKind = 'continue' | 'followup' | 'fix'
+/**
+ * ticket = 人直接发的一张粗单：没有会话，先让人写一句话，项目经理细化后再由人确认派发
+ * decide = 会话停下来等人拍板（「需要你定夺」）：不是派给 agent 的活，进收件箱让人去原会话回复
+ */
+export type ProposalKind = 'continue' | 'followup' | 'fix' | 'ticket' | 'decide'
 export type ProposalOrigin = 'heuristic' | 'agent'
-/** 开跑方式：fork = 接着原会话那条线（带上下文），fresh = 新建会话从这个任务开始 */
-export type Delivery = 'fork' | 'fresh'
+/**
+ * 开跑方式：
+ * - fork = 接着原会话那条线（复制上下文，另起一个新会话）
+ * - fresh = 新建会话，从这个任务开始
+ * - resume = 接着上次派发出来的那个会话继续写（同一个对话，不新开）——
+ *   只在派发侧按「同一任务重复派发」算出来，不接受人手工指定
+ */
+export type Delivery = 'fork' | 'fresh' | 'resume'
 export type ProposalStatus = 'pending' | 'accepted' | 'discarded'
+/**
+ * 两段式：
+ * - suggest = 建议：只有「做什么 · 谁来做」一行，会话跑完先给人看这个，零成本；
+ * - draft = 任务单：完整草稿（说明 / 验收 / 边界 / 从哪开始），人点了「生成任务单」才进这一段。
+ * 会话攒出来的意见从 suggest 起步；人直接发的单（ticket）和打回重做的单是现成的任务单，直接 draft。
+ */
+export type ProposalStage = 'suggest' | 'draft'
 export type Priority = 'high' | 'medium' | 'low'
 
 /** 项目经理安排好的执行人：角色是人、目录是地方（机器 + 目录来自项目的目录列表） */
@@ -61,6 +84,8 @@ export type Proposal = {
   /** 生成时该会话挂着的未完成任务（可空） */
   taskId: number | null
   kind: ProposalKind
+  /** 建议还是任务单：界面据此决定只给一行摘要，还是展开整张表单 */
+  stage: ProposalStage
   title: string
   notes: string
   /** 只是文本；确认建任务时才补 id 和完成状态 */
@@ -74,6 +99,9 @@ export type Proposal = {
   priority: Priority
   roleId: number | null
   projectId: number | null
+  /** 发单时人指定的地方（可空）：细化时项目经理在这上面做判断，确认后钉进任务 */
+  machine: string
+  cwd: string
   /** 读出来时按 role_id / project_id 展开成可展示的执行人（含机器与目录） */
   assignee: Assignee
   evidence: Evidence[]
@@ -111,10 +139,10 @@ const MAX_NOTES = 4000
 const MAX_ITEMS = 20
 const MAX_ITEM = 200
 const MAX_EVIDENCE = 6
-/** 没声明去向时的默认：接着做 / 回去修沿用上下文，新的一段工作从零开始 */
-const defaultDelivery = (kind: ProposalKind): Delivery => (kind === 'followup' ? 'fresh' : 'fork')
+/** 没声明去向时的默认：接着做 / 回去修 / 拍板后接着干沿用上下文，新的一段工作（含人直接发的单）从零开始 */
+const defaultDelivery = (kind: ProposalKind): Delivery => (kind === 'followup' || kind === 'ticket' ? 'fresh' : 'fork')
 /** 细化会话的标题前缀：这类会话不再生成新的处理意见（否则会无限套娃），也不弹通知 */
-export const PROPOSAL_TITLE = '意见细化：'
+export { PROPOSAL_TITLE }
 
 const EMPTY_ASSIGNEE: Assignee = {
   roleId: null, roleName: '', roleTitle: '', agent: '', machine: '', cwd: '',
@@ -126,7 +154,7 @@ const EMPTY_ASSIGNEE: Assignee = {
  */
 const FORK_AGENTS = new Set(['claude', 'codex'])
 
-const AGENT_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', doubao: '豆包', workbuddy: 'WorkBuddy' }
+const AGENT_NAME: Record<string, string> = { claude: 'Claude', codex: 'Codex', zcode: 'ZCode', doubao: '豆包', workbuddy: 'WorkBuddy', codebuddy: 'CodeBuddy' }
 const agentName = (a: string): string => AGENT_NAME[a] ?? (a || '未知工具')
 
 export const NO_FORK: ForkInfo = { agent: '', machine: '', cwd: '', ok: false, reason: '找不到原会话' }
@@ -145,6 +173,16 @@ export function sessionKeyOf(sessionId: string): string {
   return sessionId.includes(':') ? sessionId.slice(sessionId.indexOf(':') + 1) : ''
 }
 
+/**
+ * 上一轮是不是因为「原会话在本机找不到了」而失败：transcript 被清掉、目录变了、换机回来，
+ * `--resume` 都会直接报这个。这种情况下次派发不能再续同一个会话，否则每次重派都撞同一堵墙。
+ */
+export function missingSessionError(msg: string): boolean {
+  const low = (msg ?? '').toLowerCase()
+  if (/no conversation found|session not found|could not find (session|conversation)/.test(low)) return true
+  return low.includes('会话') && (low.includes('找不到') || low.includes('不存在'))
+}
+
 /** 目录比较前先归一化：反斜杠、末尾斜杠、Windows 盘符大小写，否则同一目录会被误判成两个 */
 export function normalizeCwd(p: string): string {
   const p2 = (p ?? '').trim().replace(/\\/g, '/').replace(/\/+$/, '')
@@ -154,9 +192,12 @@ export function normalizeCwd(p: string): string {
 /**
  * 真的开跑时用什么方式。想续但条件不满足就退回 fresh —— 不悄悄按自己的想法做，
  * 退回的理由要能说清楚，否则人只会觉得「我明明选了接着做」。
+ *
+ * resume 与 fork 共用同一套「工具 / 电脑 / 目录必须一致」的判定，区别只在落到哪个会话：
+ * fork 复制一份新会话，resume 直接续写原来的那条（时间轴上还是同一个对话）。
  */
 export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: string; machine: string; cwd: string }): { mode: Delivery; reason: string } {
-  if (want !== 'fork') return { mode: 'fresh', reason: '新建会话，从这个任务开始' }
+  if (want === 'fresh') return { mode: 'fresh', reason: '新建会话，从这个任务开始' }
   if (!fork.ok) return { mode: 'fresh', reason: fork.reason }
   if (target.agent !== fork.agent) {
     return { mode: 'fresh', reason: `执行人是 ${agentName(target.agent)}，原会话是 ${agentName(fork.agent)}，续不上` }
@@ -166,6 +207,9 @@ export function planDelivery(want: Delivery, fork: ForkInfo, target: { agent: st
   }
   if (target.cwd && normalizeCwd(target.cwd) !== normalizeCwd(fork.cwd)) {
     return { mode: 'fresh', reason: '任务目录和原会话不同，续不上上下文' }
+  }
+  if (want === 'resume') {
+    return { mode: 'resume', reason: `接着上次派发的会话继续（${agentName(fork.agent)} · ${fork.machine}）` }
   }
   return { mode: 'fork', reason: `接着原会话的上下文（${agentName(fork.agent)} · ${fork.machine}）` }
 }
@@ -180,7 +224,8 @@ export async function migrateProposals(db: DB) {
     session_project text NOT NULL DEFAULT '',
     task_id bigint,
     event_at timestamptz NOT NULL,
-    kind text NOT NULL CHECK (kind IN ('continue','followup','fix')),
+    kind text NOT NULL CHECK (kind IN ('continue','followup','fix','ticket','decide')),
+    stage text NOT NULL DEFAULT 'draft',
     title text NOT NULL,
     notes text NOT NULL DEFAULT '',
     checklist jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -195,16 +240,43 @@ export async function migrateProposals(db: DB) {
     status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','accepted','discarded')),
     created_task_id bigint,
     refine_run_id text,
+    machine text,
+    cwd text,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     UNIQUE (user_id, session_id, event_at))`)
   await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS refine_run_id text')
   // 老库清理：执行人挂的配置已废弃（目录收进项目），列直接删掉
   await db.query('ALTER TABLE session_proposals DROP COLUMN IF EXISTS profile_id')
+  // 发单场景：人指定的电脑与目录跟着草稿走，确认时原样落到任务上
+  await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS machine text')
+  await db.query('ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS cwd text')
+  // kind 多出 ticket（人直接发的粗单）、decide（等人拍板）：老库的列级 CHECK 要换掉，否则插不进去
+  await db.query('ALTER TABLE session_proposals DROP CONSTRAINT IF EXISTS session_proposals_kind_check')
+  await db.query(`ALTER TABLE session_proposals ADD CONSTRAINT session_proposals_kind_check
+    CHECK (kind IN ('continue','followup','fix','ticket','decide'))`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS constraints jsonb NOT NULL DEFAULT '{}'::jsonb`)
   await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS delivery text NOT NULL DEFAULT 'fresh'`)
+  // 两段式：老库里的单子都当成已经展开的任务单（默认 draft），不改动它们的行为
+  await db.query(`ALTER TABLE session_proposals ADD COLUMN IF NOT EXISTS stage text NOT NULL DEFAULT 'draft'`)
+  await db.query('ALTER TABLE session_proposals DROP CONSTRAINT IF EXISTS session_proposals_stage_check')
+  await db.query(`ALTER TABLE session_proposals ADD CONSTRAINT session_proposals_stage_check
+    CHECK (stage IN ('suggest','draft'))`)
+  // 老库清理：历史上给没挂任务的会话也攒过意见，按新规矩它们不该存在——
+  // 待确认的一律作废（人发的单 kind=ticket 例外，它本来就没有会话可挂）
+  await db.query(`UPDATE session_proposals SET status='discarded', updated_at=now()
+    WHERE status='pending' AND task_id IS NULL AND kind <> 'ticket'`)
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_pending ON session_proposals(user_id,status,created_at DESC)')
   await db.query('CREATE INDEX IF NOT EXISTS idx_proposals_session ON session_proposals(user_id,session_id)')
+  // 历史数据修复：内部会话的标题曾被本机 transcript 的契约提示词顶掉，会话列表里就露出一大段提示词原文。
+  // 细化会话能按 refine_run_id 找回当时的任务单标题；助手会话没有可还原的名字，统一收成「角色助手」。
+  // 只改标题仍是契约原文的那批（人自己改过的不动），改完不再命中，重复启动无副作用。
+  await db.query(`UPDATE sessions s SET title = $2 || left(p.title, 40)
+    FROM session_proposals p JOIN runs r ON r.id = p.refine_run_id AND r.user_id = p.user_id
+   WHERE s.user_id = p.user_id AND s.id = r.session_id AND s.title LIKE $1 || '%'`,
+    [CONTRACT_HEADS[0], PROPOSAL_TITLE])
+  await db.query("UPDATE sessions SET title = $2 WHERE title LIKE $1 || '%'",
+    [CONTRACT_HEADS[1], ASSISTANT_TITLE.replace(/：$/, '')])
 }
 
 const row = (r: any): Proposal => ({
@@ -215,6 +287,7 @@ const row = (r: any): Proposal => ({
   sessionProject: r.session_project ?? '',
   taskId: r.task_id === null || r.task_id === undefined ? null : Number(r.task_id),
   kind: r.kind,
+  stage: r.stage === 'suggest' ? 'suggest' : 'draft',
   title: r.title,
   notes: r.notes ?? '',
   checklist: Array.isArray(r.checklist) ? r.checklist.filter((t: unknown): t is string => typeof t === 'string') : [],
@@ -225,6 +298,8 @@ const row = (r: any): Proposal => ({
   priority: r.priority ?? 'medium',
   roleId: r.role_id === null || r.role_id === undefined ? null : Number(r.role_id),
   projectId: r.project_id === null || r.project_id === undefined ? null : Number(r.project_id),
+  machine: r.machine ?? '',
+  cwd: r.cwd ?? '',
   assignee: EMPTY_ASSIGNEE,
   evidence: Array.isArray(r.evidence) ? r.evidence : [],
   note: r.note ?? '',
@@ -261,18 +336,22 @@ async function assigneeCtx(db: DB, user: number): Promise<AssigneeCtx> {
   }
 }
 
-/** 角色 + 项目目录（按来源会话的机器挑），合成一份能显示、也能直接建任务的人选 */
-export function assigneeOf(ctx: AssigneeCtx, roleId: number | null, projectId: number | null, machineHint = ''): Assignee {
+/** 角色 + 项目目录（按来源会话的机器挑），合成一份能显示、也能直接建任务的人选。
+ *  override 是人自己指定过的机器/目录：他写了就按他的来——他比目录列表更清楚这单在哪台机器上做。 */
+export function assigneeOf(
+  ctx: AssigneeCtx, roleId: number | null, projectId: number | null, machineHint = '',
+  override: { machine?: string; cwd?: string } = {},
+): Assignee {
   const role = roleId === null ? null : ctx.roles.get(roleId) ?? null
   const dirs = projectId === null ? [] : ctx.projectDirs.get(projectId) ?? []
-  const dir = pickDir(dirs, machineHint)
+  const dir = pickDir(dirs, override.machine || machineHint)
   return {
     roleId: role?.id ?? null,
     roleName: role?.name ?? '',
     roleTitle: role?.title ?? '',
     agent: role?.agent || '',
-    machine: dir?.machine ?? '',
-    cwd: dir?.cwd ?? '',
+    machine: override.machine || dir?.machine || '',
+    cwd: override.cwd || dir?.cwd || '',
   }
 }
 
@@ -328,7 +407,8 @@ export async function fillAssignees(db: DB, user: number, list: Proposal[]): Pro
   )
   return list.map(p => ({
     ...p,
-    assignee: assigneeOf(ctx, p.roleId, p.projectId, sessions.get(p.sessionId)?.machine ?? ''),
+    assignee: assigneeOf(ctx, p.roleId, p.projectId, sessions.get(p.sessionId)?.machine ?? '',
+      { machine: p.machine, cwd: p.cwd }),
     fork: sessions.get(p.sessionId) ?? NO_FORK,
   }))
 }
@@ -358,7 +438,51 @@ export function nextStepLine(text: string): string {
   return ''
 }
 
-const evidenceGroups = (ev: Evidence[]): string => {
+/** 截短时补省略号，别让人以为话就说到这 */
+const cut = (s: string, max: number): string => (s.length > max ? `${s.slice(0, max - 1)}…` : s)
+
+/**
+ * 兜底标题的主语：优先回复里的第一个小标题（收尾总结常以「## 结论 / ## 需要你定夺」开头），
+ * 其次回复第一行；都没有再退回会话标题。会话标题可能就是上一张单子的说明原文
+ * （「来源会话：X（…） 会话结尾：…」），这种只取 X。
+ */
+export function fallbackSubject(lastReply: string, sessionTitle: string): string {
+  const lines = lastReply.split(/\n+/)
+  const heading = lines.find(l => /^\s*#{1,4}\s+\S/.test(l))
+  const first = stripMd(heading ?? lines.find(l => stripMd(l).length >= 4) ?? '')
+  if (first.length >= 4) return cut(first, 60)
+  const quoted = /^来源会话：(.+?)（/.exec(sessionTitle.trim())
+  return cut((quoted?.[1] ?? sessionTitle).trim() || '本次会话', 60)
+}
+
+/** agent 在等人拍板的信号。「不需要你确认」这类否定不算 */
+const DECIDE_RE = /(?<![不无])(?:需要你|请你|等你)来?(?:定夺|决定|拍板|确认|选择|选一个)|你来定|需要人来定/
+
+/**
+ * 回复里有没有在等人拍板：返回要人回答的那个问题和那一段原文，没有返回 null。
+ * 常见写法是「## 需要你定夺」小标题下面一句问题；也有一行写完的「需要你决定：要不要…」。
+ * 只看结尾 40 行：前文引用的旧问题不算。
+ */
+export function decisionAsk(text: string): { question: string; section: string } | null {
+  const lines = text.split('\n')
+  const headLevel = (l: string): number => /^\s*(#{1,6})\s/.exec(l)?.[1].length ?? 0
+  for (let i = Math.max(0, lines.length - 40); i < lines.length; i++) {
+    if (!DECIDE_RE.test(lines[i])) continue
+    // 去掉信号词后这一行还有实质内容（一行写完的问题）就用它，否则取下面第一行
+    const rest = stripMd(lines[i].replace(DECIDE_RE, '')).replace(/^[：:，,。\s]+/, '')
+    let question = rest.length >= 6 ? rest : ''
+    for (let j = i + 1; !question && j < lines.length; j++) question = stripMd(lines[j])
+    if (!question) continue
+    // 原文段落：小标题起头就到下一个同级或更高的小标题为止，普通行起头就到下一个小标题为止
+    const level = headLevel(lines[i]) || 7
+    let end = i + 1
+    while (end < lines.length && !(headLevel(lines[end]) && headLevel(lines[end]) <= level)) end++
+    return { question: cut(question, 80), section: lines.slice(i, end).join('\n').trim().slice(0, 1500) }
+  }
+  return null
+}
+
+const evidenceGroups =(ev: Evidence[]): string => {
   const byKind = new Map<string, string[]>()
   for (const e of ev) {
     const list = byKind.get(e.kind) ?? []
@@ -384,6 +508,27 @@ export function heuristicDraft(input: {
   const failedTest = evidence.find(e => e.kind === 'test' && FAIL_RE.test(e.value))
   const errorLog = evidence.find(e => e.kind === 'log' && FAIL_RE.test(e.value))
   const step = nextStepLine(lastReply)
+  // 说明里的出处：挂了任务就引任务编号和标题，不抄会话标题——会话标题一旦是上一张单子的说明，
+  // 这里抄进去、下一轮再抄，就成了「来源会话：来源会话：…」
+  const where = `${session.agent}${session.project ? ` · ${session.project}` : ''}`
+  const source = task ? `来源：任务 #${task.id}「${task.title}」（${where}）` : `来源会话：${session.title || '未命名会话'}（${where}）`
+
+  // ⓪ 会话停下来等人拍板：这不是派给 agent 的活，进收件箱让人去原会话回复。
+  // 排最前：不拍板，接着做 / 修 / 下一步都无从谈起
+  const ask = decisionAsk(lastReply)
+  if (ask) {
+    return {
+      kind: 'decide',
+      title: `等你决定：${ask.question}`.slice(0, MAX_TITLE),
+      notes: [source, ask.section].join('\n\n'),
+      checklist: [],
+      priority: 'high',
+      delivery: 'fork',
+      roleId: task?.roleId ?? null,
+      projectId: task?.projectId ?? null,
+      note: '会话停下来等你拍板：去原会话直接回复，它就带着上下文接着做；要另起一件事再转成任务单。',
+    }
+  }
 
   // ① 原任务没做完：接着做，清单直接沿用未完成项
   if (task && todo.length) {
@@ -391,8 +536,8 @@ export function heuristicDraft(input: {
       kind: 'continue',
       title: `继续：${todo[0]}`.slice(0, MAX_TITLE),
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
-        task.notes ? `原任务：${task.notes.slice(0, 800)}` : '',
+        source,
+        task.notes ? `原任务：${readableNotes(task.notes).slice(0, 800)}` : '',
         lastReply ? `本次进展：\n${lastReply.slice(-800)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
@@ -416,7 +561,7 @@ export function heuristicDraft(input: {
       kind: 'fix',
       title: `修复：${head}`.slice(0, MAX_TITLE),
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         `失败现场：\n${broken.value.slice(0, 800)}`,
         lastReply ? `会话结论：\n${lastReply.slice(-600)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
@@ -436,7 +581,7 @@ export function heuristicDraft(input: {
       kind: 'followup',
       title: step.slice(0, MAX_TITLE),
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         lastReply ? `会话结尾：\n${lastReply.slice(-1000)}` : '',
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
@@ -450,13 +595,15 @@ export function heuristicDraft(input: {
     }
   }
 
-  // ④ 兜底：回复有实质内容但没明说下一步
-  if (lastReply.trim().length >= 40) {
+  // ④ 兜底：回复有实质内容但没明说下一步。只给没挂任务的会话——挂了任务的，跑完就进待验收，
+  // 下一步是人验收 / 打回（打回自己会出新单）。这里再出「跟进」，验收类会话每轮都写一大段总结，
+  // 就会滚成「核对上一轮的核对」一条停不下来的链
+  if (!task && lastReply.trim().length >= 40) {
     return {
       kind: 'followup',
-      title: `跟进：${(session.title || '本次会话').slice(0, 60)}`,
+      title: `跟进：${fallbackSubject(lastReply, session.title)}`,
       notes: [
-        `来源会话：${session.title || '未命名会话'}（${session.agent}${session.project ? ` · ${session.project}` : ''}）`,
+        source,
         `会话结尾：\n${lastReply.slice(-1000)}`,
         evidence.length ? `证据：\n${evidenceGroups(evidence)}` : '',
       ].filter(Boolean).join('\n\n'),
@@ -464,8 +611,8 @@ export function heuristicDraft(input: {
       priority: 'medium',
       // 新的一段工作：另起会话，只带任务单里的说明
       delivery: 'fresh',
-      roleId: task?.roleId ?? null,
-      projectId: task?.projectId ?? null,
+      roleId: null,
+      projectId: null,
       note: '没从回复里找到明确的下一步，标题只是占位；点「让项目经理细化」会更准。',
     }
   }
@@ -475,7 +622,7 @@ export function heuristicDraft(input: {
 
 /**
  * 会话完成时调用：取最后回复、证据、未完成任务，攒一条待确认的意见。
- * 同一 (会话, 完成时刻) 只留一条；已有则返回 null。
+ * 只对挂了未完成任务的会话生成（没挂任务的会话不产单）；同一 (会话, 完成时刻) 只留一条，已有则返回 null。
  */
 export async function generateProposal(pool: pg.Pool, userId: number, session: Session, eventAt: string): Promise<Proposal | null> {
   const task = (
@@ -486,6 +633,8 @@ export async function generateProposal(pool: pg.Pool, userId: number, session: S
       [userId, session.id],
     )
   ).rows[0] ?? null
+  // 没挂任务（或挂着的任务已完结）就不攒意见：任务单只跟着派过的事走，闲聊不产单
+  if (!task) return null
   const msgs = await listMessages(pool, userId, session.id, 40)
   let lastReply = ''
   for (let i = msgs.length - 1; i >= 0; i--) if (msgs[i].role === 'assistant' && msgs[i].text.trim()) { lastReply = msgs[i].text; break }
@@ -515,6 +664,8 @@ export async function generateProposal(pool: pg.Pool, userId: number, session: S
     eventAt,
     evidence,
     origin: 'heuristic',
+    // 只先给一条建议：标题 + 执行人一行，人点了「生成任务单」才展开全文并让项目经理细化
+    stage: 'suggest',
     draft,
   })
   return saved ? (await fillAssignees(pool, userId, [saved]))[0] : null
@@ -529,13 +680,15 @@ async function saveProposal(pool: DB, userId: number, input: {
   eventAt: string
   evidence: Evidence[]
   origin: ProposalOrigin
+  /** 不传 = draft（发单、打回重做这类一上来就是任务单的） */
+  stage?: ProposalStage
   draft: ProposalDraft
 }): Promise<Proposal | null> {
   const r = await pool.query(
     `INSERT INTO session_proposals(
        user_id,session_id,session_title,session_agent,session_project,task_id,event_at,
-       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,evidence,note,origin)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,evidence,note,origin,stage)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      ON CONFLICT (user_id,session_id,event_at) DO NOTHING RETURNING *`,
     [userId, input.sessionId, input.sessionTitle.slice(0, 200), input.sessionAgent, input.sessionProject.slice(0, 200),
       input.taskId, input.eventAt, input.draft.kind, input.draft.title.slice(0, MAX_TITLE),
@@ -543,7 +696,7 @@ async function saveProposal(pool: DB, userId: number, input: {
       JSON.stringify(normalizeConstraints(input.draft.constraints)),
       input.draft.delivery ?? defaultDelivery(input.draft.kind),
       input.draft.priority, input.draft.roleId, input.draft.projectId,
-      JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin],
+      JSON.stringify(input.evidence), input.draft.note.slice(0, 500), input.origin, input.stage ?? 'draft'],
   )
   const inserted = r.rows[0]
   if (!inserted) return null
@@ -604,7 +757,7 @@ export function refineMessage(input: {
   parts.push(`【会话】${input.sessionTitle || '未命名会话'}（${input.agent}${input.project ? ` · ${input.project}` : ''}）`)
   if (input.task) {
     const todo = input.task.todo.length ? `\n未完成清单：${input.task.todo.join('；')}` : ''
-    parts.push(`【当时挂着的任务】${input.task.title}${input.task.notes ? `\n说明：${input.task.notes.slice(0, 600)}` : ''}${todo}`)
+    parts.push(`【当时挂着的任务】${input.task.title}${input.task.notes ? `\n说明：${readableNotes(input.task.notes).slice(0, 600)}` : ''}${todo}`)
   }
   if (input.tail.length) {
     parts.push(`【会话最后几条】\n${input.tail.map(m => `${m.role === 'user' ? '用户' : '助手'}：${m.text.slice(0, 700)}`).join('\n\n')}`)
@@ -623,6 +776,79 @@ export function refineMessage(input: {
   if (input.projects.length) parts.push(`【可用项目】${input.projects.map(p => `${p.id}=${p.name}`).join('；')}`)
   return parts.join('\n\n')
 }
+
+// ---------- 发单档：人写一句话，项目经理补成任务单 ----------
+//
+// 和「会话跑完攒意见」是同一套范式，只是材料不同：那边有会话尾部与证据，这边只有人写的一句话
+// 和项目背景。所以契约得更克制——不许编业务细节，缺什么就写成「先确认」。
+
+export const TICKET_CONTRACT = `你在 AgentHub 里当项目经理，收到人发来的一句话工单，把它补成一张能直接开工的任务单。
+
+只回一个 JSON 对象（可以用 \`\`\`json 包起来），不要写解释、寒暄或额外段落。字段：
+{"title":"任务标题","notes":"目标、背景、约束、怎么验证","checklist":["验收要点"],"priority":"high | medium | low","roleId":null,"projectId":null,"delivery":"fresh","constraints":{"paths":[],"net":false,"push":false,"scripts":false,"note":""},"note":"你的判断依据或缺口"}
+
+规矩：
+- 人给的标题和说明是唯一的需求来源。不要编业务细节：缺什么就写进 notes 或 checklist 当「先确认 X 再动手」，不要自己编一个。
+- title 动词开头，说清要做什么，不超过 80 字；不要把人那句话原样抄回来。
+- notes 写给接手的人看：要达成什么、项目里对得上的背景、不能碰什么、怎么算做完。不超过 2000 字。
+- checklist 是验收要点，最多 8 条、每条不超过 100 字；想不出来就给空数组。
+- priority：卡住别人或线上问题给 high；普通改进给 medium；锦上添花给 low。
+- roleId 从【可用角色】里挑最合适的编号，没把握给 null 让人来定；你自己不做实现。
+- projectId 用【本次发单的项目】，不要换成别的。
+- delivery 一律 fresh：这单没有可以续的会话。
+- constraints 按这个任务真的需要什么写，拿不准一律 false。
+- 发单人指定了电脑或目录就照抄，别改。
+- note 写你补了哪些人没说的假设，让人一眼看到哪里需要他确认。`
+
+export function ticketMessage(input: {
+  title: string
+  notes: string
+  project: string
+  projectBrief: string
+  recent: string[]
+  role: { name: string; title: string; agent: string } | null
+  machine: string
+  cwd: string
+  roles: { id: number; name: string; title: string; agent?: string }[]
+  projects: { id: number; name: string }[]
+}): string {
+  const parts = [TICKET_CONTRACT]
+  parts.push(`【人发来的工单】${input.title}${input.notes ? `\n说明：${input.notes.slice(0, 1500)}` : '\n说明：（没写正文，按标题理解；缺的信息写进待确认）'}`)
+  const place = [input.machine && `电脑 ${input.machine}`, input.cwd && `目录 ${input.cwd}`].filter(Boolean).join(' · ')
+  if (input.project) parts.push(`【本次发单的项目】${input.project}${place ? `（${place}）` : ''}`)
+  if (input.projectBrief) parts.push(`【项目说明】${input.projectBrief.slice(0, 1200)}`)
+  if (input.recent.length) parts.push(`【项目最近进展】\n${input.recent.slice(-3).map(r => `- ${r}`).join('\n')}`)
+  if (input.role) parts.push(`【发单人指定的执行角色】${input.role.name}${input.role.title ? ` / ${input.role.title}` : ''}${input.role.agent ? ` / ${input.role.agent}` : ''}`)
+  if (input.roles.length) parts.push(`【可用角色（名字/职责/执行工具）】${input.roles.map(r => `${r.id}=${r.name}${r.title ? ` / ${r.title}` : ''}${r.agent ? ` / ${r.agent}` : ''}`).join('；')}`)
+  if (input.projects.length) parts.push(`【可用项目】${input.projects.map(p => `${p.id}=${p.name}`).join('；')}`)
+  return parts.join('\n\n')
+}
+
+/**
+ * 人发的一张粗单：先落成一份待确认的任务单草稿（kind=ticket，没有会话），
+ * 项目经理细化后由人确认才建任务。不直接建任务——建了再改，等于让人对着半成品做验收。
+ */
+export async function createTicket(pool: pg.Pool, userId: number, input: {
+  title: string
+  notes: string
+  projectId: number | null
+  projectName: string
+  roleId: number | null
+  machine: string
+  cwd: string
+}): Promise<Proposal> {
+  const r = await pool.query(
+    `INSERT INTO session_proposals(
+       user_id,session_id,session_title,session_agent,session_project,event_at,
+       kind,title,notes,checklist,constraints,delivery,priority,role_id,project_id,machine,cwd,origin)
+     VALUES($1,$2,'','',$3,now(),'ticket',$4,$5,'[]'::jsonb,'{}'::jsonb,'fresh','medium',$6,$7,$8,$9,'heuristic')
+     RETURNING *`,
+    [userId, `ticket:${randomUUID()}`, input.projectName, input.title.slice(0, MAX_TITLE), input.notes.slice(0, MAX_NOTES),
+      input.roleId, input.projectId, input.machine || null, input.cwd || null],
+  )
+  return (await fillAssignees(pool, userId, [row(r.rows[0])]))[0]
+}
+
 
 const clamp = (v: unknown, max: number): string =>
   typeof v === 'string' ? v.replaceAll('\0', '').trim().slice(0, max) : ''
@@ -684,7 +910,7 @@ export async function replaceDraft(pool: DB, userId: number, id: number, draft: 
   const r = await pool.query(
     `UPDATE session_proposals SET kind=$3,title=$4,notes=$5,checklist=$6,priority=$7,
        role_id=$8,project_id=$9,note=$10,origin='agent',updated_at=now(),delivery=$11,
-       constraints=$12
+       constraints=$12,stage='draft'
      WHERE user_id=$1 AND id=$2 AND status='pending' RETURNING *`,
     [userId, id, draft.kind, draft.title.slice(0, MAX_TITLE), draft.notes.slice(0, MAX_NOTES),
       JSON.stringify(draft.checklist), draft.priority, draft.roleId, draft.projectId, draft.note.slice(0, 500),
@@ -712,7 +938,18 @@ export async function recordRefine(db: DB, userId: number, runId: string, raw: s
   const proposal = row(r.rows[0])
   const parsed = parseRefine(raw)
   if (!parsed) return null
-  if (parsed.skip) return { action: 'skipped', proposal: await markProposal(db, userId, proposal.id, 'discarded') }
+  // 人自己发的单不会被模型判「没价值」丢掉：skip 只对从会话攒出来的意见成立。
+  // 解析不出来就当这一轮没成，草稿原样留着等人再点一次重写。
+  if (parsed.skip) {
+    if (proposal.kind === 'ticket') return null
+    return { action: 'skipped', proposal: await markProposal(db, userId, proposal.id, 'discarded') }
+  }
+  // 发单的 kind 是它的身份（卡片上要标「发单」），模型回什么都不能改掉；
+  // 项目也锁成人选的那个——单子不能自己跑去别的项目上做
+  if (proposal.kind === 'ticket') {
+    parsed.draft.kind = 'ticket'
+    parsed.draft.projectId = proposal.projectId
+  }
   return { action: 'replaced', proposal: await replaceDraft(db, userId, proposal.id, parsed.draft) }
 }
 
@@ -732,6 +969,21 @@ export async function getProposal(db: DB, userId: number, id: number): Promise<P
   return (await fillAssignees(db, userId, [row(r.rows[0])]))[0]
 }
 
+/** 建议 → 任务单：人点了「生成任务单」才把 stage 推过去。
+ *  重复点不报错（已经是 draft 就原样返回），避免双击或两个窗口同时点时弹出假错误。 */
+export async function promoteToDraft(db: DB, userId: number, id: number): Promise<Proposal> {
+  const r = await db.query(
+    `UPDATE session_proposals SET stage='draft', updated_at=now()
+     WHERE user_id=$1 AND id=$2 AND status='pending' AND stage='suggest' RETURNING *`,
+    [userId, id],
+  )
+  if (r.rows[0]) return (await fillAssignees(db, userId, [row(r.rows[0])]))[0]
+  const cur = await db.query('SELECT status,stage FROM session_proposals WHERE user_id=$1 AND id=$2', [userId, id])
+  if (!cur.rows[0]) throw new TaskError('处理意见不存在', 404)
+  if (cur.rows[0].status !== 'pending') throw new TaskError('这条意见已经处理过了', 409)
+  return getProposal(db, userId, id)
+}
+
 /** 确认/忽略只对 pending 生效，避免同一份意见生成两个任务 */
 export async function markProposal(db: DB, userId: number, id: number, status: 'accepted' | 'discarded', taskId: number | null = null): Promise<Proposal> {
   const r = await db.query(
@@ -747,11 +999,36 @@ export async function markProposal(db: DB, userId: number, id: number, status: '
   return row(r.rows[0])
 }
 
+/** 撤回忽略：把当初丢掉的那张单放回待确认（卡片上的「撤回」走这条）。
+ *  只对 discarded 生效——已确认的那张已经建出任务了，撤回来只会和任务重复。
+ *  放回去也守「只留一张」：同一任务（没挂任务时同一会话）上别的待处理意见照样作废，
+ *  否则同一个活攒出两张待确认，人可能连点两次建出两个任务。 */
+export async function restoreProposal(db: DB, userId: number, id: number): Promise<Proposal> {
+  const r = await db.query(
+    `UPDATE session_proposals SET status='pending', created_task_id=NULL, updated_at=now()
+     WHERE user_id=$1 AND id=$2 AND status='discarded' RETURNING *`,
+    [userId, id],
+  )
+  const back = r.rows[0]
+  if (!back) {
+    const exists = await db.query('SELECT status FROM session_proposals WHERE user_id=$1 AND id=$2', [userId, id])
+    if (!exists.rows[0]) throw new TaskError('处理意见不存在', 404)
+    throw new TaskError('这张单已经确认过了，撤回不了（任务已经建好）', 409)
+  }
+  const scope = back.task_id === null ? 'task_id IS NULL AND session_id=$2' : 'task_id=$2'
+  await db.query(
+    `UPDATE session_proposals SET status='discarded', updated_at=now()
+      WHERE user_id=$1 AND status='pending' AND id<>$3 AND ${scope}`,
+    [userId, back.task_id === null ? back.session_id : back.task_id, back.id],
+  )
+  return getProposal(db, userId, id)
+}
+
 /** 确认时允许人改字段：只接受草稿里出现过的键 */
 export function proposalPatch(raw: unknown): Record<string, unknown> {
   const b = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {}
   const out: Record<string, unknown> = {}
-  for (const key of ['title', 'notes', 'checklist', 'priority', 'roleId', 'projectId'] as const) {
+  for (const key of ['title', 'notes', 'checklist', 'priority', 'roleId', 'projectId', 'constraints'] as const) {
     if (key in b) out[key] = b[key]
   }
   return out

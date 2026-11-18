@@ -6,6 +6,7 @@ import { registerRoutes } from './routes.ts'
 import { registerAuth } from './auth.ts'
 import { registerAdmin } from './admin.ts'
 import { TaskError } from './tasks.ts'
+import { resolveStatsTz, rollupStats } from './stats.ts'
 
 // adminToken：管理页（/admin）用，不设则 /admin* 全部 404
 export type AppConfig = {
@@ -39,11 +40,21 @@ export async function buildApp(databaseUrl: string, logLevel = 'info', config: A
   const kick = registerRoutes(app, pool, config)
   registerAuth(app, pool, kick)
   registerAdmin(app, pool, config.adminToken ?? '', kick)
-  // 每小时清掉 7 天没更新的会话
-  const timer = setInterval(() => purgeOld(pool).catch(e => app.log.error(e, '清理会话失败')), 3600_000)
+  // 每小时：先把最近几天沉淀进统计汇总表，再清理过期数据（顺序不能反，否则将被清理的数据来不及沉淀）。两者各自 catch
+  const timer = setInterval(async () => {
+    await rollupStats(pool).catch(e => app.log.error(e, '统计汇总失败'))
+    await purgeOld(pool).catch(e => app.log.error(e, '清理会话失败'))
+  }, 3600_000)
   timer.unref()
+  // 启动 30 秒后全量汇总一次（不在 buildApp 里同步跑：测试每个进程都 buildApp，共享测试库用户很多）
+  const bootRollup = setTimeout(async () => {
+    await resolveStatsTz(pool, m => app.log.warn(m)).catch(() => {})
+    await rollupStats(pool).catch(e => app.log.error(e, '统计汇总失败'))
+  }, 30_000)
+  bootRollup.unref()
   app.addHook('onClose', async () => {
     clearInterval(timer)
+    clearTimeout(bootRollup)
     await pool.end()
   })
   return app

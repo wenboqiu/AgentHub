@@ -602,6 +602,7 @@ Command::new(node_exe)                     // 系统 node，或 Electron + ELECT
 ### 12.5 授权/交互
 
 - `interaction/requestPermission`：沿用 `runner.rs` 的 `Approvals`（`run.out` 发审批事件，`RunMsg::Decide` 回来应答），应答体改为 `{decision: allow|deny}`；`riskLevel` 可做默认策略（low 自动允许可配）。
+  - 已实现（2026-11-08）：配置键 `zcodeAutoApprove`（off|low|medium，默认 low），执行器在档位内的 `riskLevel` 直接 allow 并在会话时间线留痕；high / critical 与 riskLevel 缺失的一律弹审批卡。设置入口：本机执行与采集 → ZCode 自动放行。
 - `interaction/requestUserInput`：复用现有提问卡片；应答 `{value, cancelled}`。
 - 超时策略沿用 30 分钟；超时回 `deny` / `cancelled:true`。
 
@@ -653,3 +654,50 @@ node zcode-probe.cjs --timeout 180000
 9. **Windows 进程树**：MCP 子进程（node_repl、documents/presentations/pdf/spreadsheets）必须按树回收，否则残留进程。
 10. **`-p` 不可用**：既无 provider 注入通道，又会在退出时撞 MCP 协商错误；不要把它作为降级方案。
 11. **配额**：每次真实回合约 24k input tokens（系统提示 + 42 个工具），调试时注意成本。
+
+---
+
+## 15. 模型清单：为什么裸跑只能拿到内置 4 个（实测 2026-11，macOS + ZCode 3.17.2 / CLI bundle）
+
+AgentHub 的角色页要给出模型下拉，这里的结论是「静态解析安装包」而不是「问 app-server」，原因如下。
+
+### 15.1 本地有哪些清单
+
+| 来源 | 内容 | 可信度 |
+| --- | --- | --- |
+| `<install>/Resources/config/provider/zcode-builtin.json` → `config.modelConfigRules.builtinProviderModelRules` | 30 条 = 10 个 `account:*` 套餐 × 4 个模型：`GLM-5.3` / `GLM-5.3-Flash` / `GLM-5.2` / `GLM-5-Turbo`（本机 revision 43） | 静态、随版本更新，按套餐过滤即可 |
+| 同文件 `templateModelRules`（316 条） | 第三方模板（如 `opencode-go-chat`）的模型目录 | **不是**账号可用集，别用 |
+| `~/.zcode/v2/provider_config.json` | 本机 `providerModelRules` / `manualProviderModelRules` 都是空数组 | 没有缓存账号清单 |
+| 运行时会话快照 `settings.model.available` | 带 `{ref:{providerId,modelId}, label, description, providerLabel, reasoning}` | 只有桌面 Host 在场时才非空（见下） |
+
+### 15.2 为什么快照里是空的
+
+按 §12.3 的顺序（create → refreshRegistry → updateAccountConfig）实测：
+
+1. `provider/updateAccountConfig` 被接受：`{"providerCount":1,"status":"received"}`，`basedOnZCodeBuiltinRevision` 与日志里的 `zcode-builtin:43:<sha>` 一致；
+2. `provider/refreshRegistry` 只回 `{"refreshed":true}`（§4 方法面），**不返回任何 provider / 模型**；
+3. 无论把 account 配置放在 create **之前**还是之后，`session/create` 与 `session/read` 的 `settings.model.available` 恒为 `[]`；
+4. `session/setModel` 逐个试内置的 4 个模型，全部报 `-32603 Provider Registry 中不存在 Model: [object Object]` —— registry 里确实一个模型都没有；
+5. 换成「同家族 10 个套餐一起标 entitled」也一样。
+
+源码层面能对上：快照设置由 `rDt(context, {modelAvailability})` 生成，`modelAvailability === "current"` 时只返回**当前选中模型**那一条（没选就是空数组），而 `session/read` 把 `"current"` 写死了；`session/create` 走全量分支 `e.listModels()`，但它依赖的 registry 在裸跑下没有被桌面 Host 的 provider 流水线填充（模板里 `account:*` 全是 `entitled:false`，Host 侧还要换取 Project Token / 账号连接态）。
+
+结论：**裸跑 app-server 拿不到账号级模型清单**。想拿到只能复刻桌面 Host 的整条 provider 流水线，成本远大于收益——内置 4 个模型已经覆盖了全部 `account:*` 套餐的可选集。
+
+### 15.3 AgentHub 的做法
+
+`src-tauri/src/agent_models.rs::zcode` 直接读安装包的 `builtinProviderModelRules`，按 `modelId` 去重给出 4 个模型（毫秒级、不需要登录、不消耗额度）；角色里仍然可以手填 `providerId/modelId` 覆盖默认 provider。若将来 CLI 版本把账号可用集暴露出来（例如 `provider/*` 多一个读取方法），再回来把这里换成动态读取即可，接口形状见 `ModelList`。
+
+### 15.4 思考强度（角色 / 派活的 model 字符串）
+
+强度编码在 model 字符串里：`<模型id>@<强度>`，模型 id 可为空（`@high` = 执行端默认模型 + 指定强度）；在**最后一个** `@` 处切，不新增数据库列和消息字段。执行端（`runner.rs`）按 agent 翻译，取值走白名单，不在表里的一律忽略并用默认，不报错：
+
+| agent | 取值 | 翻译成 |
+|---|---|---|
+| Claude | `low` `medium` `high` `xhigh` `max` | `--model <m> --effort <e>` |
+| Codex | `low` `medium` `high` `xhigh` `max`（`ultra` 不提供） | `-c model="<m>" -c model_reasoning_effort="<e>"` |
+| ZCode | `disabled` `enabled` `low` `high` `max` | `session/send` 的 `modelSelection.options.reasoningLevel` |
+| WorkBuddy / CodeBuddy / 豆包 | 不支持 | 只取 model 部分，`@强度` 被剥掉 |
+
+ZCode 不指定强度时取模型默认：`GLM-5-Turbo`（大小写不敏感）为 `enabled`，其余为 `high`（以前写死 `high`，对 Turbo 不合法）。前端静态表（`src/lib/efforts.ts`）：`GLM-5.2` 给 `disabled/high/max`，`GLM-5-Turbo` 给 `disabled/enabled`，其它（含 5.3 系列）只给 `high`。**GLM-5.3 能否用 `max` / `low` 未实测。**
+
