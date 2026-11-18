@@ -100,9 +100,7 @@ impl ReadSync {
         for s in sessions {
             let Some(key) = s["id"].as_str().and_then(|id|id.strip_prefix("codex:")) else { continue; };
             if !runner::valid_key(key) || s["acked"] != false || !matches!(s["state"].as_str(),Some("done"|"aborted")) { continue; }
-            let root = home.join(".codex");
-            let path = runner::find_codex_rollout(&root.join("sessions"),key)
-                .or_else(||runner::find_codex_rollout(&root.join("archived_sessions"),key));
+            let path = runner::codex_rollout(home, key);
             let latest = path.filter(|p|desktop_session(p,key)).and_then(|p|runner::read_tail(&p,256*1024).ok()).and_then(|text| {
                 codex::FileState::new(Some(key.to_owned())).feed(&text.lines().collect::<Vec<_>>(),true,&claude::now_iso()).pop()
             });

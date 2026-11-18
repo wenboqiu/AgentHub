@@ -31,7 +31,11 @@ pub fn parse_line(line: &str) -> Option<Line> {
     let p = v.get("payload")?;
     match v.get("type")?.as_str()? {
         "session_meta" => Some(Line::Meta {
-            session_id: p.get("session_id").or_else(|| p.get("id")).and_then(|s| s.as_str()).map(String::from),
+            // Codex Desktop 的 fork/子会话里 session_id 指向父线程，payload.id 才是本线程 id：
+            // 文件名、session_index.jsonl、state_5.sqlite 用的也都是 payload.id。
+            // 早先优先取 session_id 会把同一父线程下的所有子会话折叠成一条，
+            // 之后按这个 key 找 rollout、按这个 id 查显示名都会错位。
+            session_id: p.get("id").or_else(|| p.get("session_id")).and_then(|s| s.as_str()).map(String::from),
             cwd: p.get("cwd").and_then(|s| s.as_str()).unwrap_or("").to_string(),
         }),
         "event_msg" => match p.get("type")?.as_str()? {
@@ -293,6 +297,20 @@ mod tests {
         }
         assert!(matches!(parse_line(ABORT), Some(Line::Status { state: "aborted", .. })));
         assert_eq!(parse_line(r#"{"type":"token_count","payload":{}}"#), None);
+    }
+
+    #[test]
+    fn forked_session_uses_thread_id_not_parent_session_id() {
+        // Codex Desktop 0.169+：fork 出来的子线程里 session_id 是父线程 id，
+        // payload.id / 文件名 / session_index.jsonl / state_5.sqlite 才是本线程 id。
+        let fork = r#"{"timestamp":"2026-11-18T10:00:00.000Z","type":"session_meta","payload":{"id":"child-1","session_id":"parent-1","parent_thread_id":"parent-1","cwd":"D:/Work","originator":"Codex Desktop"}}"#;
+        assert_eq!(parse_line(fork), Some(Line::Meta { session_id: Some("child-1".into()), cwd: "D:/Work".into() }));
+        // 旧格式只有 session_id 时仍能登记
+        assert_eq!(parse_line(META), Some(Line::Meta { session_id: Some("abc-123".into()), cwd: "D:\\Work2\\Demo".into() }));
+        let mut st = FileState::new(Some("child-1".into()));
+        let evs = st.feed(&[fork, DONE], true, "now");
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].session_id, "child-1");
     }
 
     #[test]

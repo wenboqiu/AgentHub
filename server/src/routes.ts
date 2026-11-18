@@ -1361,8 +1361,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const result = await waiting
     if (!result) return reply.code(504).send({ error: '电脑端没有及时返回历史记录' })
     if (result.error) return reply.code(502).send({ error: result.error })
-    const items = result.messages
-      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
+    const items = (result.messages ?? [])
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string' && m.text.trim() !== '')
       .map(m => ({
         role: m.role,
         text: m.text,
@@ -1371,6 +1371,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         // 原生日志的真实时间；老电脑端不发这个字段，服务端会退回复用库里已有时间
         at: typeof m.at === 'string' && !Number.isNaN(Date.parse(m.at)) ? m.at : undefined,
       }))
+    // 电脑端返回空列表时绝不能整体替换：replaceHistory 先删后插，会把库里已有的消息清空。
+    // 老版本桌面端仍可能返回空数组，服务端这里兜住，明确报错并保留原记录。
+    if (!items.length) return reply.code(502).send({ error: '电脑端没有读到对话内容，已保留原有记录' })
     const messages = await serial(() => replaceHistory(pool, userId, id, items))
     return { messages }
   })

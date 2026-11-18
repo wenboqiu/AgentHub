@@ -799,6 +799,9 @@ pub fn find_codex_rollout(sessions: &Path, key: &str) -> Option<PathBuf> {
     }
     let suffix = format!("-{key}.jsonl");
     let mut stack = vec![sessions.to_path_buf()];
+    // 同一个 id 可能有多份（归档后重开、迁移残留）；取最新修改的那份，
+    // 不能靠 read_dir 的顺序碰运气。
+    let mut best: Option<(SystemTime, PathBuf)> = None;
     while let Some(dir) = stack.pop() {
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for e in rd.flatten() {
@@ -806,11 +809,30 @@ pub fn find_codex_rollout(sessions: &Path, key: &str) -> Option<PathBuf> {
             if p.is_dir() {
                 stack.push(p);
             } else if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("rollout-") && n.ends_with(&suffix)) {
-                return Some(p);
+                let t = e.metadata().and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+                    best = Some((t, p));
+                }
             }
         }
     }
-    None
+    best.map(|(_, p)| p)
+}
+
+/// 按会话 id 找 Codex rollout：活跃目录 + 归档目录，取最新的一份。
+/// 历史读取、状态核对、已读回执共用这一处，避免只有部分链路认识归档目录。
+pub fn codex_rollout(home: &Path, key: &str) -> Option<PathBuf> {
+    if !valid_key(key) {
+        return None;
+    }
+    let root = home.join(".codex");
+    let active = find_codex_rollout(&root.join("sessions"), key);
+    let archived = find_codex_rollout(&root.join("archived_sessions"), key);
+    let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+    match (active, archived) {
+        (Some(a), Some(b)) => Some(if stamp(&a) >= stamp(&b) { a } else { b }),
+        (a, b) => a.or(b),
+    }
 }
 
 /// 读文件末尾 max_bytes；不是从头读时丢掉第一行（可能被截断）
@@ -929,9 +951,13 @@ pub fn read_history(agent: &str, key: &str, cwd: &str) -> Result<Vec<crate::mess
             Ok(crate::message_history::parse("claude", &text, HISTORY_COUNT))
         }
         "codex" => {
-            let p = find_codex_rollout(&home.join(".codex").join("sessions"), key).ok_or("没找到这个会话的本地记录")?;
-            let text = read_tail(&p, 4 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
-            Ok(crate::message_history::parse("codex", &text, HISTORY_COUNT))
+            let p = codex_rollout(&home, key).ok_or("没找到这个会话的本地记录")?;
+            // 长会话的 rollout 会超过 4 MiB；只读尾部时若消息不足 50 条会看起来像"读不到内容"。
+            let text = read_tail(&p, 16 * 1024 * 1024).map_err(|e| format!("读取失败：{e}"))?;
+            let list = crate::message_history::parse("codex", &text, HISTORY_COUNT);
+            // 空列表绝对不能当成功返回：服务端 replaceHistory 会先删后插，把已有消息清空。
+            if list.is_empty() { return Err("本机记录里没有可读取的对话内容".into()); }
+            Ok(list)
         }
         "zcode" => crate::zcode_exec::history(key, HISTORY_COUNT).ok_or("没找到这个会话的本地记录".into()),
         // WorkBuddy 只读不聊，但 transcript 里正文齐全：按 sessionId 在各工作区目录下找 {key}.jsonl
@@ -2888,6 +2914,25 @@ mod tests {
         std::fs::write(&f, "line1\nline2\nline3\n").unwrap();
         assert_eq!(read_tail(&f, 1000).unwrap(), "line1\nline2\nline3\n");
         assert_eq!(read_tail(&f, 8).unwrap(), "line3\n");
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn codex_rollout_covers_archived_sessions_and_rejects_bad_keys() {
+        let d = tmpdir("cxarch");
+        let live = d.join(".codex/sessions/2026/11/18");
+        let archived = d.join(".codex/archived_sessions/2026/11/18");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&archived).unwrap();
+        let old = archived.join("rollout-old-sess-1.jsonl");
+        std::fs::write(&old, "old").unwrap();
+        assert_eq!(codex_rollout(&d, "sess-1"), Some(old.clone()));
+        let new = live.join("rollout-new-sess-1.jsonl");
+        std::fs::write(&new, "new").unwrap();
+        // 活跃目录里的新文件不早于归档副本，应优先命中
+        assert_eq!(codex_rollout(&d, "sess-1"), Some(new.clone()));
+        assert!(codex_rollout(&d, "missing").is_none());
+        assert!(codex_rollout(&d, "../evil").is_none());
         let _ = std::fs::remove_dir_all(d);
     }
 
