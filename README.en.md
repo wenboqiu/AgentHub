@@ -27,7 +27,7 @@ AgentHub is a workbench for keeping tabs on many AI coding sessions at once: a d
 
 > Screenshots show the current UI rendered with fake data (local preview harness + headless browser); no real projects or sessions included.
 
-Current version **v0.17.0**. Release notes live one file per version in `docs/releases/` (Chinese): [0.17.0](docs/releases/0.17.0.md), [0.16.0](docs/releases/0.16.0.md), [0.15.3](docs/releases/0.15.3.md)… newest first, each with upgrade and verification notes.
+Current version **v0.18.0**. Release notes live one file per version in `docs/releases/` (Chinese): [0.18.0](docs/releases/0.18.0.md), [0.17.0](docs/releases/0.17.0.md), [0.16.0](docs/releases/0.16.0.md)… newest first, each with upgrade and verification notes.
 
 ## Development
 
