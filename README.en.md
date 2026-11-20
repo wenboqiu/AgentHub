@@ -15,13 +15,15 @@ AgentHub is a workbench for keeping tabs on many AI coding sessions at once: a d
 
 ## Screenshots
 
-| Desktop · session overview (pending / running bubbles grouped by project) |
-|---|
-| ![Desktop session overview](docs/screenshots/desktop-sessions-graph.png) |
-| **Desktop · session detail: approve permissions in-app; copy / rate / read aloud / branch any reply** |
-| ![Desktop session detail](docs/screenshots/desktop-session-detail.png) |
-| **Android · remote control: read the chat and approve (allow / deny)** |
-| ![Android approval](docs/screenshots/mobile-session-approval.png) |
+| Desktop · session overview (pending / running bubbles grouped by project) | Desktop · session detail: approve permissions in-app; copy / rate / read aloud / branch any reply |
+|---|---|
+| ![Desktop session overview](docs/screenshots/desktop-sessions-graph.png) | ![Desktop session detail](docs/screenshots/desktop-session-detail.png) |
+| **Android · remote control: read the chat and approve (allow / deny)** | **Desktop · tasks: dispatch, queue, review, due reminders** |
+| ![Android approval](docs/screenshots/mobile-session-approval.png) | ![Desktop tasks](docs/screenshots/desktop-tasks.png) |
+| **Desktop · goals: group tasks and track overall progress** | **Desktop · calendar: day / week timeline of executions** |
+| ![Desktop goals](docs/screenshots/desktop-goals.png) | ![Desktop calendar](docs/screenshots/desktop-calendar.png) |
+| **Desktop · stats: session, run and task trends** | |
+| ![Desktop stats](docs/screenshots/desktop-stats.png) | |
 
 > Screenshots show the current UI rendered with fake data (local preview harness + headless browser); no real projects or sessions included.
 

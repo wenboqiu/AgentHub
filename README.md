@@ -15,13 +15,15 @@ AgentHub 是一个集中监控多个 AI 编程会话的工作台：桌面端（T
 
 ## 界面预览
 
-| 桌面端 · 会话总览（待处理 / 运行中按项目分气泡） |
-|---|
-| ![桌面端会话总览](docs/screenshots/desktop-sessions-graph.png) |
-| **桌面端 · 会话详情：等授权就在 App 里批，回复可复制 / 评价 / 朗读 / 分支** |
-| ![桌面端会话详情](docs/screenshots/desktop-session-detail.png) |
-| **手机端 · 远程控制：看对话、批授权（允许 / 拒绝）** |
-| ![手机端批授权](docs/screenshots/mobile-session-approval.png) |
+| 桌面端 · 会话总览（待处理 / 运行中按项目分气泡） | 桌面端 · 会话详情：等授权就在 App 里批，回复可复制 / 评价 / 朗读 / 分支 |
+|---|---|
+| ![桌面端会话总览](docs/screenshots/desktop-sessions-graph.png) | ![桌面端会话详情](docs/screenshots/desktop-session-detail.png) |
+| **手机端 · 远程控制：看对话、批授权（允许 / 拒绝）** | **桌面端 · 任务：发单、排队、验收、到点提醒** |
+| ![手机端批授权](docs/screenshots/mobile-session-approval.png) | ![桌面端任务](docs/screenshots/desktop-tasks.png) |
+| **桌面端 · 目标：汇集任务看整体进度** | **桌面端 · 日历：按日 / 周回看执行时间线** |
+| ![桌面端目标](docs/screenshots/desktop-goals.png) | ![桌面端日历](docs/screenshots/desktop-calendar.png) |
+| **桌面端 · 统计：会话、运行与任务的数量趋势** | |
+| ![桌面端统计](docs/screenshots/desktop-stats.png) | |
 
 > 截图为当前版本界面、假数据渲染（本地预览工程 + 无头浏览器），不含真实项目与会话内容。
 
