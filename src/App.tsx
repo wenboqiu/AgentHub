@@ -22,6 +22,7 @@ import { ago } from "./lib/time";
 import { isInternalSession } from "./lib/internal";
 import StatsView from "./StatsView";
 import { loadAvatarPrefs, setAvatarPrefs } from "./lib/avatars";
+import { t, useLang } from "./lib/i18n";
 // proposal 的 id 是会话 id：任务单挂在会话下，详情页一次看全这条会话的单子
 type Detail = {kind:"session";id:string} | {kind:"proposal";id:string} | {kind:"task"|"goal";id:number} | null;
 type Tab = "sessions"|"tasks"|"goals"|"calendar"|"stats";
@@ -30,29 +31,29 @@ const TAB_LABEL = { sessions:"会话", tasks:"任务", goals:"目标", calendar:
 const ALERT_LABEL: Record<string, string> = { done: "已完成", waiting: "等待授权", aborted: "已中断" };
 
 function sinceText(s: Session, now: number): string {
-  const t = ago(s.stateSince, now);
+  const a = ago(s.stateSince, now);
   switch (s.state) {
     case "done":
-      return `${t}完成`;
+      return t("{ago}完成", { ago: a });
     case "waiting":
-      return `${t}开始等待授权`;
+      return t("{ago}开始等待授权", { ago: a });
     case "aborted":
-      return `${t}中断`;
+      return t("{ago}中断", { ago: a });
     case "running":
-      return `${t}开始运行`;
+      return t("{ago}开始运行", { ago: a });
     case "ended":
-      return `${t}结束`;
+      return t("{ago}结束", { ago: a });
     case "unknown":
-      return "本机记录缺失，状态未知";
+      return t("本机记录缺失，状态未知");
     default:
-      return `${t}登记`;
+      return t("{ago}登记", { ago: a });
   }
 }
 
 // 通知都带上「点了要跳到哪」，点击后由 onNotificationClick 里统一处理
 function notifyDesktop(s: Session) {
   return pushNotification(
-    `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${ALERT_LABEL[s.state] ?? ""}`.trim(),
+    `${s.project || t("会话")} · ${AGENT_LABEL[s.agent]} ${t(ALERT_LABEL[s.state] ?? "")}`.trim(),
     (s.summary || s.title).slice(0, 80),
     { kind: "session", id: s.id },
   );
@@ -61,17 +62,17 @@ function notifyDesktop(s: Session) {
 /** Watchdog 升级提醒：只提醒不干预 */
 function notifyWatchdog(issue: "stall" | "abort-spree", s: Session) {
   return pushNotification(
-    `${s.project || "会话"} · ${AGENT_LABEL[s.agent]} ${issue === "stall" ? "可能卡住了" : "反复失败"}`,
+    `${s.project || t("会话")} · ${AGENT_LABEL[s.agent]} ${issue === "stall" ? t("可能卡住了") : t("反复失败")}`,
     issue === "stall"
-      ? `运行中超过 45 分钟没有新事件，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`
-      : `短时间内多次中断，点开看看要不要处理。${(s.summary || s.title).slice(0, 50)}`,
+      ? t("运行中超过 45 分钟没有新事件，点开看看要不要处理。{brief}", { brief: (s.summary || s.title).slice(0, 50) })
+      : t("短时间内多次中断，点开看看要不要处理。{brief}", { brief: (s.summary || s.title).slice(0, 50) }),
     { kind: "session", id: s.id },
   );
 }
 
 function notifyReminder(r: Reminder) {
   return pushNotification(
-    `${r.entityType === "task" ? "任务" : "目标"} · ${r.kind === "start" ? "开始时间到了" : "已到截止时间"}`,
+    `${r.entityType === "task" ? t("任务") : t("目标")} · ${r.kind === "start" ? t("开始时间到了") : t("已到截止时间")}`,
     r.title.slice(0, 100),
     { kind: r.entityType, id: r.entityId },
   );
@@ -79,7 +80,7 @@ function notifyReminder(r: Reminder) {
 
 function notifyApproval(a: Approval) {
   return pushNotification(
-    `${a.project || "会话"} · 请求授权`,
+    `${a.project || t("会话")} · ${t("请求授权")}`,
     `${a.tool} ${a.detail}`.slice(0, 80),
     { kind: "session", id: a.sessionId },
   );
@@ -113,13 +114,13 @@ function Row({
     <li className={`row clickable ${pending ? "pending" : ""} st-${s.state}`} onClick={onOpen}>
       <div className="row-head">
         <span className={`tag ${s.agent}`}>{AGENT_LABEL[s.agent]}</span>
-        <button className="session-open" onClick={stop(onOpen)}>{s.project || "(未知项目)"}<span className="sr-only">：{s.title || "打开会话"}</span></button>
+        <button className="session-open" onClick={stop(onOpen)}>{s.project || t("（未知项目）")}<span className="sr-only">{t("：{title}", { title: s.title || t("打开会话") })}</span></button>
         <span className="machine">{s.machine}</span>
-        {needsApproval ? <span className="badge">待授权</span> : isPending(s) && <span className="badge">{ALERT_LABEL[s.state]}</span>}
+        {needsApproval ? <span className="badge">{t("待授权")}</span> : isPending(s) && <span className="badge">{t(ALERT_LABEL[s.state] ?? "")}</span>}
       </div>
       {s.title && <div className="title">{s.title}</div>}
       {s.summary && (
-        <button className={`summary ${open ? "open" : ""}`} onClick={stop(() => setOpen(!open))} aria-expanded={open} title="点击展开/收起">
+        <button className={`summary ${open ? "open" : ""}`} onClick={stop(() => setOpen(!open))} aria-expanded={open} title={t("点击展开/收起")}>
           <Markdown text={s.summary} compact />
         </button>
       )}
@@ -128,12 +129,12 @@ function Row({
         <span className="actions">
           {canFocus && (
             <button className="link" onClick={stop(onFocus)}>
-              跳转
+              {t("跳转")}
             </button>
           )}
           {isPending(s) && (
             <button className="link" onClick={stop(onAck)}>
-              标为已处理
+              {t("标为已处理")}
             </button>
           )}
         </span>
@@ -143,6 +144,7 @@ function Row({
 }
 
 export default function App() {
+  useLang(); // 语言变化时整棵树重渲染，t() 才会返回新语言
   const [cfg, setCfg] = useState<Config | null>(null);
   const [sessions, setSessions] = useState<Map<string, Session>>(new Map());
   const [conn, setConn] = useState<ConnState>("closed");
@@ -505,7 +507,7 @@ export default function App() {
 
   if (openId && api) {
     return (
-      <ErrorBoundary label="会话" resetKey={openId} onBack={closeSession}>
+      <ErrorBoundary label={t("会话")} resetKey={openId} onBack={closeSession}>
       <SessionView
         sessionId={openId}
         session={sessions.get(openId)}
@@ -539,15 +541,15 @@ export default function App() {
     }
     if(detail.kind === "task") {
       const task=tasks.get(detail.id);
-      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} boardEntry={board?.entries.find(e=>e.taskId===task.id)} approvals={[...approvals.values()].filter(a=>task.sessionIds.includes(a.sessionId))} roles={roles} projects={projects} machineTick={machineTick} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个任务已经不存在了</p></div>;
+      return task ? <TaskView key={task.id} task={task} goals={goalList} sessions={list} agents={agents} api={api} boardEntry={board?.entries.find(e=>e.taskId===task.id)} approvals={[...approvals.values()].filter(a=>task.sessionIds.includes(a.sessionId))} roles={roles} projects={projects} machineTick={machineTick} digest={digests.get(task.id)} artifact={artifacts.get(task.id)} onArtifact={a=>setArtifacts(m=>new Map(m).set(task.id,a))} onBack={closeSession} onSession={openSession} onSaved={saveTask} onDeleted={()=>{setTasks(m=>{const n=new Map(m);n.delete(task.id);return n;});closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>{t("返回")}</button></header><p className="empty">{t("这个任务已经不存在了")}</p></div>;
     }
     if(detail.kind === "goal") {
       const goal=goals.get(detail.id);
-      return goal ? <GoalView key={goal.id} goal={goal} tasks={taskList} api={api} onBack={closeSession} onTask={openTask} onSaved={saveGoal} onTaskSaved={saveTask} onDeleted={()=>{setGoals(m=>{const n=new Map(m);n.delete(goal.id);return n;});setTasks(m=>new Map([...m].map(([id,t])=>[id,t.goalId===goal.id ? {...t,goalId:null} : t])));closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>返回</button></header><p className="empty">这个目标已经不存在了</p></div>;
+      return goal ? <GoalView key={goal.id} goal={goal} tasks={taskList} api={api} onBack={closeSession} onTask={openTask} onSaved={saveGoal} onTaskSaved={saveTask} onDeleted={()=>{setGoals(m=>{const n=new Map(m);n.delete(goal.id);return n;});setTasks(m=>new Map([...m].map(([id,t])=>[id,t.goalId===goal.id ? {...t,goalId:null} : t])));closeSession();}}/> : <div className="app"><header><button onClick={closeSession}>{t("返回")}</button></header><p className="empty">{t("这个目标已经不存在了")}</p></div>;
     }
   }
 
-  const connText = { open: "已连接", connecting: "连接中…", closed: api ? "已断开，重连中" : "未配置服务器" }[conn];
+  const connText = { open: t("已连接"), connecting: t("连接中…"), closed: api ? t("已断开，重连中") : t("未配置服务器") }[conn];
   // 派单 tab 已下线；看板并入「任务」页，派活统一从那里走
   const tabs = ["sessions","tasks","goals","calendar","stats"] as const;
   const renderList = (items: Session[]) => (
@@ -572,15 +574,15 @@ export default function App() {
       <header>
         <div className="brand">
           <h1>AgentHub</h1>
-          <span className="version" title={`版本 ${__APP_VERSION__}`}>v{__APP_VERSION__}</span>
+          <span className="version" title={t("版本 {v}", { v: __APP_VERSION__ })}>v{__APP_VERSION__}</span>
         </div>
         <span className={`conn ${conn}`}>
           <i /> {connText}
         </span>
         <span className="spacer" />
-        <nav className="tabs" aria-label="主要功能">{tabs.map(t=><button key={t} aria-current={tab===t ? "page" : undefined} className={tab===t ? "active" : ""} aria-label={TAB_LABEL[t]} onClick={()=>{setTab(t);window.history.replaceState({agenthub:true,detail:null,tab:t},"");}}><Icon name={t}/><span className="label">{TAB_LABEL[t]}</span>{t==="tasks" && inboxCount > 0 && <span className="count" aria-label={`${inboxCount} 件等你处理`}>{inboxCount}</span>}</button>)}</nav>
+        <nav className="tabs" aria-label={t("主要功能")}>{tabs.map(tb=><button key={tb} aria-current={tab===tb ? "page" : undefined} className={tab===tb ? "active" : ""} aria-label={t(TAB_LABEL[tb])} onClick={()=>{setTab(tb);window.history.replaceState({agenthub:true,detail:null,tab:tb},"");}}><Icon name={tb}/><span className="label">{t(TAB_LABEL[tb])}</span>{tb==="tasks" && inboxCount > 0 && <span className="count" aria-label={t("{n} 件等你处理", { n: inboxCount })}>{inboxCount}</span>}</button>)}</nav>
         <span className="spacer" />
-        <button className="icon-button" aria-label="设置" title="设置" onClick={() => setView("settings")}><Icon name="settings" /></button>
+        <button className="icon-button" aria-label={t("设置")} title={t("设置")} onClick={() => setView("settings")}><Icon name="settings" /></button>
       </header>
       {toast && <div className="toast" role="status">{toast}</div>}
       <main>
@@ -589,39 +591,39 @@ export default function App() {
         <div hidden={tab!=="calendar"}>{api && <CalendarView api={api} sessions={list} tasks={taskList} goals={goalList} runSignal={runSignal} onOpenSession={openSession} onOpenTask={openTask} onOpenGoal={openGoal}/>}</div>
         <div hidden={tab!=="stats"}>{api && <StatsView api={api} active={tab==="stats"}/>}</div>
         <div hidden={tab!=="sessions"}>
-        <div className="page-heading"><div><p className="eyebrow">工作空间</p><h2>会话</h2><p>关注运行进展，及时处理需要你的事项。</p></div>{pending.length > 0 && <button onClick={ackAll}>全部标为已处理</button>}</div>
+        <div className="page-heading"><div><p className="eyebrow">{t("工作空间")}</p><h2>{t("会话")}</h2><p>{t("关注运行进展，及时处理需要你的事项。")}</p></div>{pending.length > 0 && <button onClick={ackAll}>{t("全部标为已处理")}</button>}</div>
         {cfg.graphMode ? (
           <section>
             <h2>
-              待处理 {pending.length > 0 && <span className="count">{pending.length}</span>}
-              {running.length > 0 && <span className="count dim">{running.length} 运行中</span>}
+              {t("待处理")} {pending.length > 0 && <span className="count">{pending.length}</span>}
+              {running.length > 0 && <span className="count dim">{t("{n} 运行中", { n: running.length })}</span>}
             </h2>
             {pending.length + running.length > 0 ? (
               <PendingGraph sessions={[...pending, ...running]} handled={others} approvals={approvalSessions} expanded={graphProject} onExpand={setGraphProject} onOpen={openSession} />
             ) : (
-              <p className="empty">没有待处理或运行中的会话</p>
+              <p className="empty">{t("没有待处理或运行中的会话")}</p>
             )}
           </section>
         ) : (
           <>
             <section>
-              <h2>待处理 {pending.length > 0 && <span className="count">{pending.length}</span>}</h2>
-              {pending.length ? renderList(pending) : <p className="empty">没有待处理的会话</p>}
+              <h2>{t("待处理")} {pending.length > 0 && <span className="count">{pending.length}</span>}</h2>
+              {pending.length ? renderList(pending) : <p className="empty">{t("没有待处理的会话")}</p>}
             </section>
             <section>
-              <h2>运行中 {running.length > 0 && <span className="count dim">{running.length}</span>}</h2>
-              {running.length ? renderList(running) : <p className="empty">没有运行中的会话</p>}
+              <h2>{t("运行中")} {running.length > 0 && <span className="count dim">{running.length}</span>}</h2>
+              {running.length ? renderList(running) : <p className="empty">{t("没有运行中的会话")}</p>}
             </section>
             <details>
-              <summary>其它（{others.length}）</summary>
-              {others.length ? renderList(others) : <p className="empty">空</p>}
+              <summary>{t("其它（{n}）", { n: others.length })}</summary>
+              {others.length ? renderList(others) : <p className="empty">{t("空")}</p>}
             </details>
           </>
         )}
         {internalSessions.length > 0 && (
           <details>
-            <summary>内部会话（{internalSessions.length}）</summary>
-            <p className="hint">AgentHub 自己开的：角色助手造角色、意见细化写任务单。点开能看到发给 agent 的指令原文。</p>
+            <summary>{t("内部会话（{n}）", { n: internalSessions.length })}</summary>
+            <p className="hint">{t("AgentHub 自己开的：角色助手造角色、意见细化写任务单。点开能看到发给 agent 的指令原文。")}</p>
             {renderList(internalSessions)}
           </details>
         )}
@@ -629,11 +631,11 @@ export default function App() {
           const open = (e.currentTarget as HTMLDetailsElement).open;
           if (open && archive === null && api) void api.sessionsAll().then(setArchive).catch(() => setArchive([]));
         }}>
-          <summary>历史会话{archive ? `（${archive.filter(s => !sessions.has(s.id)).length}）` : ""}</summary>
-          <p className="hint">已结束或超过 24 小时的会话；库里保留最近 30 天，点开就能看对话正文。</p>
-          {archive === null ? <p className="dim">展开后读取…</p> : (() => {
+          <summary>{t("历史会话")}{archive ? t("（{n}）", { n: archive.filter(s => !sessions.has(s.id)).length }) : ""}</summary>
+          <p className="hint">{t("已结束或超过 24 小时的会话；库里保留最近 30 天，点开就能看对话正文。")}</p>
+          {archive === null ? <p className="dim">{t("展开后读取…")}</p> : (() => {
             const old = archive.filter(s => !sessions.has(s.id));
-            return old.length ? renderList(old) : <p className="empty">没有更早的会话</p>;
+            return old.length ? renderList(old) : <p className="empty">{t("没有更早的会话")}</p>;
           })()}
         </details>
         </div>

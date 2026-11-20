@@ -3,6 +3,7 @@ import { AGENT_LABEL } from "./lib/agents";
 import type { Session } from "./lib/api";
 import { ago } from "./lib/time";
 import { isInternalSession, sessionPreview } from "./lib/internal";
+import { t } from "./lib/i18n";
 import Icon from "./Icon";
 
 type Props = {
@@ -139,12 +140,12 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
       className={`sidebar-resizer${dragging ? " dragging" : ""}`}
       role="separator"
       aria-orientation="vertical"
-      aria-label="调整会话列表宽度"
+      aria-label={t("调整会话列表宽度")}
       aria-valuenow={width}
       aria-valuemin={MIN_W}
       aria-valuemax={maxWidth()}
       tabIndex={0}
-      title="拖动调整宽度，双击恢复默认"
+      title={t("拖动调整宽度，双击恢复默认")}
       onPointerDown={(e) => {
         if (e.pointerType === "mouse" && e.button !== 0) return;
         e.preventDefault();
@@ -190,18 +191,18 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
         ref={navRef}
         className={`sidebar${drawer ? " sidebar-drawer" : ""}`}
         style={drawer ? undefined : { width }}
-        aria-label="会话列表"
-        aria-modal={drawer || undefined}
-        role={drawer ? "dialog" : undefined}
-      >
+      aria-label={t("会话列表")}
+      aria-modal={drawer || undefined}
+      role={drawer ? "dialog" : undefined}
+    >
       <div className="sidebar-head">
-        <span>会话 <span className="count dim">{sessions.length}</span></span>
-        <button className="icon-button sidebar-toggle" aria-label={drawer ? "关闭会话列表" : "收起会话列表"} title={drawer ? "关闭会话列表" : "收起会话列表"} onClick={onCollapse}>
+        <span>{t("会话")} <span className="count dim">{sessions.length}</span></span>
+        <button className="icon-button sidebar-toggle" aria-label={drawer ? t("关闭会话列表") : t("收起会话列表")} title={drawer ? t("关闭会话列表") : t("收起会话列表")} onClick={onCollapse}>
           <Icon name="chevron" />
         </button>
       </div>
 
-      {sections.length === 0 && <p className="empty">还没有会话</p>}
+      {sections.length === 0 && <p className="empty">{t("还没有会话")}</p>}
 
       {sections.map((g) => {
         const open = isOpen(g);
@@ -214,9 +215,9 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
               onClick={() => setOpenMap((m) => ({ ...m, [g.key]: !open }))}
             >
               <Icon name="chevron" />
-              <span className="sidebar-sec-label">{g.label}</span>
+              <span className="sidebar-sec-label">{t(g.label)}</span>
               <span className={`sidebar-sec-count${g.key === "pending" ? " alert" : ""}`}>{g.items.length}</span>
-              <span className="sidebar-sec-hint">{g.hint}</span>
+              <span className="sidebar-sec-hint">{t(g.hint)}</span>
             </button>
             {open && (
               <ul className="sidebar-list">
@@ -233,9 +234,9 @@ export default function SessionSidebar({ sessions, currentId, attention, now, on
                       >
                         <span className="si-top">
                           <span className={`si-dot ${STATE_DOT[s.state] ?? "dim"}`} aria-hidden="true" />
-                          <span className="si-name">{s.project || "(未知项目)"}</span>
-                          {needsAttention && <span className="si-badge">待处理</span>}
-                          {s.state === "running" && (s.bgTasks ?? 0) > 0 && <span className="si-badge dim">{s.bgTasks} 个后台任务</span>}
+                          <span className="si-name">{s.project || t("（未知项目）")}</span>
+                          {needsAttention && <span className="si-badge">{t("待处理")}</span>}
+                          {s.state === "running" && (s.bgTasks ?? 0) > 0 && <span className="si-badge dim">{t("{n} 个后台任务", { n: s.bgTasks ?? 0 })}</span>}
                           <span className="si-time">{ago(s.updatedAt, now)}</span>
                         </span>
                         {preview && <span className="si-sub">{preview}</span>}

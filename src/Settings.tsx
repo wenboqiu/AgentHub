@@ -10,6 +10,7 @@ import AvatarSettings from "./AvatarSettings";
 import AgentAvatar from "./AgentAvatar";
 import { AGENT_LABEL } from "./lib/agents";
 import { desktop, isAndroid, isDesktop, native, saveConfig, type CollectorInfo, type Config, type HooksStatus, type RemoteInfo } from "./lib/platform";
+import { t, useLang, setLang, LANG_LABEL, type Lang } from "./lib/i18n";
 
 export const DEFAULT_SERVER = "https://agenthub.wondergarden.top";
 
@@ -95,6 +96,7 @@ const PAGE_TITLE: Record<Exclude<Page, "root" | "role" | "project">, string> = {
 };
 
 export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) {
+  const lang = useLang();
   const loggedIn = !!cfg.token.trim();
   const [page, setPage] = useState<Page>("root");
   // 角色详情页的对象：{ role: null } = 新建；角色本身放在这里，标题和「保存」都要用
@@ -138,10 +140,10 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     try {
       await saveConfig(c);
       onSaved(c, { keepOpen: true });
-      setMsg(on ? "对话页已改为气泡图" : "对话页已改为列表");
+      setMsg(on ? t("对话页已改为气泡图") : t("对话页已改为列表"));
       window.setTimeout(() => setMsg(""), 2000);
     } catch (e) {
-      setMsg(`保存失败：${String(e)}`);
+      setMsg(t("保存失败：{e}", { e: String(e) }));
     }
   };
 
@@ -201,18 +203,18 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     if (!api) return;
     try {
       setNs(await api.saveNotifySettings(next));
-      setNsMsg("已保存");
+      setNsMsg(t("已保存"));
       window.setTimeout(() => setNsMsg(""), 2000);
     } catch (e) {
-      setNsMsg(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+      setNsMsg(t("保存失败：{e}", { e: e instanceof Error ? e.message : String(e) }));
     }
   };
 
   const login = async () => {
     const url = server.trim().replace(/\/+$/, "");
-    if (!url || !email.trim() || !password) return setMsg("请填好服务器地址、邮箱和密码");
+    if (!url || !email.trim() || !password) return setMsg(t("请填好服务器地址、邮箱和密码"));
     setBusy(true);
-    setMsg("登录中…");
+    setMsg(t("登录中…"));
     try {
       const r = await Api.login(url, email, password, deviceName(cfg));
       const c: Config = { ...cfg, serverUrl: url, token: r.token, email: r.email };
@@ -223,7 +225,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       setMsg("");
       onSaved(c);
     } catch (e) {
-      setMsg(`登录失败：${e instanceof Error ? e.message : String(e)}`);
+      setMsg(t("登录失败：{e}", { e: e instanceof Error ? e.message : String(e) }));
     } finally {
       setBusy(false);
     }
@@ -238,7 +240,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       if (isAndroid) native()?.stop();
       onSaved(c);
     } catch (e) {
-      setMsg(`退出失败：${String(e)}`);
+      setMsg(t("退出失败：{e}", { e: String(e) }));
     } finally {
       setBusy(false);
     }
@@ -246,19 +248,19 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
   const changePassword = async () => {
     if (!api) return;
-    if (newPw.length < 8) return setMsg("新密码至少 8 位");
-    if (newPw.length > 200) return setMsg("新密码太长");
-    if (newPw !== newPw2) return setMsg("两次输入的新密码不一致");
+    if (newPw.length < 8) return setMsg(t("新密码至少 8 位"));
+    if (newPw.length > 200) return setMsg(t("新密码太长"));
+    if (newPw !== newPw2) return setMsg(t("两次输入的新密码不一致"));
     setBusy(true);
     try {
       await api.changePassword(oldPw, newPw);
       setOldPw("");
       setNewPw("");
       setNewPw2("");
-      setMsg("密码已修改，其它设备需要重新登录");
+      setMsg(t("密码已修改，其它设备需要重新登录"));
       loadDevices();
     } catch (e) {
-      setMsg(`修改失败：${e instanceof Error ? e.message : String(e)}`);
+      setMsg(t("修改失败：{e}", { e: e instanceof Error ? e.message : String(e) }));
     } finally {
       setBusy(false);
     }
@@ -270,7 +272,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       await api.removeDevice(d.id);
       loadDevices();
     } catch (e) {
-      setMsg(`移除失败：${e instanceof Error ? e.message : String(e)}`);
+      setMsg(t("移除失败：{e}", { e: e instanceof Error ? e.message : String(e) }));
     }
   };
 
@@ -304,17 +306,17 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
       await saveConfig(c);
       // 留在本页，改动「保存」后不用再点回来
       onSaved(c, { keepOpen: true });
-      setMsg("已保存");
+      setMsg(t("已保存"));
       window.setTimeout(() => setMsg(""), 2500);
     } catch (e) {
-      setMsg(`保存失败：${String(e)}`);
+      setMsg(t("保存失败：{e}", { e: String(e) }));
     }
   };
 
   const hookAction = async (install: boolean) => {
     try {
       setHooks(await (install ? desktop.installHooks() : desktop.uninstallHooks()));
-      setMsg(install ? "已安装 Claude Code hook（原 settings.json 已备份为 settings.json.agenthub-bak）" : "已卸载 Claude Code hook");
+      setMsg(install ? t("已安装 Claude Code hook（原 settings.json 已备份为 settings.json.agenthub-bak）") : t("已卸载 Claude Code hook"));
     } catch (e) {
       setMsg(String(e));
     }
@@ -333,7 +335,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
   const toggleBg = (on: boolean) => {
     const n = native();
-    if (!n) return setMsg("当前环境没有 Android 原生桥");
+    if (!n) return setMsg(t("当前环境没有 Android 原生桥"));
     if (on) n.start(cfg.serverUrl.trim().replace(/\/+$/, ""), cfg.token.trim());
     else n.stop();
     window.setTimeout(() => {
@@ -348,7 +350,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     return (
       <div className="app settings">
         <header>
-          <h1>登录 AgentHub</h1>
+          <h1>{t("登录 AgentHub")}</h1>
         </header>
         <main>
           {notice && <p className="msg bad">{notice}</p>}
@@ -359,25 +361,25 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             }}
           >
             <label>
-              服务器地址
+              {t("服务器地址")}
               <input value={server} onChange={(e) => setServer(e.target.value)} placeholder={DEFAULT_SERVER} autoCapitalize="off" autoCorrect="off" />
             </label>
             <label>
-              邮箱
+              {t("邮箱")}
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoCapitalize="off" autoCorrect="off" autoComplete="username" />
             </label>
             <label>
-              密码
+              {t("密码")}
               <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
             </label>
             <div className="btns">
               <button className="primary" type="submit" disabled={busy}>
-                登录
+                {t("登录")}
               </button>
             </div>
           </form>
           {msg && <p className="msg">{msg}</p>}
-          <p className="hint">没有注册入口，账号由管理员创建。</p>
+          <p className="hint">{t("没有注册入口，账号由管理员创建。")}</p>
         </main>
       </div>
     );
@@ -392,21 +394,21 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     }
   })();
   const mutedAgents = ns ? AGENT_LABELS.filter(({ key }) => !ns.agents[key]).length : 0;
-  const quiet = ns?.quiet.enabled ? `免打扰 ${ns.quiet.start}–${ns.quiet.end}` : "免打扰关闭";
+  const quiet = ns?.quiet.enabled ? t("免打扰 {a}–{b}", { a: ns.quiet.start, b: ns.quiet.end }) : t("免打扰关闭");
   const notifySummary = ns
-    ? [mutedAgents > 0 ? `静音 ${mutedAgents} 个 agent` : "全部 agent 提醒", quiet, PRIORITY_LABEL[ns.minPriority]].join(" · ")
-    : "加载中…";
+    ? [mutedAgents > 0 ? t("静音 {n} 个 agent", { n: mutedAgents }) : t("全部 agent 提醒"), quiet, t(PRIORITY_LABEL[ns.minPriority])].join(" · ")
+    : t("加载中…");
   const desktopSummary = [
-    form.remoteEnabled ? "远程执行已开启" : "远程执行关闭",
-    denied.length > 0 ? `禁止 ${denied.length} 个目录` : "目录不限制",
-    hooks ? (hooks.installed ? "hook 已安装" : "hook 未安装") : "hook …",
+    form.remoteEnabled ? t("远程执行已开启") : t("远程执行关闭"),
+    denied.length > 0 ? t("禁止 {n} 个目录", { n: denied.length }) : t("目录不限制"),
+    hooks ? (hooks.installed ? t("hook 已安装") : t("hook 未安装")) : t("hook …"),
   ].join(" · ");
-  const countText = (n: number | undefined, unit: string) => (counts ? `${n} ${unit}` : "");
+  const countText = (n: number | undefined) => (counts ? t("{n} 个", { n: n ?? 0 }) : "");
 
   // 返回固定在左边（和任务 / 会话详情页一致）：角色详情回角色列表，其它子页面回一级列表，一级列表回主界面
-  const title = page === "root" ? "设置"
-    : page === "role" ? (roleEdit?.role?.name || "新建角色")
-    : page === "project" ? (projectEdit?.project?.name || "新建项目")
+  const title = page === "root" ? t("设置")
+    : page === "role" ? (roleEdit?.role?.name || t("新建角色"))
+    : page === "project" ? (projectEdit?.project?.name || t("新建项目"))
     : PAGE_TITLE[page];
   const leave = () => {
     setMsg("");
@@ -426,7 +428,7 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   const back = (
     <button className="back-button" onClick={leave}>
       <Icon name="back" />
-      返回
+      {t("返回")}
     </button>
   );
 
@@ -441,30 +443,30 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
         {page === "root" && (
           <>
-            <h2>账号</h2>
+            <h2>{t("账号")}</h2>
             <ul className="settings-list">
-              <SettingsRow icon="user" title="账号与安全" summary={`${cfg.email || "（未知邮箱）"} · ${host}`} badge="已登录" onClick={() => setPage("account")} />
-              <SettingsRow icon="bell" title="通知规则" summary={notifySummary} onClick={() => setPage("notify")} />
-              <SettingsRow icon="devices" title="设备" summary={deviceSummaryText(machines)} onClick={() => setPage("devices")} />
+              <SettingsRow icon="user" title={t("账号与安全")} summary={`${cfg.email || t("（未知邮箱）")} · ${host}`} badge={t("已登录")} onClick={() => setPage("account")} />
+              <SettingsRow icon="bell" title={t("通知规则")} summary={notifySummary} onClick={() => setPage("notify")} />
+              <SettingsRow icon="devices" title={t("设备")} summary={deviceSummaryText(machines)} onClick={() => setPage("devices")} />
             </ul>
 
-            <h2>派活</h2>
+            <h2>{t("派活")}</h2>
             <ul className="settings-list">
-              <SettingsRow icon="people" title="角色" summary="执行工具、模型与上下文，按项目攒经验" badge={countText(counts?.roles, "个")} onClick={() => setPage("roles")} />
-              <SettingsRow icon="folder" title="项目" summary="项目说明、约定与各台电脑上的目录，派活时带给执行端" badge={countText(counts?.projects, "个")} onClick={() => setPage("projects")} />
-              <SettingsRow icon="board" title="项目经理" summary="把处理意见排成任务单，按限额派出确认过的任务" onClick={() => setPage("manager")} />
+              <SettingsRow icon="people" title={t("角色")} summary={t("执行工具、模型与上下文，按项目攒经验")} badge={countText(counts?.roles)} onClick={() => setPage("roles")} />
+              <SettingsRow icon="folder" title={t("项目")} summary={t("项目说明、约定与各台电脑上的目录，派活时带给执行端")} badge={countText(counts?.projects)} onClick={() => setPage("projects")} />
+              <SettingsRow icon="board" title={t("项目经理")} summary={t("把处理意见排成任务单，按限额派出确认过的任务")} onClick={() => setPage("manager")} />
             </ul>
 
             {(isDesktop || isAndroid) && (
               <>
-                <h2>本机</h2>
+                <h2>{t("本机")}</h2>
                 <ul className="settings-list">
-                  {isDesktop && <SettingsRow icon="desktop" title="本机执行与采集" summary={desktopSummary} onClick={() => setPage("desktop")} />}
+                  {isDesktop && <SettingsRow icon="desktop" title={t("本机执行与采集")} summary={desktopSummary} onClick={() => setPage("desktop")} />}
                   {isAndroid && (
                     <SettingsRow
                       icon="phone"
-                      title="Android 后台提醒"
-                      summary={`${bg ? "后台提醒已开启" : "后台提醒已关闭"} · 通知权限${notif ? "已允许" : "未允许"}`}
+                      title={t("Android 后台提醒")}
+                      summary={`${bg ? t("后台提醒已开启") : t("后台提醒已关闭")} · ${t("通知权限")}${notif ? t("已允许") : t("未允许")}`}
                       onClick={() => setPage("android")}
                     />
                   )}
@@ -472,24 +474,33 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
               </>
             )}
 
-            <h2>外观</h2>
+            <h2>{t("外观")}</h2>
             <ul className="settings-list">
-              <SettingsRow icon="user" title="agent 头像" summary={<span className="avatar-strip">{Object.keys(AGENT_LABEL).map((a) => <AgentAvatar key={a} agent={a} size={20} decorative />)}</span>} onClick={() => setPage("avatars")} />
+              <SettingsRow icon="user" title={t("agent 头像")} summary={<span className="avatar-strip">{Object.keys(AGENT_LABEL).map((a) => <AgentAvatar key={a} agent={a} size={20} decorative />)}</span>} onClick={() => setPage("avatars")} />
             </ul>
             <section className="box">
               <label>
-                对话页展示方式
+                {t("对话页展示方式")}
                 <select value={form.graphMode ? "graph" : "list"} onChange={(e) => void toggleGraphMode(e.target.value === "graph")}>
-                  <option value="graph">气泡图（默认）</option>
-                  <option value="list">列表</option>
+                  <option value="graph">{t("气泡图（默认）")}</option>
+                  <option value="list">{t("列表")}</option>
                 </select>
               </label>
               <p className="hint">
                 {form.graphMode
-                  ? "气泡图：待处理 / 进行中的对话按项目聚成气泡，点一下展开会话。"
-                  : "列表：待处理 / 进行中的对话按状态分行平铺，一条一行。"}
+                  ? t("气泡图：待处理 / 进行中的对话按项目聚成气泡，点一下展开会话。")
+                  : t("列表：待处理 / 进行中的对话按状态分行平铺，一条一行。")}
               </p>
               {msg && <p className="msg">{msg}</p>}
+            </section>
+            <section className="box">
+              <label>
+                {t("界面语言")}
+                <select value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
+                  {(Object.keys(LANG_LABEL) as Lang[]).map((l) => <option key={l} value={l}>{LANG_LABEL[l]}</option>)}
+                </select>
+              </label>
+              <p className="hint">{t("切换后立即生效；还没翻译完的部分会暂时保持中文。")}</p>
             </section>
           </>
         )}
@@ -498,54 +509,54 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
           <>
             <section className="box">
               <p className="kv">
-                邮箱：<b>{cfg.email || "（未知）"}</b>
+                {t("邮箱：")}<b>{cfg.email || t("（未知）")}</b>
               </p>
               <p className="kv">
-                服务器：<b>{cfg.serverUrl}</b>
+                {t("服务器：")}<b>{cfg.serverUrl}</b>
               </p>
               <div className="btns">
                 <button onClick={logout} disabled={busy}>
-                  退出登录
+                  {t("退出登录")}
                 </button>
               </div>
             </section>
 
             <section className="box">
-              <h2>修改密码</h2>
+              <h2>{t("修改密码")}</h2>
               <label>
-                旧密码
+                {t("旧密码")}
                 <input type="password" value={oldPw} onChange={(e) => setOldPw(e.target.value)} autoComplete="current-password" />
               </label>
               <label>
-                新密码（8 位以上）
+                {t("新密码（8 位以上）")}
                 <input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} autoComplete="new-password" />
               </label>
               <label>
-                再输一次新密码
+                {t("再输一次新密码")}
                 <input type="password" value={newPw2} onChange={(e) => setNewPw2(e.target.value)} autoComplete="new-password" />
               </label>
               <div className="btns">
                 <button className="primary" onClick={changePassword} disabled={busy || !oldPw || !newPw}>
-                  修改密码
+                  {t("修改密码")}
                 </button>
               </div>
               {msg && <p className="msg">{msg}</p>}
             </section>
 
             <section className="box">
-              <h2>已登录设备</h2>
-              {devices === null && <p className="hint">加载中…</p>}
+              <h2>{t("已登录设备")}</h2>
+              {devices === null && <p className="hint">{t("加载中…")}</p>}
               <ul className="devices">
                 {(devices ?? []).map((d) => (
                   <li key={d.id}>
                     <span className="dev-name">
-                      {d.device || "未知设备"}
-                      {d.current && <span className="tag claude">本机</span>}
+                      {d.device || t("未知设备")}
+                      {d.current && <span className="tag claude">{t("本机")}</span>}
                     </span>
-                    <span className="dev-time">最近使用 {fmtTime(d.lastUsedAt)}</span>
+                    <span className="dev-time">{t("最近使用 {time}", { time: fmtTime(d.lastUsedAt) })}</span>
                     {!d.current && (
                       <button className="link" onClick={() => removeDevice(d)}>
-                        移除
+                        {t("移除")}
                       </button>
                     )}
                   </li>
@@ -557,12 +568,12 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
         {page === "notify" && (
           <section className="box">
-            <p className="hint">在服务端统一过滤要弹的通知，对所有设备生效；等待授权和审批请求永远提醒，不受规则影响。</p>
+            <p className="hint">{t("在服务端统一过滤要弹的通知，对所有设备生效；等待授权和审批请求永远提醒，不受规则影响。")}</p>
             {!ns ? (
-              <p className="hint">加载中…</p>
+              <p className="hint">{t("加载中…")}</p>
             ) : (
               <>
-                <h3>按 agent 通知</h3>
+                <h3>{t("按 agent 通知")}</h3>
                 {AGENT_LABELS.map(({ key, label }) => (
                   <label className="check" key={key}>
                     <input
@@ -570,19 +581,19 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                       checked={ns.agents[key]}
                       onChange={(e) => saveNs({ ...ns, agents: { ...ns.agents, [key]: e.target.checked } })}
                     />
-                    {label}
+                    {t(label)}
                   </label>
                 ))}
-                <h3>最低优先级</h3>
+                <h3>{t("最低优先级")}</h3>
                 <label>
-                  会话事件要求关联任务达到的优先级（未关联任务的会话按中优先级处理）
+                  {t("会话事件要求关联任务达到的优先级（未关联任务的会话按中优先级处理）")}
                   <select value={ns.minPriority} onChange={(e) => saveNs({ ...ns, minPriority: e.target.value as NotifySettings["minPriority"] })}>
-                    <option value="low">不限（全部提醒）</option>
-                    <option value="medium">中及以上</option>
-                    <option value="high">仅高优先级</option>
+                    <option value="low">{t("不限（全部提醒）")}</option>
+                    <option value="medium">{t("中及以上")}</option>
+                    <option value="high">{t("仅高优先级")}</option>
                   </select>
                 </label>
-                <h3>免打扰时段</h3>
+                <h3>{t("免打扰时段")}</h3>
                 <label className="check">
                   <input
                     type="checkbox"
@@ -594,14 +605,14 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                       })
                     }
                   />
-                  启用免打扰（静音下面勾选的类型）
+                  {t("启用免打扰（静音下面勾选的类型）")}
                 </label>
                 {ns.quiet.enabled && (
                   <>
                     <label>
-                      开始{" "}
+                      {t("开始")}{" "}
                       <input type="time" value={ns.quiet.start} onChange={(e) => saveNs({ ...ns, quiet: { ...ns.quiet, start: e.target.value } })} />
-                      {" "}结束{" "}
+                      {" "}{t("结束")}{" "}
                       <input type="time" value={ns.quiet.end} onChange={(e) => saveNs({ ...ns, quiet: { ...ns.quiet, end: e.target.value } })} />
                     </label>
                     {KIND_LABELS.map(({ key, label }) => (
@@ -619,10 +630,10 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
                             })
                           }
                         />
-                        静音：{label}
+                        {t("静音：{label}", { label: t(label) })}
                       </label>
                     ))}
-                    <p className="hint">开始等于结束视为全天静音。免打扰只作用于勾选的类型；失败 / 中断建议保留提醒。</p>
+                    <p className="hint">{t("开始等于结束视为全天静音。免打扰只作用于勾选的类型；失败 / 中断建议保留提醒。")}</p>
                   </>
                 )}
                 {nsMsg && <p className="msg">{nsMsg}</p>}
@@ -688,101 +699,101 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
         {page === "desktop" && isDesktop && (
           <>
             <section className="box">
-              <h2>本机</h2>
+              <h2>{t("本机")}</h2>
               <label>
-                本机名称（派活时按它认电脑；改名后服务端旧记录会一起迁到新名下）
+                {t("本机名称（派活时按它认电脑；改名后服务端旧记录会一起迁到新名下）")}
                 <input value={form.machine} onChange={(e) => set("machine", e.target.value)} />
               </label>
               <label className="check">
                 <input type="checkbox" checked={form.notifyDesktop} onChange={(e) => set("notifyDesktop", e.target.checked)} />
-                会话完成 / 等待授权时弹桌面通知
+                {t("会话完成 / 等待授权时弹桌面通知")}
               </label>
               <label className="check">
                 <input type="checkbox" checked={autostart} onChange={(e) => toggleAutostart(e.target.checked)} />
-                开机自启（静默启动到托盘）
+                {t("开机自启（静默启动到托盘）")}
               </label>
               <label className="check">
                 <input type="checkbox" checked={form.remoteEnabled} onChange={(e) => set("remoteEnabled", e.target.checked)} />
-                允许手机远程执行（每次授权仍要在手机上确认）
+                {t("允许手机远程执行（每次授权仍要在手机上确认）")}
               </label>
-              <p className="hint">关掉后这台电脑仍显示「开着，没开远程执行」，派给它的单会排队，直到这里重新打开。</p>
+              <p className="hint">{t("关掉后这台电脑仍显示「开着，没开远程执行」，派给它的单会排队，直到这里重新打开。")}</p>
               <label className="check">
                 <input type="checkbox" checked={form.hookRemoteApprove} onChange={(e) => set("hookRemoteApprove", e.target.checked)} />
-                在客户端处理 Claude 终端的权限确认
+                {t("在客户端处理 Claude 终端的权限确认")}
               </label>
               <label className="check">
                 <input type="checkbox" checked={form.hookRemoteApprove && form.hookRemoteAllow} disabled={!form.hookRemoteApprove} onChange={(e) => set("hookRemoteAllow", e.target.checked)} />
-                允许在客户端远程放行（风险：手机上点允许就会在电脑上执行）
+                {t("允许在客户端远程放行（风险：手机上点允许就会在电脑上执行）")}
               </label>
-              <p className="hint">开启后，终端里的 Claude 弹出权限确认时，客户端会出现一张审批卡，最多等 25 秒；没人处理就回到终端原生确认框。只开第一项时，客户端只能点「拒绝」。</p>
+              <p className="hint">{t("开启后，终端里的 Claude 弹出权限确认时，客户端会出现一张审批卡，最多等 25 秒；没人处理就回到终端原生确认框。只开第一项时，客户端只能点「拒绝」。")}</p>
 
-              <h3>禁止执行的目录（黑名单）</h3>
+              <h3>{t("禁止执行的目录（黑名单）")}</h3>
               <p className="hint">
-                当前是<b>黑名单</b>模式：留空 = 不限制目录，任何目录都能派活；填了则列在这里的目录<b>及其子目录</b>一律拒绝执行，其它目录正常。
+                {t("当前是")}<b>{t("黑名单")}</b>{t("模式：留空 = 不限制目录，任何目录都能派活；填了则列在这里的目录")}<b>{t("及其子目录")}</b>{t("一律拒绝执行，其它目录正常。")}
               </p>
               <textarea
                 value={deniedText}
                 onChange={(e) => setDeniedText(e.target.value)}
                 rows={3}
-                placeholder={"每行一个目录，留空不限制；例如 D:\\Work2\\Secret"}
+                placeholder={t("每行一个目录，留空不限制；例如 D:\\Work2\\Secret")}
                 spellCheck={false}
               />
               <p className="hint">
-                {denied.length > 0 ? `已禁止 ${denied.length} 个目录：这些目录下的任务和会话会被执行端直接拒绝。` : "当前目录不限制：没有任何目录被禁止。"}
+                {denied.length > 0 ? t("已禁止 {n} 个目录：这些目录下的任务和会话会被执行端直接拒绝。", { n: denied.length }) : t("当前目录不限制：没有任何目录被禁止。")}
               </p>
 
-              <h3>ZCode 自动放行</h3>
+              <h3>{t("ZCode 自动放行")}</h3>
               <label>
-                ZCode 权限请求的自动放行档位
+                {t("ZCode 权限请求的自动放行档位")}
                 <select value={form.zcodeAutoApprove} onChange={(e) => set("zcodeAutoApprove", e.target.value)}>
-                  <option value="off">关闭：每条都要确认</option>
-                  <option value="low">放行低风险（默认）</option>
-                  <option value="medium">放行中低风险</option>
+                  <option value="off">{t("关闭：每条都要确认")}</option>
+                  <option value="low">{t("放行低风险（默认）")}</option>
+                  <option value="medium">{t("放行中低风险")}</option>
                 </select>
               </label>
               <p className="hint">
-                档位内的请求直接放行并在会话里留痕，不弹审批卡；高风险与致命风险永远弹卡等你确认，ZCode 没标风险等级的也不放。
+                {t("档位内的请求直接放行并在会话里留痕，不弹审批卡；高风险与致命风险永远弹卡等你确认，ZCode 没标风险等级的也不放。")}
               </p>
 
               <div className="btns">
                 <button className="primary" onClick={save} disabled={!dirty}>
-                  保存
+                  {t("保存")}
                 </button>
               </div>
-              <p className="hint">改动保存后立即生效；执行器会在几秒内用新配置重连。</p>
+              <p className="hint">{t("改动保存后立即生效；执行器会在几秒内用新配置重连。")}</p>
               {msg && <p className="msg">{msg}</p>}
             </section>
 
             <section className="box">
-              <h2>运行状态</h2>
+              <h2>{t("运行状态")}</h2>
               <p className="kv">
-                远程执行器：
+                {t("远程执行器：")}
                 <b className={remote?.lastError ? "bad" : ""}>
-                  {remote ? (remote.connected ? "已连接" : remote.lastError ? `未连接（${remote.lastError}）` : form.remoteEnabled ? "连接中…" : "未启用") : "…"}
+                  {remote ? (remote.connected ? t("已连接") : remote.lastError ? t("未连接（{e}）", { e: remote.lastError }) : form.remoteEnabled ? t("连接中…") : t("未启用")) : "…"}
                 </b>
               </p>
               <p className="kv">
-                Claude Code hook：<b>{hooks ? (hooks.installed ? "已安装" : "未安装") : "…"}</b>
+                {t("Claude Code hook：")}<b>{hooks ? (hooks.installed ? t("已安装") : t("未安装")) : "…"}</b>
               </p>
               <div className="btns">
-                <button onClick={() => hookAction(true)}>{hooks?.installed ? "重新安装" : "安装 Claude Code hook"}</button>
+                <button onClick={() => hookAction(true)}>{hooks?.installed ? t("重新安装") : t("安装 Claude Code hook")}</button>
                 <button onClick={() => hookAction(false)} disabled={!hooks?.installed && !hooks?.scriptExists}>
-                  卸载
+                  {t("卸载")}
                 </button>
               </div>
               <p className="kv">
-                采集端口 {info?.port ?? 47821}：<b className={info?.collectorError ? "bad" : ""}>{info ? (info.collectorError ?? "正常") : "…"}</b>
+                {t("采集端口 {port}：", { port: info?.port ?? 47821 })}<b className={info?.collectorError ? "bad" : ""}>{info ? (info.collectorError ?? t("正常")) : "…"}</b>
               </p>
               <p className="kv">
-                上报队列：{info?.forward.queued ?? 0} 条待发{info?.forward.lastError ? `（${info.forward.lastError}）` : ""}
+                {t("上报队列：{n} 条待发", { n: info?.forward.queued ?? 0 })}{info?.forward.lastError ? t("（{e}）", { e: info.forward.lastError }) : ""}
               </p>
             </section>
 
             <section className="box">
-              <h2>采集说明</h2>
-              <p className="hint">豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。</p>
-              <p className="hint">WorkBuddy 会话监听随 AgentHub 自动启动。只读 <code>%USERPROFILE%\.workbuddy\projects</code> 下的会话记录，每 2 秒检查一次，可显示对话标题、目录、运行中与完成状态；完成状态在「回复结束 + 无未完成工具调用 + 静默确认」后判定。打开会话详情时会把本地对话记录同步过来（只读），授权与远程续聊仍不支持。</p>
-              <p className="hint">CodeBuddy 命令行版（npm 全局包 <code>@tencent-ai/codebuddy-code</code>）与 WorkBuddy 是同一份 CLI，记录落在 <code>%USERPROFILE%\.codebuddy\projects</code>，用同一套规则监听；派活时用本机 node 跑它自己的登录态，装了它才会出现在角色的候选电脑里。</p>
+              <h2>{t("采集说明")}</h2>
+              <p className="hint">{t("豆包客户端状态监听（实验性）随 AgentHub 自动启动。读取本机标准目录中的生命周期日志，每 2 秒检查一次；暂不支持完整对话、授权和远程续聊。")}</p>
+              <p className="hint">{t("WorkBuddy 会话监听随 AgentHub 自动启动。只读")} <code>%USERPROFILE%\.workbuddy\projects</code>{t("下的会话记录，每 2 秒检查一次，可显示对话标题、目录、运行中与完成状态；完成状态在「回复结束 + 无未完成工具调用 + 静默确认」后判定。打开会话详情时会把本地对话记录同步过来（只读），授权与远程续聊仍不支持。")}</p>
+              <p className="hint">{t("CodeBuddy 命令行版（npm 全局包")} <code>@tencent-ai/codebuddy-code</code>{t("）与 WorkBuddy 是同一份 CLI，记录落在")} <code>%USERPROFILE%\.codebuddy\projects</code>{t("，用同一套规则监听；派活时用本机 node 跑它自己的登录态，装了它才会出现在角色的候选电脑里。")}</p>
             </section>
           </>
         )}
@@ -791,15 +802,15 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
           <section className="box">
             <label className="check">
               <input type="checkbox" checked={bg} onChange={(e) => toggleBg(e.target.checked)} />
-              开启后台提醒（前台服务保持连接，完成 / 等待授权时弹通知）
+              {t("开启后台提醒（前台服务保持连接，完成 / 等待授权时弹通知）")}
             </label>
             <p className="kv">
-              通知权限：<b className={notif ? "" : "bad"}>{notif ? "已允许" : "未允许"}</b>
+              {t("通知权限：")}<b className={notif ? "" : "bad"}>{notif ? t("已允许") : t("未允许")}</b>
             </p>
             <div className="btns">
-              <button onClick={() => native()?.openBatterySettings()}>电池优化设置</button>
+              <button onClick={() => native()?.openBatterySettings()}>{t("电池优化设置")}</button>
             </div>
-            <p className="hint">建议把 AgentHub 设为「不限制」电池使用，否则系统可能在后台杀掉连接。</p>
+            <p className="hint">{t("建议把 AgentHub 设为「不限制」电池使用，否则系统可能在后台杀掉连接。")}</p>
             {msg && <p className="msg">{msg}</p>}
           </section>
         )}
