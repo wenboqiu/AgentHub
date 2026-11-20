@@ -66,6 +66,7 @@ const AGENT_COLOR: Record<string, string> = {
   workbuddy: "#2f9e6e",
   zcode: "#7a4fd6",
   codebuddy: "#0f8fb3",
+  chatgpt: "#10a37f",
 };
 export const agentColor = (agent: string) => AGENT_COLOR[agent] ?? "#6b7280";
 

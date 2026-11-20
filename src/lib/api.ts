@@ -4,7 +4,7 @@ export type ChecklistItem = { id: string; text: string; done: boolean };
 export type Reminder = { id: number; entityType: "task" | "goal"; entityId: number; title: string; kind: "start" | "due"; scheduledAt: string; /** 服务端通知过滤后的结果：false 表示按账号规则静音（照常入列，不弹通知） */ notify?: boolean };
 export type NotifyKind = "done" | "aborted" | "reminder";
 export type NotifySettings = {
-  agents: Record<"claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy", boolean>;
+  agents: Record<"claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | "chatgpt", boolean>;
   minPriority: "high" | "medium" | "low";
   quiet: { enabled: boolean; start: string; end: string; tzOffsetMinutes: number; muteKinds: NotifyKind[] };
 };
@@ -237,7 +237,7 @@ export type MandateMode = "off" | "observe" | "auto";
 
 export type Session = {
   id: string;
-  agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy";
+  agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | "chatgpt";
   machine: string;
   cwd: string;
   project: string;
@@ -260,7 +260,7 @@ export type Run = { id: string; sessionId: string | null; taskId: number | null;
 /** 执行器实时上报的「正在做什么」：文字是 agent 自己的（思考原文 / 工具调用 / 正在写的正文） */
 export type RunActivity = { runId: string; sessionId: string; kind: "thinking" | "tool" | "text" | "idle"; text: string; at: string };
 /** 日历执行记录：run 联出会话信息与任务名（任务计时没有会话；会话也可能已被清理） */
-export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
+export type Execution = Run & { agent: "claude" | "codex" | "doubao" | "workbuddy" | "zcode" | "codebuddy" | "chatgpt" | null; project: string; state: State | null; taskTitle: string | null; tasks: string[] };
 /** 会话活动桶：5 分钟粒度，只包含有消息的时段（用来还原"干干停停"的真实节奏） */
 export type ActivityBucket = { sessionId: string; at: string; count: number };
 /** 统计指标（一个周期 / 一个拆分行 / 合计），数值全是 number */

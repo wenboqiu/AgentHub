@@ -9,6 +9,8 @@ mod claude;
 #[cfg(desktop)]
 mod claude_live;
 #[cfg(desktop)]
+mod chatgpt;
+#[cfg(desktop)]
 mod codex;
 #[cfg(desktop)]
 mod codex_read;
@@ -329,6 +331,7 @@ mod desktop {
                 let hook_bridge = crate::hook_approval::HookBridge::new();
                 collector::spawn(forwarder.clone(), collector_status.clone(), hook_bridge.clone(), shared.clone());
                 codex::spawn(forwarder.clone());
+                crate::chatgpt::spawn(forwarder.clone());
                 crate::doubao::spawn(forwarder.clone());
                 crate::workbuddy::spawn(forwarder.clone());
                 crate::zcode::spawn(forwarder.clone());

@@ -22,7 +22,7 @@ import { migrateStats } from './stats.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
 export type State = (typeof STATES)[number]
-export const AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
+export const AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy', 'chatgpt'] as const
 export type Agent = (typeof AGENTS)[number]
 
 export type EventIn = {
@@ -338,7 +338,7 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const pinned = isInternalTitle(cur?.title ?? '')
   const title = pinned
     ? cur!.title
-    : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
+    : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy', 'chatgpt'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
   const summary = ev.summary !== undefined && ev.summary !== '' ? ev.summary : ev.state === 'running' ? '' : (cur?.summary ?? '')
   const pid = ev.pid ? ev.pid : (cur?.pid ?? null)
   const bgTasks = ev.state === 'running' && Number.isFinite(ev.bgTasks) ? Math.max(0, Math.min(99, Math.trunc(ev.bgTasks ?? 0))) : 0

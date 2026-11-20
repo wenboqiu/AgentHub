@@ -83,6 +83,13 @@ pub fn installed_agents() -> Vec<&'static str> {
     if crate::runner::codebuddy_installed() {
         out.push("codebuddy");
     }
+    // ChatGPT（桌面端 Chat 模式）只做提问监听：global-state 文件在就能监听
+    if crate::claude::home_dir()
+        .map(|h| h.join(".codex").join(".codex-global-state.json").is_file())
+        .unwrap_or(false)
+    {
+        out.push("chatgpt");
+    }
     out
 }
 

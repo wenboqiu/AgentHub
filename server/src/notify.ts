@@ -9,7 +9,7 @@ import { TaskError } from './tasks.ts'
 // （Mandate auto 档下，落在冻结范围内的审批根本不建审批行、不进这条管线——不是静音，是没有这件事；
 //  只要审批行存在，也就是范围外 / danger / unknown 交给人的那些，照样永远放行。）
 
-export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
+export const AGENT_KEYS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy', 'chatgpt'] as const
 export type AgentKey = (typeof AGENT_KEYS)[number]
 export type Priority = 'high' | 'medium' | 'low'
 export type NotifyKind = 'done' | 'aborted' | 'reminder'
@@ -27,7 +27,7 @@ type DB = Pick<pg.Pool, 'query'>
 export const PRIORITY_RANK: Record<Priority, number> = { low: 0, medium: 1, high: 2 }
 
 export const DEFAULT_SETTINGS: NotifySettings = {
-  agents: { claude: true, codex: true, doubao: true, workbuddy: true, zcode: true, codebuddy: true },
+  agents: { claude: true, codex: true, doubao: true, workbuddy: true, zcode: true, codebuddy: true, chatgpt: true },
   minPriority: 'low',
   quiet: { enabled: false, start: '22:00', end: '08:00', tzOffsetMinutes: 480, muteKinds: ['done'] },
 }

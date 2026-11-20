@@ -6,7 +6,7 @@ import { TaskError } from './tasks.ts'
 
 type DB = Pick<pg.Pool, 'query'>
 
-export const AVATAR_AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'] as const
+export const AVATAR_AGENTS = ['claude', 'codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy', 'chatgpt'] as const
 export type AvatarAgent = (typeof AVATAR_AGENTS)[number]
 export type AgentAvatar = { kind: 'preset'; id: string } | { kind: 'image'; data: string }
 export type Prefs = { avatars: Partial<Record<AvatarAgent, AgentAvatar>> }
