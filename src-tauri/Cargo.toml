@@ -3,6 +3,7 @@ name = "agenthub"
 version = "0.17.0"
 description = "Claude Code / Codex 会话状态集中监控"
 authors = ["wenbo"]
+license = "MIT"
 edition = "2021"
 
 [lib]

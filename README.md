@@ -1,6 +1,6 @@
 # AgentHub
 
-中文 | [English](README.en.md)
+中文 | [English](README.en.md) | [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 AgentHub 是一个集中监控多个 AI 编程会话的工作台：桌面端（Tauri 2，Windows / macOS）+ Android 手机端 + 自建中枢服务（Node + Fastify + Postgres，WebSocket 实时推送）。
 
@@ -310,3 +310,9 @@ Artifacts/AgentHub/
 - 状态停更时不再把跨度画到"现在"：会话状态是服务端最后收到的一条事件，超过 45 分钟没有任何新活动（与服务端 Watchdog 同口径）就不再延伸，实线只画到最后活动，之后用点线表示"无法确认是否仍在执行"，执行日志标「N 分钟无新活动，状态可能已停滞」。AgentHub 没开或进程已死的会话因此不会虚增几小时。
 - 任务详情页的「时间线」把一次执行拆成开始／结束两个节点（结束节点带耗时）；还在排队或运行中的执行只有开始节点，因为结束时刻还不存在。
 - 主力平台 Windows + Android；macOS 可自行源码构建（见「macOS 构建」，终端续聊/窗口跳转降级），不做 iOS。多账号隔离（管理员建账号）。任务管理暂不包含到期提醒、重复任务、子任务和离线编辑。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 wenbo。可自由使用、修改、分发，包括商业用途，保留版权声明与许可声明即可。第三方依赖各按其自身许可（MIT / ISC / BSD-3-Clause / Apache-2.0 / MPL-2.0）。
+
+**免责声明**：AgentHub 是个人开发的第三方工具，与 Anthropic、OpenAI、智谱（ZCode）、字节（豆包）、腾讯（WorkBuddy / CodeBuddy）均无关联，也未获其授权。它只读取本机上这些客户端已经写好的日志与会话文件，不修改、不上传第三方凭据；其中 ZCode 的 app-server 协议、豆包的日志格式等属于未公开接口，随上游升级可能失效。使用前请自行确认符合各工具的服务条款。

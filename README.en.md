@@ -1,6 +1,6 @@
 # AgentHub
 
-[中文](README.md) | English
+[中文](README.md) | English | [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 AgentHub is a workbench for keeping tabs on many AI coding sessions at once: a desktop app (Tauri 2, Windows / macOS), an Android app, and a self-hosted hub service (Node + Fastify + Postgres with real-time WebSocket push). Detailed docs are kept in the [Chinese README](README.md).
 
@@ -43,3 +43,9 @@ npm install
 npm run tauri dev          # point it at http://127.0.0.1:3000 and the account above
 npm run tauri build
 ```
+
+## License
+
+[MIT](LICENSE) © 2026 wenbo. Free to use, modify and redistribute — including commercially — as long as the copyright and license notices are kept. Third-party dependencies keep their own licenses (MIT / ISC / BSD-3-Clause / Apache-2.0 / MPL-2.0).
+
+**Disclaimer**: AgentHub is an independent, unofficial tool. It is not affiliated with or endorsed by Anthropic, OpenAI, Z.ai (ZCode), ByteDance (Doubao) or Tencent (WorkBuddy / CodeBuddy). It only reads the session logs and files those clients already write on your own machine; it does not modify them or upload third-party credentials. Some integrations rely on undocumented interfaces (ZCode's app-server protocol, Doubao's log format) and may break when upstream changes. Check each tool's terms of service before use.
