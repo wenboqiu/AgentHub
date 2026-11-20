@@ -313,7 +313,7 @@ fn probe_lock(path: &Path) -> &'static str {
     // Unix 上 Codex 用 flock：能拿到排他锁说明没有别的进程握着
     let held = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0;
     if !held {
-        let _ = libc::flock(f.as_raw_fd(), libc::LOCK_UN);
+        let _ = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_UN) };
         let _ = f.flush();
     }
     if held { "occupied" } else { "stale" }
