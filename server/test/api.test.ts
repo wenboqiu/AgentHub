@@ -146,6 +146,23 @@ describe('AgentHub 服务端', () => {
     assert.equal((await get(`claude:${s}`)).title,'原始标题')
   })
 
+  it('Codex 改名不受采集器并发推进事件版本影响，且不改状态与事件时间', async () => {
+    const s = sid(), at = iso(-5000), newer = iso(-1000)
+    await send([ev(s, 'done', { agent: 'codex', title: '原名', at })])
+    // 本机核对读到的是旧版本；期间采集器推来新的完成事件，expectedAt 已经不匹配
+    await send([ev(s, 'done', { agent: 'codex', at: newer })])
+    const r = await send([ev(s, 'done', { agent: 'codex', title: '调试复盘', at, expectedAt: at, quiet: true })])
+    assert.equal(r.body.accepted, 1)
+    const got = await get(`codex:${s}`)
+    assert.equal(got.title, '调试复盘')
+    assert.equal(got.state, 'done')
+    assert.equal(Date.parse(got.eventAt), Date.parse(newer))
+    assert.equal(got.acked, false)
+    // 同名时不再写库，也不制造重复广播
+    const again = await send([ev(s, 'done', { agent: 'codex', title: '调试复盘', at, expectedAt: at, quiet: true })])
+    assert.equal(again.body.accepted, 0)
+  })
+
   it('quiet 不提醒，done 直接已处理', async () => {
     const s = sid()
     const ws = new WebSocket(base.replace('http', 'ws') + `/ws?token=${TOKEN}`)
@@ -244,7 +261,8 @@ describe('AgentHub 服务端', () => {
     for (const [action, body] of [['messages', { text: 'hello' }], ['spawn', { mode: 'fresh', text: 'hello' }]] as const) {
       const response = await call('POST', `/sessions/${id}/${action}`, body)
       assert.equal(response.status, 409, JSON.stringify(response.body))
-      assert.match(response.body.error, /WorkBuddy/)
+      // 远程已把 WorkBuddy 从「仅监听」特判改为统一的执行器在线检查：无执行器时报「电脑端不在线」
+      assert.match(response.body.error, /电脑端不在线/)
     }
     // 正文在电脑端的 transcript 里，读历史和 Claude / Codex 同一条链路：只受「电脑端不在线」约束，
     // 不能再按「只读 agent」一句话拦掉，否则详情页永远停在「还没有同步到消息」。

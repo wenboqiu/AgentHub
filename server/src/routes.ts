@@ -940,8 +940,10 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const result = await requestNativeHistory(userId, session)
     if (!result) return { error: '电脑端没有及时返回历史记录', code: 504 }
     if (result.error) return { error: result.error, code: 502 }
-    const items = result.messages
-      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string')
+    const items = (result.messages ?? [])
+      // 空文本但带图的消息（Codex 生成图）是真实对话，不能当空消息丢掉
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.text === 'string' &&
+        (m.text.trim() !== '' || (historyImages(m.images)?.length ?? 0) > 0))
       .map(m => ({
         role: m.role,
         text: m.text,
@@ -952,6 +954,9 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         // Codex 的生成图/附图转成的 data URL；老电脑端不发这个字段
         images: historyImages(m.images),
       }))
+    // 电脑端返回空列表时绝不能整体替换：replaceHistory 先删后插，会把库里已有的消息清空。
+    // 老版本桌面端仍可能返回空数组，服务端这里兜住，明确报错并保留原记录。
+    if (!items.length) return { error: '电脑端没有读到对话内容，已保留原有记录', code: 502 }
     const messages = await serial(() => replaceHistory(pool, userId, session.id, items))
     broadcast(userId, { type: 'session.history', sessionId: session.id })
     return { messages }

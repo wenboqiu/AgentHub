@@ -22,8 +22,7 @@ fn local_state(home: &Path, s: &Value) -> Option<(String, Option<String>)> {
     if !runner::valid_key(key) || key.starts_with("pending-") { return None; }
     if s["agent"] == "codex" {
         let root = home.join(".codex");
-        let path = runner::find_codex_rollout(&root.join("sessions"), key)
-            .or_else(|| runner::find_codex_rollout(&root.join("archived_sessions"), key));
+        let path = runner::codex_rollout(home, key);
         if let Some(path) = path {
             let text = runner::read_tail(&path, 256 * 1024).ok()?;
             let lines: Vec<_> = text.lines().collect();

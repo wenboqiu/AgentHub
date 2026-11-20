@@ -303,6 +303,21 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const id = `${ev.agent}:${ev.sessionId}`
   const at = new Date(ev.at)
   const cur = (await pool.query<Row>('SELECT * FROM sessions WHERE user_id = $1 AND id = $2', [userId, id])).rows[0]
+  // Codex 重命名只改本机名称索引，rollout 一行都不会新增，采集器因此不会发事件；
+  // 只有 15 秒一次的本机核对会带 expectedAt 补一条 quiet 校正。而采集器每 2 秒就可能
+  // 推进 event_at，这条校正经常因版本不匹配被整条丢弃，名字便一直停在旧值。
+  // 对「quiet + 只带标题」的事件单独放行：只写 title，不动状态、事件时间、已处理标记，
+  // 不产生通知 / 处理意见，也不绕过状态核对的时序保护。
+  const titleOnly = ev.quiet === true && ev.agent === 'codex' && ev.readAt === undefined &&
+    typeof ev.title === 'string' && ev.title !== '' && ev.summary === undefined &&
+    !ev.buckets?.length && !!cur && cur.agent === 'codex' && cur.state === ev.state
+  if (titleOnly && cur && cur.title !== ev.title) {
+    const row = (await pool.query<Row>(
+      'UPDATE sessions SET title = $3, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING *',
+      [userId, id, ev.title],
+    )).rows[0]
+    return row ? { session: toSession(row), notify: false } : null
+  }
   // 本机核对只修正查询时的版本，不能覆盖核对期间收到的新事件。
   if (ev.expectedAt !== undefined && (!cur || cur.event_at.getTime() !== Date.parse(ev.expectedAt))) return null
   if (cur && at.getTime() < cur.event_at.getTime()) return null

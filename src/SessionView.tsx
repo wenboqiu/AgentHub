@@ -233,7 +233,11 @@ export default function SessionView({ sessionId, session, localMachine, onSwitch
     api
       .history(id)
       .then(() => (gone ? undefined : syncRef.current?.reload()))
-      .catch(() => {}) // 电脑上读不到就保留已有记录，手动刷新时才提示错误
+      .catch((e) => {
+        // 以前静默吞掉错误，用户只看到空白详情却不知道是电脑端离线、找不到记录还是超时。
+        // 保留已有记录的同时把原因显示出来，手动刷新仍可重试。
+        if (!gone) setErr(e instanceof Error ? e.message : String(e));
+      })
       .finally(() => {
         if (!gone) setSyncing(false);
       });

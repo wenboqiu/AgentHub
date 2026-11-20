@@ -390,6 +390,16 @@ describe('远程控制', () => {
         ['user', '以前的问题', null],
       ],
     )
+    // 电脑端返回空列表时不能整体替换：否则 replaceHistory 会把已有消息删光
+    ex.msgs.length = 0
+    const empty = call('POST', url, {})
+    const reqEmpty = await waitFor(() => find(ex, 'history.request'))
+    sendJson(ex, { type: 'history.result', requestId: reqEmpty.requestId, messages: [] })
+    const emptyRes = await empty
+    assert.equal(emptyRes.status, 502)
+    const kept = await call('GET', `/sessions/${encodeURIComponent(id)}/messages`)
+    assert.deepEqual(kept.body.messages.map((m: any) => m.text), ['以前的问题', '以前的回答', '以前的问题'])
+
     // 再请求一次：用新快照整体替换，最新内容在最后
     ex.msgs.length = 0
     const again = call('POST', url, {})
