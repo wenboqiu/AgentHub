@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Api, type Machine } from "./lib/api";
 import { DEVICE_STATE_LABEL, deviceSummary, deviceTools, groupDevices, machineState } from "./lib/devices";
 import { ago, fullAt } from "./lib/time";
+import { t } from "./lib/i18n";
 
 /**
  * 设备总览：哪些电脑装了 AgentHub、此刻能不能接活。
@@ -67,7 +68,7 @@ export default function Devices({ api, localMachine, onOpenAccount }: { api: Api
             <div key={g.key} className="dev-group">
               <h3 className="dev-group-head">
                 <i className={`dev-dot ${g.key}`} />
-                {g.label}
+                {t(g.label)}
                 <span className="dev-group-count">{g.items.length} 台</span>
               </h3>
               <ul className="devices">
@@ -79,7 +80,7 @@ export default function Devices({ api, localMachine, onOpenAccount }: { api: Api
                       <span className="dev-name">
                         <b>{m.name}</b>
                         {local && <span className="tag local">本机</span>}
-                        <span className={`dev-state ${state}`}>{DEVICE_STATE_LABEL[state]}</span>
+                        <span className={`dev-state ${state}`}>{t(DEVICE_STATE_LABEL[state])}</span>
                       </span>
                       <span className="dev-time" title={fullAt(m.at)}>
                         {m.at ? `最近活动 ${ago(m.at, now)}` : "没有活动记录"}

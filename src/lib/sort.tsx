@@ -1,4 +1,5 @@
 import type { Goal } from "../lib/api";
+import { t } from "./i18n.ts";
 
 export const PRIORITY_RANK = { high: 0, medium: 1, low: 2 } as const;
 export type EntitySort = "priority" | "date" | "updated";
@@ -15,5 +16,5 @@ export const ENTITY_SORTERS: Record<EntitySort, (a: Sortable, b: Sortable) => nu
   updated: (a,b)=>Date.parse(b.updatedAt)-Date.parse(a.updatedAt),
 };
 export function SortBar({sort,onChange}:{sort:EntitySort; onChange(sort:EntitySort):void}) {
-  return <label className="sort-bar">排序<select value={sort} onChange={e=>onChange(e.target.value as EntitySort)}>{(Object.keys(SORT_LABEL) as EntitySort[]).map(k=><option key={k} value={k}>{SORT_LABEL[k]}</option>)}</select></label>;
+  return <label className="sort-bar">{t("排序")}<select value={sort} onChange={e=>onChange(e.target.value as EntitySort)}>{(Object.keys(SORT_LABEL) as EntitySort[]).map(k=><option key={k} value={k}>{t(SORT_LABEL[k])}</option>)}</select></label>;
 }

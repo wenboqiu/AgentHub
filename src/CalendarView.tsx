@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ActivityBucket, Api, Execution, Goal, Session, Task } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+import { t as tr } from "./lib/i18n";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const DAY = 86_400_000;
@@ -64,24 +65,24 @@ function statusOf(e: CalItem, now: number): StatusInfo {
   // 会话条目：没有精确起止时间，以最后活动时间为准
   if (e.sessionState) {
     const last = `最后活动 ${hm(e.createdAt)}`;
-    if (e.sessionState === "running") return { label: "执行中", cls: "running", detail: last };
-    if (e.sessionState === "waiting") return { label: "等待中", cls: "waiting", detail: last };
-    if (e.sessionState === "idle") return { label: "空闲", cls: "queued", detail: last };
-    if (e.sessionState === "aborted") return { label: "已中断", cls: "stopped" };
-    if (e.sessionState === "done" || e.sessionState === "ended") return { label: "已结束", cls: "done" };
-    return { label: "状态未知", cls: "queued", detail: last };
+    if (e.sessionState === "running") return { label: tr("执行中"), cls: "running", detail: last };
+    if (e.sessionState === "waiting") return { label: tr("等待中"), cls: "waiting", detail: last };
+    if (e.sessionState === "idle") return { label: tr("空闲"), cls: "queued", detail: last };
+    if (e.sessionState === "aborted") return { label: tr("已中断"), cls: "stopped" };
+    if (e.sessionState === "done" || e.sessionState === "ended") return { label: tr("已结束"), cls: "done" };
+    return { label: tr("状态未知"), cls: "queued", detail: last };
   }
   const active = e.status === "queued" || e.status === "running";
   if (active) {
     const mins = Math.max(0, Math.round((now - Date.parse(e.createdAt)) / 60000));
     const dur = mins < 60 ? `${mins || "<"}1 分钟` : mins < 1440 ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分` : `${Math.floor(mins / 1440)} 天 ${Math.floor((mins % 1440) / 60)} 小时`;
-    if (e.status === "queued") return { label: "排队中", cls: "queued", detail: `已等待 ${dur}` };
-    if (e.state === "waiting") return { label: "等待中", cls: "waiting", detail: `已运行 ${dur}` };
-    return { label: "执行中", cls: "running", detail: `已运行 ${dur}` };
+    if (e.status === "queued") return { label: tr("排队中"), cls: "queued", detail: tr("已等待 {d}", { d: dur }) };
+    if (e.state === "waiting") return { label: tr("等待中"), cls: "waiting", detail: tr("已运行 {d}", { d: dur }) };
+    return { label: tr("执行中"), cls: "running", detail: tr("已运行 {d}", { d: dur }) };
   }
-  if (e.status === "done") return { label: "已完成", cls: "done" };
-  if (e.status === "failed") return { label: "失败", cls: "failed", detail: e.error || undefined };
-  return { label: "已中断", cls: "stopped", detail: e.error || undefined };
+  if (e.status === "done") return { label: tr("已完成"), cls: "done" };
+  if (e.status === "failed") return { label: tr("失败"), cls: "failed", detail: e.error || undefined };
+  return { label: tr("已中断"), cls: "stopped", detail: e.error || undefined };
 }
 /** 结束时间：进行中的用当前时间兜底 */
 const endOf = (e: CalItem, now: number) => e.status === "queued" || e.status === "running" ? now : Date.parse(e.updatedAt);
@@ -658,9 +659,9 @@ export default function CalendarView({ api, sessions, tasks, goals, runSignal, o
         <button className="entity-row" onClick={() => onOpenTask(t.id)}>
           <span className="entity-main">
             <strong><span className="task-no">#{t.id}</span> {t.title}</strong>
-            <span className="dim">{TASK_LABEL[t.status]}{t.checklist.length ? ` · 清单 ${t.checklist.filter(c => c.done).length}/${t.checklist.length}` : ""} · 最后更新 {md(Date.parse(t.updatedAt))}</span>
+            <span className="dim">{tr(TASK_LABEL[t.status])}{t.checklist.length ? ` · 清单 ${t.checklist.filter(c => c.done).length}/${t.checklist.length}` : ""} · 最后更新 {md(Date.parse(t.updatedAt))}</span>
           </span>
-          <span className="exec-status queued">待排期</span>
+          <span className="exec-status queued">{tr("待排期")}</span>
         </button>
       </li>)}</ul>}
     </section>}

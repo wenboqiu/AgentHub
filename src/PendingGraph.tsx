@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "./lib/api";
 import { AGENT_LABEL } from "./lib/agents";
+import { t } from "./lib/i18n";
 
 /** 舞台下方留给图例、已处理开关和页面留白的高度 */
 const STAGE_BOTTOM_RESERVE = 128;
@@ -61,7 +62,7 @@ function groupByProject(sessions: Session[], approvals: Set<string>): Group[] {
   // 同一目录在不同机器/会话里大小写可能不一致（AgentHub / agenthub），按小写归并，否则会拆成两个球
   const spellings = new Map<string, Map<string, number>>();
   for (const s of sessions) {
-    const raw = (s.project || "").trim() || "(未知项目)";
+    const raw = (s.project || "").trim() || t("(未知项目)");
     const key = raw.toLowerCase();
     let g = m.get(key);
     if (!g) {
@@ -345,11 +346,11 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
     return (
       <div className="pg-wrap" ref={wrapRef}>
         <div className="pg-toolbar">
-          <button type="button" className="link" onClick={() => onExpand(null)}>‹ 返回总览</button>
+          <button type="button" className="link" onClick={() => onExpand(null)}>‹ {t("返回总览")}</button>
           <span className="pg-toolbar-name">{current.project}</span>
           <span className="pg-toolbar-chips">
-            {pending.length > 0 && <span className="pg-chip tone-wait">{pending.length} 待处理</span>}
-            {running.length > 0 && <span className="pg-chip tone-blue">{running.length} 运行中</span>}
+            {pending.length > 0 && <span className="pg-chip tone-wait">{pending.length} {t("待处理")}</span>}
+            {running.length > 0 && <span className="pg-chip tone-blue">{running.length} {t("运行中")}</span>}
           </span>
         </div>
         <div className="pg-stage" style={{ height: stageH }}>
@@ -357,7 +358,7 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
             const spot = spots[i];
             const urgent = isUrgent(e.s, approvals);
             const tone = e.run ? "tone-blue" : urgent ? "tone-wait" : PENDING_TONE[e.s.state] ?? "tone-abort";
-            const label = e.run ? "运行中" : PENDING_LABEL[e.s.state] ?? STATE_LABEL[e.s.state] ?? e.s.state;
+            const label = e.run ? t("运行中") : t(PENDING_LABEL[e.s.state] ?? STATE_LABEL[e.s.state] ?? e.s.state);
             const tip = `${AGENT_LABEL[e.s.agent]} · ${label}\n${e.s.title || e.s.summary || e.s.id}`;
             const dur = (7 + hash01(e.s.id, 3) * 4).toFixed(2); // 每颗漂移节奏不同
             const delay = (-hash01(e.s.id, 4) * 10).toFixed(2);
@@ -383,14 +384,14 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
                     type="button"
                     className="pg-open"
                     title={tip}
-                    aria-label={`打开会话：${label}`}
+                    aria-label={t("打开会话：{label}", { label })}
                     onClick={() => onOpen(e.s.id)}
                   >
                     <span className={`pg-bubble pg-session ${tone}${e.run ? " pg-run" : ""}`} style={{ animationDelay: `${i * 50}ms` }}>
                       {e.run && <span className="pg-run-arc" />}
                       <span className="pg-state" style={{ fontSize: 10.5 * fs }}>{label}</span>
                       <span className="pg-title" style={{ fontSize: 11 * fs, WebkitLineClamp: titleLines }}>
-                        {e.s.title || e.s.summary || "未命名会话"}
+                        {e.s.title || e.s.summary || t("未命名会话")}
                       </span>
                       <span className="pg-agent" style={{ fontSize: 9.5 * fs }}>{AGENT_LABEL[e.s.agent]}</span>
                     </span>
@@ -401,11 +402,11 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
           })}
         </div>
         <p className="pg-legend">
-          <span><i className="pg-dot tone-blue" />运行中</span>
-          <span><i className="pg-dot tone-wait" />等待授权</span>
-          <span><i className="pg-dot tone-amber" />完成待确认</span>
-          <span><i className="pg-dot tone-abort" />中断待确认</span>
-          <span>点球进入会话即视为处理，会话自动移入已处理</span>
+          <span><i className="pg-dot tone-blue" />{t("运行中")}</span>
+          <span><i className="pg-dot tone-wait" />{t("等待授权")}</span>
+          <span><i className="pg-dot tone-amber" />{t("完成待确认")}</span>
+          <span><i className="pg-dot tone-abort" />{t("中断待确认")}</span>
+          <span>{t("点球进入会话即视为处理，会话自动移入已处理")}</span>
         </p>
       </div>
     );
@@ -423,16 +424,16 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
           const dur = (7 + hash01(g.project, 3) * 4).toFixed(2); // 每个球漂移节奏不同
           const delay = (-hash01(g.project, 4) * 10).toFixed(2);
           const breakdown = hasPending
-            ? `${pendingCount} 个待处理${runningCount ? ` · ${runningCount} 个运行中` : ""}`
-            : `${runningCount} 个运行中`;
+            ? t("{n} 个待处理{more}", { n: pendingCount, more: runningCount ? t(" · {n} 个运行中", { n: runningCount }) : "" })
+            : t("{n} 个运行中", { n: runningCount });
           return (
             <button
               key={g.project}
               type="button"
               className="pg-slot pg-scatter-slot"
               style={{ width: size, height: size, left: x, top: y, marginLeft: -size / 2, marginTop: -size / 2 }}
-              title={`展开 ${g.project}：${breakdown}`}
-              aria-label={`项目 ${g.project}，${breakdown}`}
+              title={t("展开 {p}：{b}", { p: g.project, b: breakdown })}
+              aria-label={t("项目 {p}，{b}", { p: g.project, b: breakdown })}
               onClick={() => onExpand(g.project)}
             >
               <span className="pg-floater" style={{ animation: `pg-drift ${dur}s ease-in-out ${delay}s infinite` }}>
@@ -443,13 +444,13 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
                     {hasPending && (
                       <span className={`pg-num pg-num-pending${urgent ? " pg-num-urgent" : ""}`}>
                         <b>{pendingCount}</b>
-                        <i>待处理</i>
+                        <i>{t("待处理")}</i>
                       </span>
                     )}
                     {runningCount > 0 && (
                       <span className="pg-num pg-num-running">
                         <b>{runningCount}</b>
-                        <i>运行中</i>
+                        <i>{t("运行中")}</i>
                       </span>
                     )}
                   </span>
@@ -462,10 +463,10 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
       </div>
 
       <p className="pg-legend">
-        <span><i className="pg-dot tone-wait" />有待授权</span>
-        <span><i className="pg-dot tone-blue" />只有运行中</span>
-        <span><i className="pg-dot pg-dot-ring" />虚环 = 有运行中</span>
-        <span>待处理为暖色 · 运行中为蓝色，同时显示</span>
+        <span><i className="pg-dot tone-wait" />{t("有待授权")}</span>
+        <span><i className="pg-dot tone-blue" />{t("只有运行中")}</span>
+        <span><i className="pg-dot pg-dot-ring" />{t("虚环 = 有运行中")}</span>
+        <span>{t("待处理为暖色 · 运行中为蓝色，同时显示")}</span>
       </p>
 
       {handledList.length > 0 && (
@@ -477,7 +478,7 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
             onClick={() => setHandledOpen(!handledOpen)}
           >
             <span className="pg-caret" aria-hidden>›</span>
-            已处理
+            {t("已处理")}
             <span className="count dim">{handledList.length}</span>
           </button>
           {handledOpen && (
@@ -486,9 +487,9 @@ export default function PendingGraph({ sessions, handled, approvals, expanded, o
                 <li key={s.id}>
                   <button type="button" onClick={() => onOpen(s.id)} title={s.title || s.summary || s.id}>
                     <span className={`tag ${s.agent}`}>{AGENT_LABEL[s.agent]}</span>
-                    <span className="pg-hl-proj">{s.project || "(未知项目)"}</span>
+                    <span className="pg-hl-proj">{s.project || t("(未知项目)")}</span>
                     <span className="pg-hl-title">{s.title || s.summary || s.id}</span>
-                    <span className="pg-hl-state">{STATE_LABEL[s.state] ?? s.state}</span>
+                    <span className="pg-hl-state">{t(STATE_LABEL[s.state] ?? s.state)}</span>
                   </button>
                 </li>
               ))}

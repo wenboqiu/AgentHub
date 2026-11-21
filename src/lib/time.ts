@@ -20,12 +20,14 @@ export function clockAt(iso: string | null | undefined, now: Date = new Date()):
 }
 
 /** 「xx 前」式的相对时间：列表和侧栏共用 */
+import { t } from "./i18n.ts";
+
 export function ago(iso: string, now: number): string {
   const s = Math.max(0, Math.round((now - Date.parse(iso)) / 1000));
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return `${Math.floor(s / 86400)} 天前`;
+  if (s < 60) return t("刚刚");
+  if (s < 3600) return t("{n} 分钟前", { n: Math.floor(s / 60) });
+  if (s < 86400) return t("{n} 小时前", { n: Math.floor(s / 3600) });
+  return t("{n} 天前", { n: Math.floor(s / 86400) });
 }
 
 /** 悬停提示用的完整时间（跟随系统时区与语言） */

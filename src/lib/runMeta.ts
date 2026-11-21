@@ -1,4 +1,5 @@
 import type { Run, RunActivity, RunUsage } from "./api";
+import { t } from "./i18n.ts";
 
 /** token 数按人读的方式缩写：980 / 1.2k / 34k / 1.4M */
 export function shortTokens(n: number): string {
@@ -12,11 +13,11 @@ export function shortTokens(n: number): string {
 /** 用时：18 秒 / 2 分 05 秒 / 1 小时 12 分 */
 export function formatElapsed(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s} 秒`;
+  if (s < 60) return t("{s} 秒", { s });
   const m = Math.floor(s / 60);
   const sec = s % 60;
-  if (m < 60) return sec ? `${m} 分 ${String(sec).padStart(2, "0")} 秒` : `${m} 分钟`;
-  return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
+  if (m < 60) return sec ? t("{m} 分 {s} 秒", { m, s: String(sec).padStart(2, "0") }) : t("{m} 分钟", { m });
+  return t("{h} 小时 {m} 分", { h: Math.floor(m / 60), m: m % 60 });
 }
 
 /** 一次运行的耗时：跑完按起止时间算，还在跑就按到现在算 */
@@ -34,23 +35,23 @@ const fmtCredits = (c: number) => (Number.isInteger(c) ? String(c) : c.toFixed(2
 
 /** 用量说明：输入 1.2k · 输出 345 · 缓存 8k tokens · $0.031 · 12.5 积分 */
 export function usageText(u: RunUsage): string {
-  const parts = [`输入 ${shortTokens(u.input)}`, `输出 ${shortTokens(u.output)}`];
-  if (u.cached) parts.push(`缓存 ${shortTokens(u.cached)}`);
+  const parts = [t("输入 {n}", { n: shortTokens(u.input) }), t("输出 {n}", { n: shortTokens(u.output) })];
+  if (u.cached) parts.push(t("缓存 {n}", { n: shortTokens(u.cached) }));
   let text = `${parts.join(" · ")} tokens`;
   if (u.costUsd) text += ` · ${money(u.costUsd)}`;
-  if (u.credits) text += ` · ${fmtCredits(u.credits)} 积分`;
+  if (u.credits) text += ` · ${fmtCredits(u.credits)} ${t("积分")}`;
   return text;
 }
 
 /** 跑完之后那行结尾说明：本次完成 · 用时 1 分 20 秒 · 输入… */
 export function runSummary(run: Run, now = Date.now()): string {
   const state =
-    run.status === "failed" ? "运行失败"
-    : run.status === "stopped" ? "已停止"
-    : run.status === "done" ? "本次完成"
-    : "运行中";
-  const parts = [state, `用时 ${formatElapsed(runElapsed(run, now))}`];
-  if (run.model) parts.push(`模型 ${run.model}`);
+    run.status === "failed" ? t("运行失败")
+    : run.status === "stopped" ? t("已停止")
+    : run.status === "done" ? t("本次完成")
+    : t("运行中");
+  const parts = [state, t("用时 {d}", { d: formatElapsed(runElapsed(run, now)) })];
+  if (run.model) parts.push(t("模型 {m}", { m: run.model }));
   if (run.usage) parts.push(usageText(run.usage));
   return parts.join(" · ");
 }

@@ -5,6 +5,7 @@ import Icon from "./Icon";
 import { localDateTime } from "./ScheduleFields";
 import { PrioritySelect } from "./GoalPriority";
 import InlineField from "./InlineField";
+import { t } from "./lib/i18n";
 
 const fmt = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString() : "未设置";
 const GOAL_STATUS: Record<Goal["status"], string> = { active: "进行中", done: "已完成", archived: "已归档" };
@@ -33,7 +34,7 @@ export default function GoalView({ goal, tasks, api, onBack, onTask, onSaved, on
 
       <div className="detail-props">
         <div className="prop"><span className="prop-label">状态</span>
-          <div className="seg status" role="group" aria-label="目标状态">{(Object.keys(GOAL_STATUS) as Goal["status"][]).map(s => <button key={s} className={goal.status === s ? "active" : ""} aria-pressed={goal.status === s} disabled={busy} onClick={() => patch({ status: s })}>{GOAL_STATUS[s]}</button>)}</div>
+          <div className="seg status" role="group" aria-label="目标状态">{(Object.keys(GOAL_STATUS) as Goal["status"][]).map(s => <button key={s} className={goal.status === s ? "active" : ""} aria-pressed={goal.status === s} disabled={busy} onClick={() => patch({ status: s })}>{t(GOAL_STATUS[s])}</button>)}</div>
         </div>
         <div className="prop"><span className="prop-label">优先级</span>
           <PrioritySelect value={goal.priority ?? "medium"} onChange={priority => patch({ priority })} />

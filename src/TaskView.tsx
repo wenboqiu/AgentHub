@@ -13,6 +13,7 @@ import FilePreview from "./FilePreview";
 import TaskNotes from "./TaskNotes";
 import { cachedImage, fileKind, formatSize, loadImage, loadImages, notesForAgent, readForUpload, refOf, rememberImage, saveBase64 } from "./lib/attachments";
 import { machineTag, pickMachine } from "./lib/machines";
+import { t } from "./lib/i18n";
 import { parseQuestions } from "./lib/questions";
 import { ago } from "./lib/time";
 import { AGENT_LABEL, DISPATCHABLE_AGENTS, agentName, isDispatchable, isListenOnly } from "./lib/agents";
@@ -501,7 +502,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
           <span className="task-no" title="任务序号">#{task.id}</span>
           <InlineField className="title-field" value={task.title} ariaLabel="任务标题" placeholder="任务标题" maxLength={200} disabled={busy} onSave={title => patch({ title })} />
         </div>
-        <span className={`task-status ${task.status}`}>{TASK_LABEL[task.status]}</span>
+        <span className={`task-status ${task.status}`}>{t(TASK_LABEL[task.status])}</span>
         {saved && <span className="save-flash" role="status">已保存</span>}
         <span className="spacer" />
         <div className="head-menu">
@@ -650,7 +651,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
                   <button className="entity-row" disabled={!s} onClick={() => onSession(id)}>
                     <span className="entity-main">
                       <strong>{s ? `${AGENT_LABEL[s.agent] ?? s.agent} · ${s.project || "未知项目"}` : looked ? "会话记录已删除" : "读取中…"}</strong>
-                      <span className="dim">{s ? `${s.title} · ${STATE_LABEL[s.state] ?? s.state} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span>
+                      <span className="dim">{s ? `${s.title} · ${t(STATE_LABEL[s.state] ?? s.state)} · ${new Date(s.updatedAt).toLocaleString()}` : id}</span>
                     </span>
                   </button>
                   <button className="icon-ghost" aria-label="取消挂接" title="取消挂接" disabled={busy} onClick={() => void guard(async () => onSaved(await api.unlinkSession(task.id, id)))}><Icon name="close" /></button>
@@ -666,7 +667,7 @@ export default function TaskView({ task, goals, sessions, agents, api, boardEntr
 
       <aside className="task-side" aria-label="任务属性">
         <div className="prop"><span className="prop-label">状态</span>
-          <select className="inline-control" aria-label="任务状态" value={task.status} disabled={busy} onChange={e => patch({ status: e.target.value as Task["status"] })}>{STATUSES.map(s => <option key={s} value={s}>{TASK_LABEL[s]}</option>)}</select>
+          <select className="inline-control" aria-label="任务状态" value={task.status} disabled={busy} onChange={e => patch({ status: e.target.value as Task["status"] })}>{STATUSES.map(s => <option key={s} value={s}>{t(TASK_LABEL[s])}</option>)}</select>
         </div>
         <div className="prop"><span className="prop-label">执行人</span>
           <span className="prop-value">{cfgA}</span>

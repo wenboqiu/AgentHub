@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { formatElapsed, liveLabel, listenLabel, runElapsed, runSummary, shortTokens, usageText } from '../src/lib/runMeta.ts';
+import { setLang } from '../src/lib/i18n.ts';
+
+// 这些断言针对中文格式逻辑；i18n 默认英文，这里显式切回中文
+setLang('zh');
 import type { Run, RunActivity } from '../src/lib/api.ts';
 
 const now = Date.parse('2026-11-05T12:00:00Z');
