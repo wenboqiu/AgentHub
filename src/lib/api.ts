@@ -357,6 +357,17 @@ export class Api {
     return (await res.json()) as { token: string; email: string };
   }
 
+  /** 邀请码注册，成功即登录（返回和 login 一样的 {token, email}） */
+  static async register(url: string, code: string, email: string, password: string, device: string): Promise<{ token: string; email: string }> {
+    const res = await fetch(base(url) + "/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: code.trim(), email: email.trim(), password, device }),
+    });
+    if (!res.ok) throw new Error((await errorText(res)) || `服务端返回 ${res.status}`);
+    return (await res.json()) as { token: string; email: string };
+  }
+
   private async call<T>(method: string, path: string, body?: unknown, quiet401 = false): Promise<T> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     if (body !== undefined) headers["Content-Type"] = "application/json";

@@ -121,10 +121,13 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
   // 一级列表「设备」那句现状：拉不到就 null（显示加载中），不挡住其它条目
   const [machines, setMachines] = useState<Machine[] | null>(null);
 
-  // 登录表单
+  // 登录表单（regMode=true 时同一张页面切换成邀请码注册）
   const [server, setServer] = useState(cfg.serverUrl || DEFAULT_SERVER);
   const [email, setEmail] = useState(cfg.email ?? "");
   const [password, setPassword] = useState("");
+  const [regMode, setRegMode] = useState(false);
+  const [invite, setInvite] = useState("");
+  const [password2, setPassword2] = useState("");
   // 已登录：设备列表、改密码
   const [devices, setDevices] = useState<Device[] | null>(null);
   const [oldPw, setOldPw] = useState("");
@@ -210,6 +213,17 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     }
   };
 
+  // 登录 / 注册成功后的公共收尾：存配置、Android 后台服务用新 token 重启
+  const finishAuth = async (url: string, r: { token: string; email: string }) => {
+    const c: Config = { ...cfg, serverUrl: url, token: r.token, email: r.email };
+    await saveConfig(c);
+    if (isAndroid && native()?.isRunning()) native()?.start(c.serverUrl, c.token);
+    setPassword("");
+    setPassword2("");
+    setMsg("");
+    onSaved(c);
+  };
+
   const login = async () => {
     const url = server.trim().replace(/\/+$/, "");
     if (!url || !email.trim() || !password) return setMsg(t("请填好服务器地址、邮箱和密码"));
@@ -217,15 +231,26 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     setMsg(t("登录中…"));
     try {
       const r = await Api.login(url, email, password, deviceName(cfg));
-      const c: Config = { ...cfg, serverUrl: url, token: r.token, email: r.email };
-      await saveConfig(c);
-      // Android 后台提醒开着时，用新 token 重启原生服务
-      if (isAndroid && native()?.isRunning()) native()?.start(c.serverUrl, c.token);
-      setPassword("");
-      setMsg("");
-      onSaved(c);
+      await finishAuth(url, r);
     } catch (e) {
       setMsg(t("登录失败：{e}", { e: e instanceof Error ? e.message : String(e) }));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const register = async () => {
+    const url = server.trim().replace(/\/+$/, "");
+    if (!url || !invite.trim() || !email.trim() || !password) return setMsg(t("请填好服务器地址、邀请码、邮箱和密码"));
+    if (password.length < 8) return setMsg(t("密码至少 8 位"));
+    if (password !== password2) return setMsg(t("两次输入的密码不一致"));
+    setBusy(true);
+    setMsg(t("注册中…"));
+    try {
+      const r = await Api.register(url, invite, email, password, deviceName(cfg));
+      await finishAuth(url, r);
+    } catch (e) {
+      setMsg(t("注册失败：{e}", { e: e instanceof Error ? e.message : String(e) }));
     } finally {
       setBusy(false);
     }
@@ -345,46 +370,70 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
     setBg(on);
   };
 
-  // ---------- 未登录：只显示登录表单 ----------
+  // ---------- 未登录：登录 / 邀请码注册 ----------
   if (!loggedIn) {
+    const submit = () => (regMode ? register() : login());
     return (
       <div className="app settings">
         <header>
-          <h1>{t("登录 AgentHub")}</h1>
+          <h1>{regMode ? t("注册 AgentHub") : t("登录 AgentHub")}</h1>
         </header>
         <main>
           {notice && <p className="msg bad">{notice}</p>}
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              void login();
+              void submit();
             }}
           >
             <label>
               {t("服务器地址")}
               <input value={server} onChange={(e) => setServer(e.target.value)} placeholder={DEFAULT_SERVER} autoCapitalize="off" autoCorrect="off" />
             </label>
+            {regMode && (
+              <label>
+                {t("邀请码")}
+                <input value={invite} onChange={(e) => setInvite(e.target.value)} placeholder={t("如 AB2CD-34FGH")} autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
+              </label>
+            )}
             <label>
               {t("邮箱")}
               <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoCapitalize="off" autoCorrect="off" autoComplete="username" />
             </label>
             <label>
               {t("密码")}
-              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={regMode ? "new-password" : "current-password"} />
             </label>
+            {regMode && (
+              <label>
+                {t("确认密码")}
+                <input type="password" value={password2} onChange={(e) => setPassword2(e.target.value)} autoComplete="new-password" />
+              </label>
+            )}
             <div className="btns">
               <button className="primary" type="submit" disabled={busy}>
-                {t("登录")}
+                {regMode ? t("注册并进入") : t("登录")}
               </button>
             </div>
           </form>
           {msg && <p className="msg">{msg}</p>}
           <p className="hint">
-            {t("还没有账号？在浏览器打开")}
-            {" "}
-            <b>{(server.trim().replace(/\/+$/, "") || DEFAULT_SERVER) + "/register"}</b>
-            {" "}
-            {t("，凭邀请码自助注册，再回来登录。")}
+            {regMode ? (
+              <button type="button" className="link" onClick={() => { setRegMode(false); setMsg(""); }}>
+                {t("已有账号？返回登录")}
+              </button>
+            ) : (
+              <>
+                <button type="button" className="link" onClick={() => { setRegMode(true); setMsg(""); }}>
+                  {t("没有账号？用邀请码注册")}
+                </button>
+                {"　"}
+                {t("也可以在浏览器打开")}
+                {" "}
+                <b>{(server.trim().replace(/\/+$/, "") || DEFAULT_SERVER) + "/register"}</b>
+                {t("注册。")}
+              </>
+            )}
           </p>
         </main>
       </div>
