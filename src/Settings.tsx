@@ -241,13 +241,23 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
 
   const register = async () => {
     const url = server.trim().replace(/\/+$/, "");
-    if (!url || !invite.trim() || !email.trim() || !password) return setMsg(t("请填好服务器地址、邀请码、邮箱和密码"));
+    // 邀请码框里可以直接粘贴整条注册链接（…/register?code=XXXX），自动提取码
+    let code = invite.trim();
+    if (code.includes("code=")) {
+      try {
+        code = new URL(code).searchParams.get("code") ?? "";
+      } catch {
+        const m = /code=([A-Za-z0-9-]+)/.exec(code);
+        code = m ? m[1] : code;
+      }
+    }
+    if (!url || !code || !email.trim() || !password) return setMsg(t("请填好服务器地址、邀请码、邮箱和密码"));
     if (password.length < 8) return setMsg(t("密码至少 8 位"));
     if (password !== password2) return setMsg(t("两次输入的密码不一致"));
     setBusy(true);
     setMsg(t("注册中…"));
     try {
-      const r = await Api.register(url, invite, email, password, deviceName(cfg));
+      const r = await Api.register(url, code, email, password, deviceName(cfg));
       await finishAuth(url, r);
     } catch (e) {
       setMsg(t("注册失败：{e}", { e: e instanceof Error ? e.message : String(e) }));

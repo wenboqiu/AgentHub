@@ -51,8 +51,8 @@ function h(tag, props, ...children) {
   return el
 }
 
-function renderForm(error) {
-  const code = h('input', { placeholder: '如 AB2CD-34FGH', autocomplete: 'off', spellcheck: false, required: true, autofocus: true })
+function renderForm(error, presetCode) {
+  const code = h('input', { placeholder: '如 AB2CD-34FGH', autocomplete: 'off', spellcheck: false, required: true, autofocus: !presetCode, value: presetCode || '' })
   const email = h('input', { type: 'email', placeholder: 'you@example.com', autocomplete: 'email', required: true })
   const pwd = h('input', { type: 'password', placeholder: '至少 8 位', autocomplete: 'new-password', required: true })
   const pwd2 = h('input', { type: 'password', placeholder: '再输一遍', autocomplete: 'new-password', required: true })
@@ -103,6 +103,14 @@ function renderDone() {
 }
 
 renderForm()
+// 链接带 ?code= 时直接预填邀请码（管理员分享的是整条注册链接）
+try {
+  const fromLink = new URLSearchParams(location.search).get('code')
+  if (fromLink) {
+    const input = app.querySelector('input')
+    if (input && !input.value) { input.value = fromLink.trim().toUpperCase(); input.focus() }
+  }
+} catch {}
 </script>
 </body>
 </html>

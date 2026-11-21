@@ -178,7 +178,7 @@ function inviteForm(reloadList) {
     },
   },
     h('div', { class: 'actions' }, note, uses, days, h('button', { class: 'primary', type: 'submit' }, '生成邀请码')),
-    h('div', { class: 'muted', style: 'margin-top:8px' }, '次数默认 1 次；有效天数留空不过期。生成后自动复制，发给对方，它在浏览器打开服务器地址 /register 自助注册。'),
+    h('div', { class: 'muted', style: 'margin-top:8px' }, '次数默认 1 次；有效天数留空不过期。生成后自动复制；也可以用列表里的「复制链接」把整条注册链接发给对方，打开后邀请码自动填好。'),
     err)
 }
 
@@ -196,6 +196,11 @@ async function loadInvites(listEl, act) {
         h('td', {}, time(i.lastUsedAt)),
         h('td', {}, h('div', { class: 'actions' },
           h('button', { onclick: () => { navigator.clipboard?.writeText(i.code).catch(() => {}); toast('已复制 ' + i.code) } }, '复制'),
+          h('button', { onclick: () => {
+            const link = location.origin + '/register?code=' + encodeURIComponent(i.code)
+            navigator.clipboard?.writeText(link).catch(() => {})
+            toast('已复制注册链接')
+          } }, '复制链接'),
           i.revoked
             ? h('span', { class: 'muted' }, '已停用')
             : h('button', { class: 'danger', onclick: () => confirm(`停用邀请码 ${i.code}？之后用它注册会失败，已注册的账号不受影响。`) && act(() => api('DELETE', `/invites/${i.id}`), '已停用') }, '停用'),
