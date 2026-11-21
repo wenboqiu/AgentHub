@@ -53,8 +53,9 @@ const KEY = 'agenthub.adminToken'
 let token = ''
 try { token = sessionStorage.getItem(KEY) || '' } catch {}
 const app = document.getElementById('app')
-// 展开了设备列表的用户
+// 展开了设备列表的用户 / 邀请码面板是否展开
 const open = new Set()
+let invitesOpen = false
 
 // 用 textContent 拼 DOM，邮箱 / 设备名是用户输入，不能当 HTML
 function h(tag, props, ...children) {
@@ -149,8 +150,57 @@ function createForm(reload) {
   },
     h('h2', {}, '新建账号'),
     h('div', { class: 'actions' }, email, pwd, rnd, h('button', { class: 'primary', type: 'submit' }, '创建')),
-    h('div', { class: 'muted', style: 'margin-top:8px' }, '没有注册入口，账号只能在这里创建。创建后把邮箱和密码告诉用户，在 App 里直接登录。'),
+    h('div', { class: 'muted', style: 'margin-top:8px' }, '直接把邮箱密码告诉对方。想让人自助注册就生成「邀请码」，对方在 /register 页自己建号。'),
     err)
+}
+
+// ---------- 邀请码 ----------
+// act：renderList 里统一的「执行 + 提示 + 刷新」，出错的弹 toast
+function inviteForm(reloadList) {
+  const note = h('input', { placeholder: '备注（给谁的）', style: 'width:160px', autocomplete: 'off' })
+  const uses = h('input', { type: 'number', min: 1, max: 1000, value: '1', style: 'width:70px', title: '可用次数' })
+  const days = h('input', { type: 'number', min: 1, max: 3650, placeholder: '天数', style: 'width:80px', title: '有效天数，留空不过期' })
+  const err = h('div', { class: 'err' })
+  return h('form', {
+    onsubmit: async e => {
+      e.preventDefault()
+      err.textContent = ''
+      try {
+        const inv = await api('POST', '/invites', {
+          note: note.value,
+          maxUses: uses.value ? Number(uses.value) : undefined,
+          expiresInDays: days.value ? Number(days.value) : undefined,
+        })
+        navigator.clipboard?.writeText(inv.code).catch(() => {})
+        toast('已生成 ' + inv.code + '（已复制）')
+        reloadList()
+      } catch (x) { err.textContent = x.message }
+    },
+  },
+    h('div', { class: 'actions' }, note, uses, days, h('button', { class: 'primary', type: 'submit' }, '生成邀请码')),
+    h('div', { class: 'muted', style: 'margin-top:8px' }, '次数默认 1 次；有效天数留空不过期。生成后自动复制，发给对方，它在浏览器打开服务器地址 /register 自助注册。'),
+    err)
+}
+
+async function loadInvites(listEl, act) {
+  try {
+    const invites = await api('GET', '/invites')
+    if (!invites.length) return listEl.replaceChildren(h('div', { class: 'empty' }, '还没有邀请码'))
+    listEl.replaceChildren(h('table', {},
+      h('thead', {}, h('tr', {}, h('th', {}, '邀请码'), h('th', {}, '备注'), h('th', {}, '已用 / 上限'), h('th', {}, '过期时间'), h('th', {}, '最近使用'), h('th', {}))),
+      h('tbody', {}, invites.map(i => h('tr', {},
+        h('td', {}, h('code', {}, i.code)),
+        h('td', {}, i.note || '—'),
+        h('td', {}, `${i.usedCount} / ${i.maxUses}`),
+        h('td', {}, i.expiresAt ? time(i.expiresAt) : '不过期'),
+        h('td', {}, time(i.lastUsedAt)),
+        h('td', {}, h('div', { class: 'actions' },
+          h('button', { onclick: () => { navigator.clipboard?.writeText(i.code).catch(() => {}); toast('已复制 ' + i.code) } }, '复制'),
+          i.revoked
+            ? h('span', { class: 'muted' }, '已停用')
+            : h('button', { class: 'danger', onclick: () => confirm(`停用邀请码 ${i.code}？之后用它注册会失败，已注册的账号不受影响。`) && act(() => api('DELETE', `/invites/${i.id}`), '已停用') }, '停用'),
+        )))))))
+  } catch (e) { listEl.replaceChildren(h('div', { class: 'err' }, e.message)) }
 }
 
 async function renderList() {
@@ -160,6 +210,14 @@ async function renderList() {
   app.replaceChildren(
     h('header', {}, h('h1', {}, 'AgentHub · 管理后台'),
       h('button', { class: 'primary', onclick: () => createBox.firstChild ? createBox.replaceChildren() : createBox.replaceChildren(createForm(load)) }, '新建账号'),
+      h('button', { onclick: () => {
+        if (invitesOpen) { invitesOpen = false; createBox.replaceChildren(); return }
+        invitesOpen = true
+        const listEl = h('div', {}, '加载中…')
+        const box = h('div', { class: 'card' }, h('h2', {}, '邀请码'), inviteForm(() => loadInvites(listEl, act)), listEl)
+        createBox.replaceChildren(box)
+        loadInvites(listEl, act)
+      } }, '邀请码'),
       h('button', { onclick: logout }, '退出')),
     createBox,
     h('div', { class: 'card' }, h('div', { class: 'table' }, h('table', {},

@@ -13,9 +13,9 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 
 ## 接口
 
-账号体系（0.3.0 起）：邮箱 + 密码登录，每台设备登录后拿到自己的会话 token（库里只存 sha256，180 天按最后使用时间滑动）。**不开放注册**，账号只能由管理员在 `/admin` 页面创建。每个账号的数据（会话、运行、消息、授权、在线电脑）互相隔离，别人的数据一律 404。
+账号体系（0.3.0 起）：邮箱 + 密码登录，每台设备登录后拿到自己的会话 token（库里只存 sha256，180 天按最后使用时间滑动）。**不开放自由注册**：账号由管理员在 `/admin` 页面创建，或生成**邀请码**让用户在 `/register` 页面自助注册（0.19.0 起）。每个账号的数据（会话、运行、消息、授权、在线电脑）互相隔离，别人的数据一律 404。
 
-除 `/health`、`/auth/login`、`/admin*` 外都要 `Authorization: Bearer <设备会话 token>`（WebSocket 用 `?token=`）。没带 token 返回 401 `请先登录`，无效 / 过期返回 401 `登录已过期，请重新登录`。
+除 `/health`、`/auth/login`、`/auth/register`、`/register`、`/admin*` 外都要 `Authorization: Bearer <设备会话 token>`（WebSocket 用 `?token=`）。没带 token 返回 401 `请先登录`，无效 / 过期返回 401 `登录已过期，请重新登录`。
 
 ### 账号接口
 
@@ -24,6 +24,7 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/auth/login` | `{email, password, device}` → `{token, email}`；同一 IP 每分钟 10 次，超过 429；错误统一 401 `邮箱或密码不对` |
+| POST | `/auth/register` | `{code, email, password, device?}` 邀请码注册 → `{token, email}`，成功即登录。邀请码无效 / 过期 / 停用 / 用完统一 400 `邀请码无效或已用完`；邮箱重复 409；与登录共用每 IP 每分钟 10 次限流 |
 | POST | `/auth/logout` | 删当前设备会话并关闭它的 WS |
 | GET | `/auth/me` | `{email}` |
 | GET | `/auth/devices` | `[{id, device, createdAt, lastUsedAt, current}]` |
@@ -32,7 +33,7 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 
 ### 管理页与管理接口
 
-`GET /admin` 返回管理页（`src/admin.html`，单文件）：输入 `ADMIN_TOKEN` 后可以建账号、重置密码、查看 / 踢设备、删账号。接口都要 `Authorization: Bearer <ADMIN_TOKEN>`；同一 IP 10 分钟内错 10 次后 429。
+`GET /admin` 返回管理页（`src/admin.html`，单文件）：输入 `ADMIN_TOKEN` 后可以建账号、生成 / 停用邀请码、重置密码、查看 / 踢设备、删账号。接口都要 `Authorization: Bearer <ADMIN_TOKEN>`；同一 IP 10 分钟内错 10 次后 429。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -41,6 +42,10 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | DELETE | `/admin/users/:id` | 删账号（级联删数据） |
 | GET | `/admin/users/:id/devices` | 该用户的设备会话 |
 | DELETE | `/admin/devices/:id` | 踢掉一个设备 |
+| GET / POST | `/admin/invites` | 列表（最多 500 条，含 `usedCount/maxUses/expiresAt/revoked/lastUsedAt`）/ 生成 `{note?, maxUses?, expiresInDays?}`：次数默认 1（上限 1000），天数留空不过期，返回带 10 位码（`XXXXX-XXXXX`，无 0/O/1/I/L） |
+| DELETE | `/admin/invites/:id` | 停用（置 revoked，已注册账号不受影响） |
+
+公开页面 `GET /register` 是邀请码自助注册页（`src/register.html`，单文件）：填邀请码、邮箱、密码建号，成功提示去客户端登录。页面公开无鉴权——注册接口自己限流，且不设邀请码时无法注册。
 
 ### 事件与会话接口
 

@@ -971,14 +971,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     pushSession(userId, s, notify)
   }
 
-  // 鉴权：/health、/auth/login、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）免登录；其它都要设备会话 token
+  // 鉴权：/health、/auth/login、/auth/register、/register 页面、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）免登录；其它都要设备会话 token
   app.decorateRequest('userId', 0)
   app.decorateRequest('authSessionId', 0)
   app.addHook('onRequest', async (req, reply) => {
-    // 没有对应路由的请求（比如 /auth/register）交给 404 处理，不要先返回 401
+    // 没有对应路由的请求交给 404 处理，不要先返回 401
     if (req.method === 'OPTIONS' || req.is404) return
     const path = req.url.split('?')[0]
-    if (path === '/health' || path === '/auth/login' || path === '/admin' || path.startsWith('/admin/')) return
+    if (path === '/health' || path === '/auth/login' || path === '/auth/register' || path === '/register' || path === '/admin' || path.startsWith('/admin/')) return
     const isWs = path === '/ws'
     const token = isWs ? new URL(req.url, 'http://x').searchParams.get('token') : bearer(req)
     const r = await authenticate(pool, token)

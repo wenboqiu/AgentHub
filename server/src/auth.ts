@@ -2,6 +2,7 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto'
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify'
 import type pg from 'pg'
+import { normCode, registerWithInvite } from './invites.ts'
 
 export const SESSION_TTL = 180 * 24 * 3600 * 1000
 const TOUCH_INTERVAL = 3600 * 1000
@@ -41,8 +42,8 @@ export const normEmail = (v: unknown) => (typeof v === 'string' ? v.trim().toLow
 export const emailError = (email: string) => (!EMAIL_RE.test(email) || email.length > 200 ? '邮箱格式不对' : '')
 export const passwordError = (v: unknown) => (typeof v !== 'string' || v.length < 8 ? '密码至少 8 位' : v.length > 200 ? '密码太长' : '')
 
-// 登录限流：内存里按 IP，每分钟 10 次。每个 app 一份状态（测试互不影响）
-function makeLimiter() {
+// 登录 / 注册限流：内存里按 IP，每分钟 max 次。每个 app 一份状态（测试互不影响）
+function makeLimiter(max = 10) {
   const hits = new Map<string, number[]>()
   return (ip: string) => {
     const now = Date.now()
@@ -50,7 +51,7 @@ function makeLimiter() {
     list.push(now)
     hits.set(ip, list)
     if (hits.size > 5000) for (const [k, v] of hits) if (now - v[v.length - 1] > 60_000) hits.delete(k)
-    return list.length > 10
+    return list.length > max
   }
 }
 
@@ -86,9 +87,9 @@ export type Kick = {
   user(userId: number): void
 }
 
-export function registerAuth(app: FastifyInstance, pool: pg.Pool, kick: Kick) {
+export function registerAuth(app: FastifyInstance, pool: pg.Pool, kick: Kick, ratePerMin = 10) {
   const fail = (reply: FastifyReply, code: number, error: string) => reply.code(code).send({ error })
-  const limited = makeLimiter()
+  const limited = makeLimiter(ratePerMin)
 
   app.post('/auth/login', async (req, reply) => {
     if (limited(req.ip)) return fail(reply, 429, '操作太频繁，请稍后再试')
@@ -100,6 +101,20 @@ export function registerAuth(app: FastifyInstance, pool: pg.Pool, kick: Kick) {
     const ok = res.rowCount ? await verifyPassword(password, res.rows[0].password_hash) : (await hashPassword(password), false)
     if (!ok) return fail(reply, 401, '邮箱或密码不对')
     return { token: await newAuthSession(pool, res.rows[0].id, body.device), email }
+  })
+
+  // 邀请码注册：注册成功直接登录（返回和 /auth/login 一样的 {token, email}）。
+  // 与登录共用同一个 IP 限流：注册入口是公开的，不能被拿来爆破邀请码。
+  app.post('/auth/register', async (req, reply) => {
+    if (limited(req.ip)) return fail(reply, 429, '操作太频繁，请稍后再试')
+    const body = (req.body ?? {}) as Record<string, unknown>
+    const email = normEmail(body.email)
+    const bad = emailError(email) || passwordError(body.password)
+    if (bad) return fail(reply, 400, bad)
+    if (normCode(body.code).length < 4) return fail(reply, 400, '请填写邀请码')
+    const r = await registerWithInvite(pool, body.code as string, email, await hashPassword(body.password as string))
+    if ('error' in r) return fail(reply, r.statusCode, r.error)
+    return { token: await newAuthSession(pool, r.userId, body.device), email }
   })
 
   app.post('/auth/logout', async req => {

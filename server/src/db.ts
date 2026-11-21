@@ -16,6 +16,7 @@ import { migrateAttachments } from './attachments.ts'
 import { migrateReferee } from './referee.ts'
 import { migrateMandate, pruneMandateDecisions } from './mandate.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
+import { migrateInvites } from './invites.ts'
 import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
 import { isInternalTitle } from './session-kind.ts'
 import { migrateStats } from './stats.ts'
@@ -218,6 +219,8 @@ export async function migrate(pool: pg.Pool) {
   try {
     await client.query('SELECT pg_advisory_lock(727001)')
     await migrateAll(client)
+    // 邀请码只引用 users，排在建账号表之后
+    await migrateInvites(client)
     await migrateTasks(client)
     await migrateNotify(client)
     await migratePrefs(client)

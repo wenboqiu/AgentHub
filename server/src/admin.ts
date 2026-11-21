@@ -4,8 +4,10 @@ import { join } from 'node:path'
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import type pg from 'pg'
 import { adminGuard, emailError, hashPassword, normEmail, passwordError, type Kick } from './auth.ts'
+import { createInvite, deleteInvite, listInvites, revokeInvite } from './invites.ts'
 
 const PAGE = readFileSync(join(import.meta.dirname, 'admin.html'), 'utf8')
+const REGISTER_PAGE = readFileSync(join(import.meta.dirname, 'register.html'), 'utf8')
 // 页面只有内联脚本 / 样式，数据只请求本站
 const CSP = "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
@@ -26,6 +28,16 @@ export function registerAdmin(app: FastifyInstance, pool: pg.Pool, adminToken: s
   }
   app.get('/admin', page)
   app.get('/admin/', page)
+
+  // 邀请码注册页：公开（注册接口自己限流），页面本身没有任何敏感内容
+  app.get('/register', async (_req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .header('Content-Security-Policy', CSP)
+      .header('X-Robots-Tag', 'noindex')
+      .header('Cache-Control', 'no-store')
+      .send(REGISTER_PAGE),
+  )
 
   app.register(async api => {
     api.addHook('preHandler', adminGuard(adminToken))
@@ -90,6 +102,27 @@ export function registerAdmin(app: FastifyInstance, pool: pg.Pool, adminToken: s
       if (!id) return fail(reply, 404, '账号不存在')
       const r = await pool.query<DeviceRow>('SELECT id, device, created_at, last_used_at FROM auth_sessions WHERE user_id = $1 ORDER BY last_used_at DESC, id DESC', [id])
       return r.rows.map(toDevice)
+    })
+
+    // ---------- 邀请码 ----------
+    api.get('/admin/invites', async () => listInvites(pool))
+
+    api.post('/admin/invites', async (req, reply) => {
+      const body = (req.body ?? {}) as Record<string, unknown>
+      const inv = await createInvite(pool, body)
+      return inv
+    })
+
+    api.delete('/admin/invites/:id', async (req, reply) => {
+      const id = parseId((req.params as { id: string }).id)
+      if (!id) return fail(reply, 404, '邀请码不存在')
+      const r = await revokeInvite(pool, id)
+      if (!r) {
+        // 没吊销成功：可能是已经吊销过，也可能是真不存在
+        const gone = await deleteInvite(pool, id)
+        if (!gone) return fail(reply, 404, '邀请码不存在')
+      }
+      return { ok: true }
     })
 
     api.delete('/admin/devices/:id', async (req, reply) => {

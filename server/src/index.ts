@@ -11,6 +11,8 @@ import { resolveStatsTz, rollupStats } from './stats.ts'
 // adminToken：管理页（/admin）用，不设则 /admin* 全部 404
 export type AppConfig = {
   adminToken?: string
+  /** 登录 / 注册接口每 IP 每分钟次数上限（默认 10） */
+  authRatePerMin?: number
   historyTimeoutMs?: number
   reminderIntervalMs?: number
   watchdogIntervalMs?: number
@@ -38,7 +40,7 @@ export async function buildApp(databaseUrl: string, logLevel = 'info', config: A
   })
   // 先注册 routes（里面有全局鉴权钩子），再注册账号 / 管理接口
   const kick = registerRoutes(app, pool, config)
-  registerAuth(app, pool, kick)
+  registerAuth(app, pool, kick, config.authRatePerMin)
   registerAdmin(app, pool, config.adminToken ?? '', kick)
   // 每小时：先把最近几天沉淀进统计汇总表，再清理过期数据（顺序不能反，否则将被清理的数据来不及沉淀）。两者各自 catch
   const timer = setInterval(async () => {

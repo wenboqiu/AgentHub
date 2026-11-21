@@ -379,7 +379,13 @@ export default function Settings({ cfg, api, notice, onClose, onSaved }: Props) 
             </div>
           </form>
           {msg && <p className="msg">{msg}</p>}
-          <p className="hint">{t("没有注册入口，账号由管理员创建。")}</p>
+          <p className="hint">
+            {t("还没有账号？在浏览器打开")}
+            {" "}
+            <b>{(server.trim().replace(/\/+$/, "") || DEFAULT_SERVER) + "/register"}</b>
+            {" "}
+            {t("，凭邀请码自助注册，再回来登录。")}
+          </p>
         </main>
       </div>
     );
