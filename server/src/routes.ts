@@ -562,13 +562,14 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
   // 新开任务和基于已有会话新开共用同一条创建、广播、发送和失败处理路径。
   // role 只在「任务派活」时给：模型与上下文随 run.start 一起下发给执行器（老版本执行器忽略这两个字段）。
   // prompt 用来把「实际发给 agent 的内容」和「记录里显示的内容」分开（助手在消息前面拼了输出格式契约）。
-  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: Delivery, sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string; modelNote?: string }, prompt?: string) {
+  // kind='internal'：AgentHub 自己开的内部会话（角色助手 / 意见细化），身份落库成稳定字段（sessions.kind）。
+  async function startSession(userId: number, base: Pick<Session,'agent'|'machine'|'cwd'>, title: string, text: string, mode: Delivery, sessionKey: string, taskId?: number, branchPoint?: string, role?: { model: string | null; instructions: string; modelNote?: string }, prompt?: string, kind?: 'internal') {
     const runId = randomUUID(), pendingId = `${base.agent}${PENDING}${runId}`
     const db = await pool.connect()
     let pending: Session, run: Run, message: Message, task: Task | undefined
     try {
       await db.query('BEGIN')
-      pending = await createPendingSession(db,userId,pendingId,base,title)
+      pending = await createPendingSession(db,userId,pendingId,base,title,kind)
       run = await createRun(db,userId,runId,pendingId,base.machine,taskId ?? null,{ model: role?.model ?? null, note: role?.modelNote ?? '' })
       message = await insertMessage(db,userId,pendingId,runId,'user',text)
       if (taskId !== undefined) {
@@ -1001,7 +1002,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
         if (r) {
           // 通知过滤管线（Fast Path）：底层判定可通知后，再过账号规则；静音的照常入列
           // 角色助手的会话不弹通知：人就等在面板前，回话几秒后自己会看到
-          const notify = r.notify && !r.session.title.startsWith(ASSISTANT_TITLE)
+          const notify = r.notify && r.session.kind !== 'internal'
             ? await evaluateNotify(pool, req.userId, { kind:'session', agent:r.session.agent, state:r.session.state as 'done'|'aborted'|'waiting', sessionId:r.session.id })
             : false
           pushSession(req.userId,r.session,notify)
@@ -1020,8 +1021,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
           // 补报的历史（quiet）不生成；角色助手和细化会话本身也不生成，否则「问角色」也会产出一条待办，
           // 细化还会无限套娃。WorkBuddy 的正文只在电脑上：先把这一轮的回复同步进库，再按最新回复攒任务单。
           // 顺序反了就是「任务单先冒出来、最新回复还停在上一轮」，标题也会从旧回复里摘。
-          if (r.session.state === 'done' && !ev.quiet &&
-              !r.session.title.startsWith(ASSISTANT_TITLE) && !r.session.title.startsWith(PROPOSAL_TITLE)) {
+          if (r.session.state === 'done' && !ev.quiet && r.session.kind !== 'internal') {
             const done = r.session
             // 两段式：这一段只攒一条简短建议（标题 + 执行人），不叫模型——
             // 人点「生成任务单」才展开全文并让项目经理细化，省掉「跑完就甩一张看不完的长单」。
@@ -1186,7 +1186,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     })
     const res = await startSession(
       req.userId, { agent: thread.agent, machine: thread.machine, cwd: thread.cwd },
-      `${ASSISTANT_TITLE}${request.slice(0, 40)}`, request, 'fresh', '', undefined, undefined, undefined, prompt,
+      `${ASSISTANT_TITLE}${request.slice(0, 40)}`, request, 'fresh', '', undefined, undefined, undefined, prompt, 'internal',
     )
     await markDispatch(pool, req.userId, res.runId)
     return { thread: await getThread(pool, req.userId), runId: res.runId }
@@ -1591,7 +1591,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     const res = await startSession(
       userId, { agent, machine, cwd },
       `${PROPOSAL_TITLE}${proposal.title.slice(0, 40)}`, prompt, 'fresh', '', undefined, undefined,
-      { model: roleModel(role), instructions: '' }, brief,
+      { model: roleModel(role), instructions: '' }, brief, 'internal',
     )
     await markRefineRun(pool, userId, proposal.id, res.runId)
     return res

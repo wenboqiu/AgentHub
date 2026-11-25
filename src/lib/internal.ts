@@ -2,12 +2,14 @@ import type { Session } from "./api";
 
 // 内部会话：AgentHub 自己开给电脑端 agent 用的——角色助手（一句话造角色）、意见细化（写任务单）。
 // 它们的首条用户消息是 AgentHub 写的契约提示词，不是人说的话，所以：
-//   · 标题由服务端钉住（server/src/session-kind.ts 的 isInternalTitle），不会被提示词原文顶掉；
+//   · 身份由服务端落成稳定字段（sessions.kind = 'internal'），标题被提示词原文顶掉也能认出来；
+//   · 标题仍由服务端钉住（server/src/db.ts applyEvent 的 pinned），不会被提示词原文顶掉；
 //   · 列表里单独收进「内部会话」分组，不混进待处理 / 进行中。
-// 前缀必须与 server/src/session-kind.ts 保持一致，改一处要改两处。
+// 前缀只兜底旧服务端 / 未回填的老数据，必须与 server/src/session-kind.ts 保持一致，改一处要改两处。
 const PREFIXES = ["角色助手：", "意见细化："];
 
-export const isInternalSession = (s: Pick<Session, "title">) => PREFIXES.some((p) => s.title.startsWith(p));
+export const isInternalSession = (s: Pick<Session, "title" | "kind">) =>
+  s.kind === "internal" || PREFIXES.some((p) => s.title.startsWith(p));
 
 /**
  * 列表副标题：取标题，没有标题才退回最后一句话。

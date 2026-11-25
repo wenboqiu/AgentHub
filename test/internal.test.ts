@@ -27,6 +27,12 @@ test('内部会话按服务端前缀认出来（角色助手 / 意见细化）�
   assert.equal(isInternalSession(session({ title: '' })), false);
 });
 
+test('kind 字段优先：标题被契约提示词顶掉的内部会话也能认出来', () => {
+  assert.equal(isInternalSession(session({ kind: 'internal', title: '你在 AgentHub 里当项目经理，负责…' })), true);
+  // 老数据没有 kind：仍然走标题前缀兜底
+  assert.equal(isInternalSession(session({ title: '普通会话' })), false);
+});
+
 test('列表副标题：有标题用标题，没有才退回最后一句话', () => {
   assert.equal(sessionPreview(session({ title: '修好标题', summary: '好的，我看下' })), '修好标题');
   assert.equal(sessionPreview(session({ title: '', summary: '好的，我看下' })), '好的，我看下');

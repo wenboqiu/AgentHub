@@ -242,6 +242,8 @@ export type Session = {
   cwd: string;
   project: string;
   title: string;
+  /** 内部会话：AgentHub 自己开的（角色助手 / 意见细化）。旧服务端没有该字段，前端靠标题前缀兜底 */
+  kind?: "internal";
   state: State;
   summary: string;
   stateSince: string;

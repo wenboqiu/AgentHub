@@ -16,3 +16,6 @@ export const isInternalTitle = (title: string) => PREFIXES.some((p) => title.sta
 
 /** 契约提示词的首行：历史数据里被顶掉标题的老会话靠它认出来，修回友好名 */
 export const CONTRACT_HEADS = ['你在 AgentHub 里当项目经理', '你在 AgentHub 里当「角色顾问」']
+
+/** 迁移回填用：内部会话标题的 LIKE 模式——含被契约提示词顶掉的历史标题（migrateProposals 先修回友好名） */
+export const INTERNAL_TITLE_LIKES = [...PREFIXES, ...CONTRACT_HEADS].map((p) => `${p}%`)

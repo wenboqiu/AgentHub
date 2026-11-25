@@ -18,7 +18,7 @@ import { migrateMandate, pruneMandateDecisions } from './mandate.ts'
 import { migrateDispatchManager } from './dispatch-manager.ts'
 import { migrateInvites } from './invites.ts'
 import { EVENT_DEDUPE_MS, mergeEventMessages, sameKey } from './message-merge.ts'
-import { isInternalTitle } from './session-kind.ts'
+import { isInternalTitle, INTERNAL_TITLE_LIKES } from './session-kind.ts'
 import { migrateStats } from './stats.ts'
 
 export const STATES = ['idle', 'running', 'waiting', 'done', 'aborted', 'ended', 'unknown'] as const
@@ -58,6 +58,8 @@ export type Session = {
   cwd: string
   project: string
   title: string
+  /** internal = AgentHub 自己开的（角色助手 / 意见细化）；normal 不带该字段 */
+  kind?: 'internal'
   state: State
   summary: string
   stateSince: string
@@ -134,6 +136,9 @@ async function createStateTables(pool: { query: pg.Pool['query'] }) {
   )`)
   await pool.query('CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(user_id, updated_at DESC)')
   await pool.query('ALTER TABLE sessions ADD COLUMN IF NOT EXISTS bg_tasks integer NOT NULL DEFAULT 0')
+  // 会话种类：normal = 人 / 采集器正常上报；internal = AgentHub 自己开的（角色助手 / 意见细化）。
+  // 内部身份落成稳定字段，不再靠标题前缀字符串猜——标题是 transcript 首条消息截断，会被契约提示词顶掉。
+  await pool.query("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'normal'")
   await pool.query(`CREATE TABLE IF NOT EXISTS runs (
     id text primary key,
     user_id bigint not null references users(id) on delete cascade,
@@ -238,6 +243,8 @@ export async function migrate(pool: pg.Pool) {
     await migrateAssistant(client)
     // 处理意见挂在会话上（不设外键：会话被清理后意见仍可追溯），自动派发配置引用 roles
     await migrateProposals(client)
+    // 内部会话回填 kind：必须排在 migrateProposals 后面——老数据里被契约提示词顶掉的标题先在那边修回友好名
+    await migrateSessionKind(client)
     await migrateDispatchManager(client)
     // 任务产物引用 tasks；项目近况的表在 migrateProjects 里一起建（同属项目上下文）
     await migrateArtifacts(client)
@@ -257,6 +264,12 @@ export async function migrate(pool: pg.Pool) {
   }
 }
 
+// 内部会话回填 kind 列引入前的老数据：按标题认（含被契约提示词顶掉的历史标题）。
+// 已是 internal 的不动，人改名后的普通会话也不会误伤（改完不再命中模式）。
+async function migrateSessionKind(client: pg.PoolClient) {
+  await client.query(`UPDATE sessions SET kind = 'internal' WHERE kind <> 'internal' AND title LIKE ANY($1::text[])`, [INTERNAL_TITLE_LIKES])
+}
+
 type Row = {
   id: string
   agent: Agent
@@ -264,6 +277,7 @@ type Row = {
   cwd: string
   project: string
   title: string
+  kind: string
   state: State
   summary: string
   state_since: Date
@@ -282,6 +296,7 @@ function toSession(r: Row): Session {
     cwd: r.cwd,
     project: r.project,
     title: r.title,
+    kind: r.kind === 'internal' ? 'internal' : undefined,
     state: r.state,
     summary: r.summary,
     stateSince: r.state_since.toISOString(),
@@ -353,7 +368,8 @@ export async function applyEvent(pool: pg.Pool, userId: number, ev: EventIn): Pr
   const cwd = ev.cwd || cur?.cwd || ''
   // 内部会话（角色助手 / 意见细化）的标题是 startSession 起的名字，钉住不放：本机 transcript 里的
   // 标题是「首条用户消息截 40 字」，而这轮的首条消息正是 AgentHub 写的契约提示词，顶上去就成了提示词原文。
-  const pinned = isInternalTitle(cur?.title ?? '')
+  // 身份以 kind 字段为准；标题前缀兜底兼容采集器抢报（renamePendingSession 还没并回去）或老库没回填的行。
+  const pinned = cur?.kind === 'internal' || isInternalTitle(cur?.title ?? '')
   const title = pinned
     ? cur!.title
     : (['codex', 'doubao', 'workbuddy', 'zcode', 'codebuddy'].includes(ev.agent) ? ev.title : undefined) || cur?.title || ev.title || ''
@@ -428,12 +444,12 @@ export const PENDING_MARK = ':pending-'
 export const isPendingId = (id: string) => id.includes(PENDING_MARK)
 
 // 新开会话：先建一个临时会话（id = <agent>:pending-<runId>），拿到真实 id 后改名
-export async function createPendingSession(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, base: Pick<Session, 'agent' | 'machine' | 'cwd'>, title: string): Promise<Session> {
+export async function createPendingSession(pool: Pick<pg.Pool, 'query'>, userId: number, id: string, base: Pick<Session, 'agent' | 'machine' | 'cwd'>, title: string, kind: 'normal' | 'internal' = 'normal'): Promise<Session> {
   const row = (
     await pool.query<Row>(
-      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, state, summary, state_since, acked, pid, event_at, updated_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'running','',now(),true,null,now(),now()) RETURNING *`,
-      [userId, id, base.agent, base.machine, base.cwd, projectOf(base.cwd), cleanText(title, 200)],
+      `INSERT INTO sessions (user_id, id, agent, machine, cwd, project, title, kind, state, summary, state_since, acked, pid, event_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running','',now(),true,null,now(),now()) RETURNING *`,
+      [userId, id, base.agent, base.machine, base.cwd, projectOf(base.cwd), cleanText(title, 200), kind],
     )
   ).rows[0]
   return toSession(row)
@@ -470,6 +486,10 @@ export async function renamePendingSession(pool: pg.Pool, userId: number, from: 
       const keepPending = !!pending.title
       if (keepPending && real.title !== pending.title) {
         out = (await client.query<Row>('UPDATE sessions SET title = $3 WHERE user_id = $1 AND id = $2 RETURNING *', [userId, to, pending.title])).rows[0]
+      }
+      // 内部身份跟着临时行走：真实行是采集器抢报的，永远是 normal
+      if (pending.kind === 'internal' && real.kind !== 'internal') {
+        out = (await client.query<Row>("UPDATE sessions SET kind = 'internal' WHERE user_id = $1 AND id = $2 RETURNING *", [userId, to])).rows[0]
       }
       // 同一个会话只算一次新建：保留下来的真实行取两者较早的首次出现时间（LEAST 忽略 NULL）
       await client.query(
