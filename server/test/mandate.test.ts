@@ -188,8 +188,8 @@ describe('Mandate', () => {
     // 范围外 / danger：照旧建审批行，带 in_scope=false，并推给人
     ask(ex, runId, 'Write', 'docs/b.md\nhi', 11)
     ask(ex, runId, 'Bash', 'rm -rf build', 12)
-    // 审批行先建、再打标：等两条都打完标
-    const rows = await until(async () => { const r = await approvals(sessionId); return r.length === 2 && r.every(x => x.in_scope === false) ? r : undefined })
+    // 审批行先建、再打标：in_scope 与 decision_tier 分两步写，等两样都落地（下面 224 行同款）
+    const rows = await until(async () => { const r = await approvals(sessionId); return r.length === 2 && r.every(x => x.in_scope === false && x.decision_tier) ? r : undefined })
     assert.ok(rows.every(r => r.status === 'pending' && r.in_scope === false && r.mandate_id !== null), JSON.stringify(rows))
     assert.deepEqual(rows.map(r => r.decision_tier).sort(), ['danger', 'gray'])
     await until(() => v.msgs.filter(m => m.type === 'approval' && m.approval.sessionId === sessionId).length === 2)

@@ -14,9 +14,10 @@ describe('通知两级过滤管线', () => {
     const r = await app.inject({ method: method as any, url: path, headers: { authorization: `Bearer ${token}` }, ...(body === undefined ? {} : { payload: body as any }) })
     return { status: r.statusCode, body: r.json() }
   }
-  // 等一条满足条件的 WS 消息（最多 8 秒；全量并行时定时器测试会被资源竞争拖慢）
+  // 等一条满足条件的 WS 消息（最多 30 秒；全量并行时定时器测试会被资源竞争拖慢——
+  // 几个套件共用一条到远程测试库的连接，watchdog 扫残留会话时隧道会被打满）
   async function waitFor<T>(msgs: any[], pred: (m: any) => boolean): Promise<T> {
-    const until = Date.now() + 8000
+    const until = Date.now() + 30_000
     for (;;) {
       const found = msgs.findLast(pred)
       if (found) return found as T

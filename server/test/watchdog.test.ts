@@ -15,7 +15,8 @@ describe('Watchdog 检测回路', () => {
     return { status: r.statusCode, body: r.json() }
   }
   async function waitFor(msgs: any[], pred: (m: any) => boolean): Promise<any> {
-    const until = Date.now() + 8000
+    // 30 秒：全量并行时几个套件共用一条到远程测试库的连接，watchdog 扫残留会话会把隧道打满
+    const until = Date.now() + 30_000
     for (;;) {
       const found = msgs.findLast(pred)
       if (found) return found

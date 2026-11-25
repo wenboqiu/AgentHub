@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node src/index.ts",
     "check": "tsc --noEmit",
-    "test": "node --test --test-concurrency=4 \"test/*.test.ts\""
+    "test": "node --experimental-strip-types test/clean-db.ts && node --test --test-concurrency=2 \"test/*.test.ts\""
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",

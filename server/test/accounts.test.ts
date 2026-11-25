@@ -99,7 +99,7 @@ describe('账号：登录、设备、改密码', () => {
     assert.equal(old.body.error, '登录已过期，请重新登录')
   })
 
-  it('登录：正确返回 token；错密码和不存在的邮箱 401 且文案相同；没有注册接口', async () => {
+  it('登录：正确返回 token；错密码和不存在的邮箱 401 且文案相同；注册没邀请码 400', async () => {
     const u = await makeUser(pool)
     const ok = await s.call('POST', '/auth/login', { email: u.email.toUpperCase(), password: PASSWORD, device: 'LAPTOP（电脑）' })
     assert.equal(ok.status, 200)
@@ -115,8 +115,9 @@ describe('账号：登录、设备、改密码', () => {
     // 库里只存哈希，不存原 token
     const rows = await pool.query('SELECT token_hash FROM auth_sessions WHERE user_id = $1', [u.id])
     assert.ok(rows.rows.every(r => r.token_hash !== ok.body.token))
-    assert.equal((await s.call('POST', '/auth/register', { email: 'x@test.dev', password: 'password123' })).status, 404)
-    assert.equal((await s.call('POST', '/auth/register', { email: 'x@test.dev', password: 'password123' }, u.token)).status, 404)
+    // 邀请码注册上线（9e13070）后 /auth/register 是真路由：没带邀请码是 400，不再 404
+    assert.equal((await s.call('POST', '/auth/register', { email: 'x@test.dev', password: 'password123' })).status, 400)
+    assert.equal((await s.call('POST', '/auth/register', { email: 'x@test.dev', password: 'password123' }, u.token)).status, 400)
   })
 
   it('登录限流：同一 IP 每分钟 10 次，之后 429', async () => {

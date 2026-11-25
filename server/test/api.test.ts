@@ -36,6 +36,16 @@ describe('AgentHub 服务端', () => {
     ...extra,
   })
   const send = (events: unknown[]) => call('POST', '/events', { events })
+  // 等一条满足条件的 WS 广播：并发全量时别的套件占着资源，固定 sleep 偶尔等不到
+  async function waitForMsg(msgs: any[], pred: (m: any) => boolean, ms = 30_000): Promise<any> {
+    const until = Date.now() + ms
+    for (;;) {
+      const found = msgs.find(pred)
+      if (found) return found
+      if (Date.now() > until) throw new Error('等待广播超时')
+      await new Promise(r => setTimeout(r, 10))
+    }
+  }
   async function get(id: string) {
     const r = await call('GET', '/sessions?all=1')
     return (r.body.sessions as any[]).find(s => s.id === id)
@@ -69,12 +79,15 @@ describe('AgentHub 服务端', () => {
     const msgs: any[] = []
     ws.onmessage = e => msgs.push(JSON.parse(String(e.data)))
     await new Promise(r => (ws.onopen = r))
-    await new Promise(r => setTimeout(r, 200))
-    assert.equal(msgs[0].type, 'snapshot')
+    assert.equal((await waitForMsg(msgs, m => m.type === 'snapshot')).type, 'snapshot')
 
     await send([ev(s, 'running', { title: '你好', at: iso(-3000) })])
     await send([ev(s, 'done', { summary: '搞定了', at: iso(-2000) })])
-    await new Promise(r => setTimeout(r, 200))
+    // 两条 session 广播都到齐再取（running 先入 serial 链，顺序有保证）
+    const gotBoth = Date.now() + 30_000
+    while (msgs.filter(m => m.type === 'session' && m.session.id === `claude:${s}`).length < 2 && Date.now() < gotBoth) {
+      await new Promise(r => setTimeout(r, 10))
+    }
     const done = msgs.filter(m => m.type === 'session' && m.session.id === `claude:${s}`)
     assert.equal(done.length, 2)
     assert.equal(done[0].notify, false)
@@ -170,8 +183,7 @@ describe('AgentHub 服务端', () => {
     ws.onmessage = e => msgs.push(JSON.parse(String(e.data)))
     await new Promise(r => (ws.onopen = r))
     await send([ev(s, 'done', { quiet: true })])
-    await new Promise(r => setTimeout(r, 200))
-    const m = msgs.find(m => m.type === 'session' && m.session.id === `claude:${s}`)
+    const m = await waitForMsg(msgs, m2 => m2.type === 'session' && m2.session.id === `claude:${s}`)
     assert.equal(m.notify, false)
     assert.equal(m.session.acked, true)
     ws.close()

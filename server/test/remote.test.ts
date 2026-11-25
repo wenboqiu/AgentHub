@@ -448,11 +448,13 @@ describe('远程控制', () => {
     await waitFor(() => find(ex, 'run.start'))
     for (let i = 0; i < 210; i++) sendJson(ex, { type: 'run.message', runId, role: 'assistant', text: `m${i}` })
     sendJson(ex, { type: 'run.status', runId, status: 'done' })
-    // 轮询到 run 结束（说明前面的消息都已处理）
+    // 轮询到 run 结束（说明前面的消息都已处理）。远程库（SSH 隧道）每条消息入库要几百毫秒，
+    // 210 条要几十秒：固定次数的轮询会被拖穿，后面的用例还会被积压的 serial 链连坐，按截止时间等。
     let q: any
-    for (let i = 0; i < 100; i++) {
+    const doneBy = Date.now() + 120_000
+    for (;;) {
       q = await call('GET', `/sessions/${encodeURIComponent(id)}/messages?limit=500`)
-      if (q.body.run.status === 'done') break
+      if (q.body.run.status === 'done' || Date.now() > doneBy) break
       await sleep(50)
     }
     assert.equal(q.body.run.status, 'done')
