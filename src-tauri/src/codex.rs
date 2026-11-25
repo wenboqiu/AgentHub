@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 const POLL: Duration = Duration::from_secs(2);
+/// mtime 在这个窗口内的文件才算「还活着」：更早的视为已结束，重扫时跳过不读
 const RECENT: Duration = Duration::from_secs(24 * 3600);
+/// 每 N 轮做一次全量重扫（N×POLL）。日期目录按会话创建日归档，续聊只往老目录里的文件追加，
+/// 轻扫只看最近几天的目录会漏掉还在用的老会话；重扫补上这块，新会话仍由轻扫即时发现。
+const RESCAN_TICKS: u32 = 10;
 
 #[derive(Debug, PartialEq)]
 pub enum Line {
@@ -178,9 +182,10 @@ fn activity_ms(line: &str) -> Option<i64> {
     ms_of_iso(v.get("timestamp")?.as_str()?)
 }
 
-fn session_dirs(root: &Path) -> Vec<PathBuf> {
+/// 最近 `days` 天的日期目录
+fn session_dirs(root: &Path, days: u64) -> Vec<PathBuf> {
     let today = chrono::Local::now().date_naive();
-    (0..3)
+    (0..days)
         .map(|d| today - chrono::Days::new(d))
         .map(|day| {
             use chrono::Datelike;
@@ -190,11 +195,29 @@ fn session_dirs(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-fn recent_rollouts(root: &Path) -> Vec<PathBuf> {
-    let now = SystemTime::now();
+/// 全部日期目录：不按日期截断，老目录里的文件也可能还在被续聊
+fn all_session_dirs(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(years) = std::fs::read_dir(root) else { return out };
+    for y in years.flatten() {
+        let Ok(months) = std::fs::read_dir(y.path()) else { continue };
+        for m in months.flatten() {
+            let Ok(days) = std::fs::read_dir(m.path()) else { continue };
+            for d in days.flatten() {
+                if d.path().is_dir() {
+                    out.push(d.path());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 目录集合里的 rollout 文件，只保留 RECENT 窗口内改过的
+fn rollouts_in(dirs: &[PathBuf], now: SystemTime) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for dir in session_dirs(root) {
-        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
         for e in rd.flatten() {
             let p = e.path();
             let name = e.file_name().to_string_lossy().into_owned();
@@ -212,6 +235,16 @@ fn recent_rollouts(root: &Path) -> Vec<PathBuf> {
         }
     }
     files
+}
+
+/// 轻扫：最近三天的日期目录。新会话都落在这三个目录里，每轮都扫，保证即时发现
+fn recent_rollouts(root: &Path) -> Vec<PathBuf> {
+    rollouts_in(&session_dirs(root, 3), SystemTime::now())
+}
+
+/// 重扫：全部日期目录。老会话复活（续聊）时文件还在老目录里，只有走到这里才能被重新发现
+fn all_rollouts(root: &Path) -> Vec<PathBuf> {
+    rollouts_in(&all_session_dirs(root), SystemTime::now())
 }
 
 /// 文件名 rollout-<时间>-<uuid>.jsonl 里取 uuid（后 36 个字符），仅在没读到 session_meta 时兜底
@@ -248,10 +281,18 @@ pub fn spawn(fwd: Forwarder) {
     let Some(root) = home_dir().map(|h| h.join(".codex").join("sessions")) else { return };
     std::thread::spawn(move || {
         let mut files: HashMap<PathBuf, FileState> = HashMap::new();
+        let mut tick: u32 = 0;
         loop {
+            tick = tick.wrapping_add(1);
             let names = root.parent().and_then(|p| std::fs::read_to_string(p.join("session_index.jsonl")).ok())
                 .map(|s| crate::reconcile::titles(&s)).unwrap_or_default();
-            for path in recent_rollouts(&root) {
+            // 重扫轮直接用全量结果替换轻扫结果（全量是轻扫的超集），已跟踪文件的 offset 在 map 里不会丢
+            let paths = if tick == 1 || tick % RESCAN_TICKS == 0 {
+                all_rollouts(&root)
+            } else {
+                recent_rollouts(&root)
+            };
+            for path in paths {
                 let first = !files.contains_key(&path);
                 let st = files.entry(path.clone()).or_insert_with(|| FileState::new(id_from_name(&path)));
                 if let Some(name) = st.session_id.as_ref().and_then(|id| names.get(id)) {
@@ -408,6 +449,42 @@ mod tests {
         // 上报后清空：状态没变时不会凭空再带一份
         let more = st.feed(&[START], false, "2026-10-31T01:06:00.000Z");
         assert!(more.iter().all(|e| e.buckets.is_empty()));
+    }
+
+    #[test]
+    fn rescan_reaches_active_rollouts_in_old_date_dirs() {
+        // rollout 按创建日期归档，续聊只往老文件追加：老目录里 mtime 还热的文件
+        // 轻扫看不见（这正是当初漏掉持续使用的老会话的洞），重扫必须捞回来
+        let root = std::env::temp_dir().join(format!("agenthub-cx-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        use chrono::Datelike;
+        let today = chrono::Local::now().date_naive();
+        let new_dir = root.join(format!("{:04}", today.year())).join(format!("{:02}", today.month())).join(format!("{:02}", today.day()));
+        let old = today - chrono::Months::new(12);
+        let old_dir = root.join(format!("{:04}", old.year())).join(format!("{:02}", old.month())).join(format!("{:02}", old.day()));
+        std::fs::create_dir_all(&new_dir).unwrap();
+        std::fs::create_dir_all(&old_dir).unwrap();
+        let fresh_new = new_dir.join("rollout-new.jsonl");
+        let fresh_old = old_dir.join("rollout-resumed.jsonl");
+        let dead = old_dir.join("rollout-dead.jsonl");
+        std::fs::write(&fresh_new, "").unwrap();
+        std::fs::write(&fresh_old, "").unwrap();
+        std::fs::write(&dead, "").unwrap();
+        // dead 冷了三天：不该被任何一轮扫到
+        let f = std::fs::File::options().write(true).open(&dead).unwrap();
+        f.set_modified(SystemTime::now() - Duration::from_secs(3 * 86400)).unwrap();
+        drop(f);
+
+        let recent = recent_rollouts(&root);
+        assert!(recent.contains(&fresh_new), "轻扫要看到新目录里的文件");
+        assert!(!recent.contains(&fresh_old), "轻扫看不到老目录——轻扫本来就不负责这里");
+
+        let all = all_rollouts(&root);
+        assert!(all.contains(&fresh_new));
+        assert!(all.contains(&fresh_old), "重扫必须捞回老目录里还在续聊的文件");
+        assert!(!all.contains(&dead), "冷掉的老文件不该被重扫捞回来");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
