@@ -19,7 +19,7 @@ import Icon from "./Icon";
 import Markdown from "./Markdown";
 import { AGENT_LABEL, isListenOnly } from "./lib/agents";
 import { ago } from "./lib/time";
-import { isInternalSession } from "./lib/internal";
+import { isInternalSession, sessionPreview } from "./lib/internal";
 import StatsView from "./StatsView";
 import { loadAvatarPrefs, setAvatarPrefs } from "./lib/avatars";
 import { t, useLang } from "./lib/i18n";
@@ -52,20 +52,23 @@ function sinceText(s: Session, now: number): string {
 
 // 通知都带上「点了要跳到哪」，点击后由 onNotificationClick 里统一处理
 function notifyDesktop(s: Session) {
+  // 正文走 sessionPreview：agent 收尾发言是一段机器 JSON（如 Codex 自动审批裁决）时不贴原文
+  const body = sessionPreview(s) || s.title;
   return pushNotification(
     `${s.project || t("会话")} · ${AGENT_LABEL[s.agent]} ${t(ALERT_LABEL[s.state] ?? "")}`.trim(),
-    (s.summary || s.title).slice(0, 80),
+    body.slice(0, 80),
     { kind: "session", id: s.id },
   );
 }
 
 /** Watchdog 升级提醒：只提醒不干预 */
 function notifyWatchdog(issue: "stall" | "abort-spree", s: Session) {
+  const brief = (sessionPreview(s) || s.title).slice(0, 50);
   return pushNotification(
     `${s.project || t("会话")} · ${AGENT_LABEL[s.agent]} ${issue === "stall" ? t("可能卡住了") : t("反复失败")}`,
     issue === "stall"
-      ? t("运行中超过 45 分钟没有新事件，点开看看要不要处理。{brief}", { brief: (s.summary || s.title).slice(0, 50) })
-      : t("短时间内多次中断，点开看看要不要处理。{brief}", { brief: (s.summary || s.title).slice(0, 50) }),
+      ? t("运行中超过 45 分钟没有新事件，点开看看要不要处理。{brief}", { brief })
+      : t("短时间内多次中断，点开看看要不要处理。{brief}", { brief }),
     { kind: "session", id: s.id },
   );
 }

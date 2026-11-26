@@ -18,7 +18,9 @@ const RESCAN_TICKS: u32 = 10;
 
 #[derive(Debug, PartialEq)]
 pub enum Line {
-    Meta { session_id: Option<String>, cwd: String },
+    /// guardian = Codex Desktop 的自动审批守护线程（thread_source: guardian_review）：
+    /// 只产出一段 JSON 风控裁决，不是真对话，整份 rollout 不该登记成会话
+    Meta { session_id: Option<String>, cwd: String, guardian: bool },
     Status { state: &'static str, summary: Option<String>, at: String },
     UserText(String),
 }
@@ -41,6 +43,7 @@ pub fn parse_line(line: &str) -> Option<Line> {
             // 之后按这个 key 找 rollout、按这个 id 查显示名都会错位。
             session_id: p.get("id").or_else(|| p.get("session_id")).and_then(|s| s.as_str()).map(String::from),
             cwd: p.get("cwd").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+            guardian: p.get("thread_source").and_then(|s| s.as_str()) == Some("guardian_review"),
         }),
         "event_msg" => match p.get("type")?.as_str()? {
             "task_started" => Some(Line::Status { state: "running", summary: None, at }),
@@ -76,6 +79,8 @@ pub struct FileState {
     session_id: Option<String>,
     cwd: String,
     title: Option<String>,
+    /// session_meta 标了 guardian_review：整份文件静音，一个事件都不上报
+    guardian: bool,
     /// 还没随事件上报的消息时间戳（ms）：时间轴的活动分段与对话跨度靠它
     pending: Vec<i64>,
 }
@@ -110,7 +115,10 @@ impl FileState {
                 }
             }
             match parse_line(l) {
-                Some(Line::Meta { session_id, cwd }) => {
+                Some(Line::Meta { session_id, cwd, guardian }) => {
+                    if guardian {
+                        self.guardian = true;
+                    }
                     if session_id.is_some() {
                         self.session_id = session_id;
                     }
@@ -130,6 +138,12 @@ impl FileState {
                 }
                 None => {}
             }
+        }
+        if self.guardian {
+            // 自动审批守护线程：没有人类可读的内容（收尾是一段 JSON 裁决），
+            // 登记成会话只会多一条噪音记录、弹一条费解的通知，全程静音
+            self.pending.clear();
+            return Vec::new();
         }
         if first {
             // 只保留最终状态；一个状态都没有就以 idle 登记会话
@@ -379,7 +393,7 @@ mod tests {
 
     #[test]
     fn parses_known_lines_and_ignores_others() {
-        assert_eq!(parse_line(META), Some(Line::Meta { session_id: Some("abc-123".into()), cwd: "D:\\Work2\\Demo".into() }));
+        assert_eq!(parse_line(META), Some(Line::Meta { session_id: Some("abc-123".into()), cwd: "D:\\Work2\\Demo".into(), guardian: false }));
         assert_eq!(parse_line(USER), Some(Line::UserText("帮我修个 bug".into())));
         // AGENTS.md 指令全文也是 response_item，但不能当标题
         let agents = r##"{"timestamp":"2026-10-31T01:00:01.000Z","ordinal":1,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions <INSTRUCTIONS> # 全局偏好"},{"type":"input_text","text":"新建图标"}]}}"##;
@@ -399,13 +413,27 @@ mod tests {
         // Codex Desktop 0.169+：fork 出来的子线程里 session_id 是父线程 id，
         // payload.id / 文件名 / session_index.jsonl / state_5.sqlite 才是本线程 id。
         let fork = r#"{"timestamp":"2026-11-18T10:00:00.000Z","type":"session_meta","payload":{"id":"child-1","session_id":"parent-1","parent_thread_id":"parent-1","cwd":"D:/Work","originator":"Codex Desktop"}}"#;
-        assert_eq!(parse_line(fork), Some(Line::Meta { session_id: Some("child-1".into()), cwd: "D:/Work".into() }));
+        assert_eq!(parse_line(fork), Some(Line::Meta { session_id: Some("child-1".into()), cwd: "D:/Work".into(), guardian: false }));
         // 旧格式只有 session_id 时仍能登记
-        assert_eq!(parse_line(META), Some(Line::Meta { session_id: Some("abc-123".into()), cwd: "D:\\Work2\\Demo".into() }));
+        assert_eq!(parse_line(META), Some(Line::Meta { session_id: Some("abc-123".into()), cwd: "D:\\Work2\\Demo".into(), guardian: false }));
         let mut st = FileState::new(Some("child-1".into()));
         let evs = st.feed(&[fork, DONE], true, "now");
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].session_id, "child-1");
+    }
+
+    #[test]
+    fn guardian_review_thread_is_not_a_session() {
+        // Codex Desktop 0.171+：放开动作前 fork 一个只跑一轮的守护线程做自动审批，
+        // meta 里 thread_source = guardian_review，收尾 last_agent_message 是一段 JSON 裁决。
+        // 这种文件不该登记成会话（否则列表多一条噪音、通知弹出费解的 JSON）。
+        let guardian = r#"{"timestamp":"2026-11-25T06:27:21.774Z","type":"session_meta","payload":{"id":"child-2","session_id":"parent-2","parent_thread_id":"parent-2","cwd":"D:\\Work2\\xiuxian","originator":"Codex Desktop","thread_source":"guardian_review","source":{"subagent":{"other":"guardian"}}}}"#;
+        assert_eq!(parse_line(guardian), Some(Line::Meta { session_id: Some("child-2".into()), cwd: "D:\\Work2\\xiuxian".into(), guardian: true }));
+        for first in [false, true] {
+            let mut st = FileState::new(Some("child-2".into()));
+            let evs = st.feed(&[guardian, START, DONE], first, "now");
+            assert!(evs.is_empty(), "守护线程一个事件都不上报（first={first}）");
+        }
     }
 
     #[test]

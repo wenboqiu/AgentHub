@@ -23,3 +23,9 @@ src-tauri/gen/android/local.properties
 src-tauri/gen/android/app/tauri.properties
 src-tauri/gen/android/app/src/main/jniLibs
 keystore.properties
+
+# 发布安装包（release-uploader 产物）
+packages/
+
+# 发布安装包（release-uploader 产物）
+packages/
