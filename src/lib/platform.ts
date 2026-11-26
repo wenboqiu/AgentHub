@@ -65,7 +65,10 @@ export const isDesktop = !isAndroid && "__TAURI_INTERNALS__" in window;
 export const native = (): NativeBridge | undefined => window.AgentHubNative;
 
 const LS_KEY = "agenthub.config";
-const defaults: Config = { serverUrl: "", token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low", hookRemoteApprove: false, hookRemoteAllow: false };
+// 浏览器（http/https 页面）访问时默认同源：服务端托管 Web 前端后，打开即用，不用填服务端地址。
+// Android WebView 的 origin 不是 http/https，维持留空走手动填写。
+const webOrigin = !isDesktop && /^https?:$/.test(window.location.protocol) ? window.location.origin : "";
+const defaults: Config = { serverUrl: webOrigin, token: "", machine: "", notifyDesktop: true, email: "", deniedRoots: [], remoteEnabled: true, graphMode: true, zcodeAutoApprove: "low", hookRemoteApprove: false, hookRemoteAllow: false };
 
 /**
  * 气泡图改成默认之后的一次性迁移：老配置里 graphMode 基本是「没选过」的 false，

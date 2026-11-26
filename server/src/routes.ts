@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { FastifyInstance, FastifyRequest } from 'fastify'
 import type pg from 'pg'
+import { isWebPath } from './web.ts'
 import {
   AGENTS,
   MESSAGE_ROLES,
@@ -972,7 +973,7 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     pushSession(userId, s, notify)
   }
 
-  // 鉴权：/health、/auth/login、/auth/register、/register 页面、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）免登录；其它都要设备会话 token
+  // 鉴权：/health、/auth/login、/auth/register、/register 页面、/admin 页面和 /admin/* 接口（它们自己有 adminGuard）、Web 前端静态路径免登录；其它都要设备会话 token
   app.decorateRequest('userId', 0)
   app.decorateRequest('authSessionId', 0)
   app.addHook('onRequest', async (req, reply) => {
@@ -980,6 +981,8 @@ export function registerRoutes(app: FastifyInstance, pool: pg.Pool, opts: RouteO
     if (req.method === 'OPTIONS' || req.is404) return
     const path = req.url.split('?')[0]
     if (path === '/health' || path === '/auth/login' || path === '/auth/register' || path === '/register' || path === '/admin' || path.startsWith('/admin/')) return
+    // Web 前端（只放行确切的前端路径，静态目录之外的未知路径照样 404，不放大免鉴权面）
+    if (isWebPath(path)) return
     const isWs = path === '/ws'
     const token = isWs ? new URL(req.url, 'http://x').searchParams.get('token') : bearer(req)
     const r = await authenticate(pool, token)

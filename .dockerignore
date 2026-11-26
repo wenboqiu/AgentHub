@@ -1,0 +1,18 @@
+# 根目录 Dockerfile（完整构建）的构建上下文排除清单
+node_modules
+**/node_modules
+dist
+packages
+artifacts.local
+*.local
+src-tauri
+server/node_modules
+server/test
+docs
+assets
+test
+scripts
+.github
+*.md
+debug.log
+.git

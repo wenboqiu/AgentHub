@@ -10,6 +10,11 @@ Node + Fastify + pg + `@fastify/websocket`。Node 24 直接运行 `.ts`（本机
 | `ADMIN_TOKEN` | 否 | 空 | 管理页 `/admin` 和 `/admin/*` 接口用的令牌（`Authorization: Bearer`）。**不设则 `/admin*` 全部 404**，也就没法建账号 |
 | `PORT` | 否 | `3000` | 监听端口 |
 | `LOG_LEVEL` | 否 | `info` | pino 日志级别 |
+| `WEB_DIST_DIR` | 否 | 自动探测 | Web 前端产物目录（`index.html` + `assets/`，即仓库根目录 `npm run build` 的 `dist/`）。默认依次探测仓库 `dist/` 与镜像里的 `web/`；都找不到则不托管，纯 API 模式 |
+
+## Web 端访问（0.20.0 起）
+
+服务端能直接托管 Web 前端：仓库根目录 `npm run build` 出 `dist/` 后，启动服务端即自动启用（本地源码运行自动找到 `../dist`；Docker 部署先把 `dist/` 拷成 `server/web/` 再构建，或用 `WEB_DIST_DIR` 指到挂载目录）。浏览器打开服务端地址就是完整客户端——同源免配置（登录表单预填当前域名），账号与桌面端、手机端共用一套，数据实时互通。桌面专属功能（本机采集、远程执行、豆包、终端跳转等）在 Web 端自动隐藏。
 
 ## 接口
 

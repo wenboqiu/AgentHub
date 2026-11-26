@@ -5,6 +5,7 @@ import { createPool, migrate, purgeOld } from './db.ts'
 import { registerRoutes } from './routes.ts'
 import { registerAuth } from './auth.ts'
 import { registerAdmin } from './admin.ts'
+import { registerWeb } from './web.ts'
 import { TaskError } from './tasks.ts'
 import { resolveStatsTz, rollupStats } from './stats.ts'
 
@@ -38,6 +39,8 @@ export async function buildApp(databaseUrl: string, logLevel = 'info', config: A
     req.log.error(err)
     return reply.code(500).send({ error: '服务器出错了' })
   })
+  // Web 前端（dist/ 存在才启用）：路由本身不鉴权，由 routes.ts 的钩子放行静态路径
+  await registerWeb(app)
   // 先注册 routes（里面有全局鉴权钩子），再注册账号 / 管理接口
   const kick = registerRoutes(app, pool, config)
   registerAuth(app, pool, kick, config.authRatePerMin)
